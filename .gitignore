@@ -1,0 +1,9 @@
+.env
+.env.*
+supabase/.env
+supabase/seed.local.backup.sql
+node_modules/
+dist/
+build/
+.vite/
+.DS_Store

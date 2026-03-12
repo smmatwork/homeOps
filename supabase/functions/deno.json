@@ -1,0 +1,10 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "react/jsx-runtime": "npm:react/jsx-runtime"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom"],
+    "jsx": "react-jsx"
+  }
+}
