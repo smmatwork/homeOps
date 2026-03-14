@@ -1,8 +1,6 @@
 import { createTheme } from "@mui/material/styles";
- 
 
-// Configure typography to use a standard Roboto font stack.
-const fontFamily = '"Roboto","Helvetica","Arial",sans-serif';
+const fontFamily = 'Roboto, "Helvetica", "Arial", sans-serif';
 
 // Create a Material-UI theme with custom styles
 const theme = createTheme({

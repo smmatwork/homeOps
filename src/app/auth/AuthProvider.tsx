@@ -51,7 +51,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .limit(1);
 
     if (error) {
-      setLastError("We couldn't load your home details right now. Please try again.");
+      const msg = error?.message ? String(error.message) : "";
+      setLastError(
+        `We couldn't load your home details right now. Please try again.${msg ? ` (${msg})` : ""}`,
+      );
       return;
     }
     const next = data?.[0]?.household_id ? String(data[0].household_id) : "";
@@ -128,9 +131,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             : text || res.statusText;
 
         if (res.status === 401) {
-          await signOut();
-          setLastError("Your login has expired. Please log in again.");
-          return { ok: false as const, error: "Your login has expired. Please log in again." };
+          const friendly =
+            "We couldn't verify your login with the server (401). This usually happens when the app is pointing to a different Supabase project/keys than the server. Please check your .env (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY) and supabase/functions/.env (SB_URL / SB_SERVICE_ROLE_KEY), then try again.";
+          setLastError(friendly);
+          return { ok: false as const, error: msg || friendly };
         }
 
         setLastError("We couldn't set up your home. Please try again.");

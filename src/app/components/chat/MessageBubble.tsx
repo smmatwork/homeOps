@@ -54,8 +54,59 @@ export function MessageBubble({ role, content, timestamp, streaming }: MessageBu
     return { hasToolCalls, hasJsonBlock, without: withoutJson };
   }, [content]);
 
-  // Hide tool-call messages entirely. We'll show the real DB-backed summary that gets appended after execution.
-  if (!isUser && (parsed.hasToolCalls || parsed.hasJsonBlock)) return null;
+  // Hide tool-call / JSON-only messages entirely. If there's user-facing text outside the JSON block, render that.
+  // We'll show the DB-backed summary after tool execution.
+  if (!isUser && (parsed.hasToolCalls || parsed.hasJsonBlock) && !parsed.without) {
+    if (streaming) {
+      return (
+        <Stack
+          direction={isUser ? "row-reverse" : "row"}
+          spacing={1.5}
+          alignItems="flex-end"
+          sx={{ mb: 2 }}
+        >
+          <Avatar
+            sx={{
+              width: 32,
+              height: 32,
+              bgcolor: isUser ? "grey.400" : "primary.main",
+              flexShrink: 0,
+            }}
+          >
+            <SmartToy sx={{ fontSize: 18 }} />
+          </Avatar>
+          <Box
+            sx={{
+              maxWidth: "72%",
+              bgcolor: "secondary.main",
+              color: "text.primary",
+              borderRadius: "18px",
+              borderTopLeftRadius: "4px",
+              px: 2,
+              py: 1.5,
+            }}
+          >
+            <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", lineHeight: 1.65, wordBreak: "break-word" }}>
+              Setting up your home profile…
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-block",
+                  width: "2px",
+                  height: "1em",
+                  bgcolor: "text.primary",
+                  ml: "2px",
+                  verticalAlign: "text-bottom",
+                  animation: `${blinkCursor} 0.8s step-start infinite`,
+                }}
+              />
+            </Typography>
+          </Box>
+        </Stack>
+      );
+    }
+    return null;
+  }
 
   return (
     <Stack

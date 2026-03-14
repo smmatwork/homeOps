@@ -5,6 +5,7 @@ import {
   Alarm,
   MenuBook,
   BarChart,
+  Home,
   FormatListBulleted,
   Groups,
   NotificationsActive,
@@ -30,9 +31,22 @@ const QUICK_COMMANDS: QuickAction[] = [
 interface QuickActionsPanelProps {
   onQuickAction: (prompt: string) => void;
   alertCount?: number;
+  onCreateHomeProfile?: () => void;
+  onReviewHomeProfile?: () => void;
+  onGenerateCoverage?: () => void;
+  onRecommendChores?: () => void;
+  homeProfileExists?: boolean;
 }
 
-export function QuickActionsPanel({ onQuickAction, alertCount = 3 }: QuickActionsPanelProps) {
+export function QuickActionsPanel({
+  onQuickAction,
+  alertCount = 3,
+  onCreateHomeProfile,
+  onReviewHomeProfile,
+  onGenerateCoverage,
+  onRecommendChores,
+  homeProfileExists = false,
+}: QuickActionsPanelProps) {
   const navigate = useNavigate();
 
   return (
@@ -55,6 +69,108 @@ export function QuickActionsPanel({ onQuickAction, alertCount = 3 }: QuickAction
         />
         <CardContent sx={{ pt: 0 }}>
           <Stack spacing={0.75}>
+            <Button
+              variant="outlined"
+              fullWidth
+              size="small"
+              startIcon={<Home fontSize="small" />}
+              disabled={!onReviewHomeProfile}
+              onClick={() => onReviewHomeProfile?.()}
+              sx={{
+                justifyContent: "flex-start",
+                textTransform: "none",
+                fontSize: "0.82rem",
+                borderRadius: "8px",
+                color: "text.primary",
+                borderColor: "divider",
+                "&:hover": {
+                  borderColor: "primary.main",
+                  bgcolor: "grey.50",
+                },
+              }}
+            >
+              Review home profile
+            </Button>
+
+            {onGenerateCoverage ? (
+              <Button
+                variant="outlined"
+                fullWidth
+                size="small"
+                startIcon={<BarChart fontSize="small" />}
+                onClick={() => onGenerateCoverage()}
+                sx={{
+                  justifyContent: "flex-start",
+                  textTransform: "none",
+                  fontSize: "0.82rem",
+                  borderRadius: "8px",
+                  color: "text.primary",
+                  borderColor: "divider",
+                  "&:hover": {
+                    borderColor: "primary.main",
+                    bgcolor: "grey.50",
+                  },
+                }}
+              >
+                Generate coverage
+              </Button>
+            ) : null}
+
+            {onRecommendChores ? (
+              <Button
+                variant="outlined"
+                fullWidth
+                size="small"
+                startIcon={<AddTask fontSize="small" />}
+                onClick={() => onRecommendChores()}
+                sx={{
+                  justifyContent: "flex-start",
+                  textTransform: "none",
+                  fontSize: "0.82rem",
+                  borderRadius: "8px",
+                  color: "text.primary",
+                  borderColor: "divider",
+                  "&:hover": {
+                    borderColor: "primary.main",
+                    bgcolor: "grey.50",
+                  },
+                }}
+              >
+                Recommend chores
+              </Button>
+            ) : null}
+
+            {!homeProfileExists && (
+              <Button
+                variant="outlined"
+                fullWidth
+                size="small"
+                startIcon={<Home fontSize="small" />}
+                disabled={!onCreateHomeProfile && !onQuickAction}
+                onClick={() => {
+                  if (onCreateHomeProfile) {
+                    onCreateHomeProfile();
+                    return;
+                  }
+                  onQuickAction("Generate my home profile");
+                }}
+                sx={{
+                  justifyContent: "flex-start",
+                  textTransform: "none",
+                  fontSize: "0.82rem",
+                  borderRadius: "8px",
+                  color: "text.primary",
+                  borderColor: "divider",
+                  "&:hover": {
+                    borderColor: "primary.main",
+                    bgcolor: "grey.50",
+                  },
+                }}
+              >
+                Create home profile
+              </Button>
+            )}
+
             {QUICK_COMMANDS.map(({ label, icon: Icon, prompt }) => (
               <Button
                 key={label}

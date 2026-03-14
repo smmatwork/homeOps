@@ -23,7 +23,7 @@ const INITIAL_MESSAGES: ChatEntry[] = [
     id: 1,
     role: "assistant",
     content:
-      "Hello! I can help manage your home — add chores, find recipes, schedule helpers, and more. What would you like to do?",
+      "Hi! I can help you set up your home and then manage chores, helpers, reminders, and recipes.\n\nA good first step is to set up your Home Profile (type/BHK/spaces). After that, I can suggest and schedule chores room-by-room.\n\nWhat would you like to do — set up / review your home profile, or jump straight to chores?",
     timestamp: "10:30 AM",
   },
 ];
@@ -142,10 +142,18 @@ export function useSarvamChat() {
 
   const loadMemory = useCallback(async (scope: ChatScope) => {
     setMemoryReady(false);
+    setError(null);
     const { accessToken, householdId } = getAgentSetup();
     if (!accessToken || !householdId) {
       historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
       setMessages(INITIAL_MESSAGES);
+      if (!accessToken) {
+        setError("Chat history isn't loading because you're not logged in (missing access token). Please log in again.");
+      } else {
+        setError(
+          "Chat history isn't loading because your account isn't linked to a home yet (missing household id). Open Agent Setup and click 'Set up my home' / 'Refresh my home link'.",
+        );
+      }
       setMemoryReady(true);
       return;
     }
@@ -156,7 +164,16 @@ export function useSarvamChat() {
       scope,
       limit: 50,
     });
-    if (!res.ok) {
+    if (res.ok === false) {
+      const errRes = res as { ok: false; error: string; status?: number };
+      const base = "Chat history couldn't be loaded.";
+      const hint =
+        typeof errRes.status === "number" && errRes.status === 401
+          ? " Your login may have expired — please log out and log in again."
+          : typeof errRes.status === "number" && errRes.status === 404
+            ? " The server endpoint wasn't found — ensure Supabase Edge Functions are running locally."
+            : "";
+      setError(`${base}${hint}${errRes.error ? ` (${errRes.error})` : ""}`);
       setMemoryReady(true);
       return;
     }
@@ -192,6 +209,7 @@ export function useSarvamChat() {
     }
     historyRef.current = sanitizeForSarvam(ctx);
 
+    setError(null);
     setMemoryReady(true);
   }, []);
 
