@@ -1,4 +1,4 @@
-export type AgentTable = "chores" | "helpers";
+export type AgentTable = "chores" | "helpers" | "home_profiles";
 
 export type ToolName = "db.select" | "db.insert" | "db.update" | "db.delete";
 
@@ -6,6 +6,8 @@ export type ToolTable =
   | "chores"
   | "helpers"
   | "alerts"
+  | "member_time_off"
+  | "home_profiles"
   | "households"
   | "household_members"
   | "profiles"
@@ -78,7 +80,7 @@ function isAgentActionsPayload(obj: unknown): obj is AgentActionsPayload {
     const table = (a as { table?: unknown }).table;
     const record = (a as { record?: unknown }).record;
     if (t !== "create") return false;
-    if (table !== "chores" && table !== "helpers") return false;
+    if (table !== "chores" && table !== "helpers" && table !== "home_profiles") return false;
     if (!record || typeof record !== "object" || Array.isArray(record)) return false;
     return true;
   });

@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
   Card,
   CardContent,
   CardHeader,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -31,14 +32,63 @@ import {
   AddAlert,
   MoreVert,
 } from "@mui/icons-material";
+import { useAuth } from "../../auth/AuthProvider";
+import { supabase } from "../../services/supabaseClient";
+
+type AlertRow = {
+  id: string;
+  title: string;
+  body: string | null;
+  severity: number;
+  status: string;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+};
 
 export function Alerts() {
   const [filter, setFilter] = useState<"all" | "critical" | "warning" | "info">("all");
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  const alerts = [
-    // ...existing alerts array...
-  ];
+  const { householdId } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<AlertRow[]>([]);
+
+  useEffect(() => {
+    if (!householdId.trim()) return;
+
+    let cancelled = false;
+    (async () => {
+      setBusy(true);
+      setLoadError(null);
+      const { data, error } = await supabase
+        .from("alerts")
+        .select("id,title,body,severity,status,created_at,metadata")
+        .eq("household_id", householdId.trim())
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (cancelled) return;
+      setBusy(false);
+      if (error) {
+        setLoadError(error.message);
+        setAlerts([]);
+        return;
+      }
+      setAlerts((data ?? []) as AlertRow[]);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [householdId]);
+
+  const alertType = (a: AlertRow): "critical" | "warning" | "info" => {
+    const sev = typeof a.severity === "number" && Number.isFinite(a.severity) ? a.severity : 1;
+    if (sev >= 3) return "critical";
+    if (sev === 2) return "warning";
+    return "info";
+  };
 
   const getAlertIcon = (type: string) => {
     switch (type) {
@@ -53,8 +103,11 @@ export function Alerts() {
     }
   };
 
-  const filteredAlerts = filter === "all" ? alerts : alerts.filter((alert) => alert.type === filter);
-  const unreadCount = alerts.filter((a) => !a.isRead).length;
+  const filteredAlerts = useMemo(
+    () => (filter === "all" ? alerts : alerts.filter((a) => alertType(a) === filter)),
+    [alerts, filter],
+  );
+  const unreadCount = 0;
 
   return (
     <Box p={4}>
@@ -86,25 +139,33 @@ export function Alerts() {
       {/* Filter Tabs */}
       <Tabs value={filter} onChange={(e, newValue) => setFilter(newValue)} variant="scrollable">
         <Tab label={`All (${alerts.length})`} value="all" />
-        <Tab label={`Critical (${alerts.filter((a) => a.type === "critical").length})`} value="critical" />
-        <Tab label={`Warning (${alerts.filter((a) => a.type === "warning").length})`} value="warning" />
-        <Tab label={`Info (${alerts.filter((a) => a.type === "info").length})`} value="info" />
+        <Tab label={`Critical (${alerts.filter((a) => alertType(a) === "critical").length})`} value="critical" />
+        <Tab label={`Warning (${alerts.filter((a) => alertType(a) === "warning").length})`} value="warning" />
+        <Tab label={`Info (${alerts.filter((a) => alertType(a) === "info").length})`} value="info" />
       </Tabs>
 
       {/* Alerts List */}
       <Box mt={4} display="flex" flexDirection="column" gap={2}>
+        {busy && alerts.length === 0 ? (
+          <Box display="flex" justifyContent="center" alignItems="center" py={6}>
+            <CircularProgress size={24} />
+          </Box>
+        ) : null}
+        {loadError ? (
+          <Typography color="error">{loadError}</Typography>
+        ) : null}
         {filteredAlerts.map((alert) => (
           <Card key={alert.id} variant="outlined">
             <CardContent>
               <Box display="flex" alignItems="center" gap={2}>
-                {getAlertIcon(alert.type)}
+                {getAlertIcon(alertType(alert))}
                 <Box flex={1}>
                   <Typography variant="h6">{alert.title}</Typography>
                   <Typography variant="body2" color="textSecondary">
-                    {alert.message}
+                    {alert.body ?? ""}
                   </Typography>
                   <Typography variant="caption" color="textSecondary">
-                    {alert.timestamp}
+                    {new Date(alert.created_at).toLocaleString()}
                   </Typography>
                 </Box>
                 <IconButton>

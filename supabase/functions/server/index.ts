@@ -18,6 +18,8 @@ type ToolTable =
   | "chores"
   | "helpers"
   | "alerts"
+  | "member_time_off"
+  | "home_profiles"
   | "households"
   | "household_members"
   | "profiles"
@@ -35,6 +37,8 @@ const TOOL_ALLOWLIST: Record<ToolTable, { select: boolean; insert: boolean; upda
   chores: { select: true, insert: true, update: true, delete: true },
   helpers: { select: true, insert: true, update: true, delete: true },
   alerts: { select: true, insert: true, update: true, delete: true },
+  member_time_off: { select: true, insert: true, update: true, delete: true },
+  home_profiles: { select: true, insert: true, update: false, delete: false },
   households: { select: true, insert: false, update: false, delete: false },
   household_members: { select: true, insert: false, update: false, delete: false },
   profiles: { select: true, insert: false, update: true, delete: false },
@@ -51,6 +55,8 @@ function isToolTable(v: unknown): v is ToolTable {
     v === "chores" ||
     v === "helpers" ||
     v === "alerts" ||
+    v === "member_time_off" ||
+    v === "home_profiles" ||
     v === "households" ||
     v === "household_members" ||
     v === "profiles" ||
@@ -65,8 +71,10 @@ function summarizeTableRows(table: ToolTable, rows: any[]): string {
     if (table === "chores") return "You don’t have any chores yet.";
     if (table === "helpers") return "You don’t have any helpers added yet.";
     if (table === "alerts") return "You don’t have any alerts right now.";
+    if (table === "home_profiles") return "Your home profile isn’t set up yet.";
     if (table === "household_members") return "No one is linked to this home yet.";
-    if (table === "profiles") return "No profiles found for this home yet.";
+    if (table === "households") return "Nothing found yet.";
+    if (table === "member_time_off") return "No time off entries found.";
     if (table === "agent_audit_log" || table === "support_audit_log") return "No activity yet.";
     return "Nothing found yet.";
   }
@@ -110,6 +118,57 @@ function summarizeTableRows(table: ToolTable, rows: any[]): string {
         .join("\n")
     );
   }
+  if (table === "member_time_off") {
+    return (
+      `Found ${count} time off entries:\n` +
+      head
+        .map((r) => {
+          const kind = r.member_kind ?? "member";
+          const ref = r.helper_id ?? r.person_id ?? "?";
+          const start = r.start_at ?? "?";
+          const end = r.end_at ?? "?";
+          return `- ${kind}=${ref} (${start} → ${end})`;
+        })
+        .join("\n")
+    );
+  }
+  if (table === "home_profiles") {
+    const hp = rows[0] ?? {};
+    const homeType = hp.home_type ?? "(unknown)";
+    const bhk = typeof hp.bhk === "number" ? hp.bhk : hp.bhk ?? "?";
+    const balcony = hp.has_balcony ? "Yes" : "No";
+    const pets = hp.has_pets ? "Yes" : "No";
+    const kids = hp.has_kids ? "Yes" : "No";
+    const sqft = typeof hp.square_feet === "number" ? `\n- Area: ${hp.square_feet} sq ft` : "";
+    const floors = typeof hp.floors === "number" ? `\n- Floors: ${hp.floors}` : "";
+    const spacesCount = Array.isArray(hp.spaces) ? hp.spaces.length : null;
+    const spaces = typeof spacesCount === "number" && spacesCount > 0 ? `\n- Extra spaces: ${spacesCount}` : "";
+    const counts = hp.space_counts && typeof hp.space_counts === "object" ? hp.space_counts : null;
+    const balconyCount = counts && typeof (counts as any).balcony === "number" ? (counts as any).balcony : null;
+    const terraceCount = counts && typeof (counts as any).terrace === "number" ? (counts as any).terrace : null;
+    const countsLine =
+      typeof balconyCount === "number" || typeof terraceCount === "number"
+        ? `\n- Counts: ${typeof balconyCount === "number" ? `balconies=${balconyCount}` : ""}${
+            typeof balconyCount === "number" && typeof terraceCount === "number" ? ", " : ""
+          }${typeof terraceCount === "number" ? `terraces=${terraceCount}` : ""}`
+        : "";
+    const flooring = hp.flooring_type ? `\n- Flooring: ${hp.flooring_type}` : "";
+    const baths = typeof hp.num_bathrooms === "number" ? `\n- Bathrooms: ${hp.num_bathrooms}` : "";
+    return (
+      "Here’s your current home profile:\n" +
+      `- Type: ${homeType}\n` +
+      `- BHK: ${bhk}\n` +
+      `- Balcony: ${balcony}\n` +
+      `- Pets: ${pets}\n` +
+      `- Kids: ${kids}` +
+      sqft +
+      floors +
+      spaces +
+      countsLine +
+      flooring +
+      baths
+    );
+  }
   if (table === "household_members") {
     return (
       `Found ${count} household members:\n` +
@@ -151,6 +210,7 @@ const SUPPORTED_PATCH_TABLES = new Set([
   "chores",
   "alerts",
   "helpers",
+  "member_time_off",
   "profiles",
 ]);
 
@@ -158,6 +218,7 @@ const SUPPORTED_AGENT_TABLES = new Set([
   "chores",
   "alerts",
   "helpers",
+  "member_time_off",
   "profiles",
 ]);
 
@@ -292,6 +353,16 @@ api.post("/tools/execute", async (c) => {
         .limit(limit);
       if (error) return c.json({ error: error.message }, 500);
       summary = summarizeTableRows("household_members", data ?? []);
+    } else if (table === "home_profiles") {
+      const { data, error } = await admin
+        .from("home_profiles")
+        .select(
+          "household_id, home_type, bhk, has_balcony, has_pets, has_kids, square_feet, floors, spaces, space_counts, flooring_type, num_bathrooms, updated_at",
+        )
+        .eq("household_id", householdId)
+        .limit(1);
+      if (error) return c.json({ error: error.message }, 500);
+      summary = summarizeTableRows("home_profiles", data ?? []);
     } else if (table === "agent_audit_log") {
       const { data, error } = await admin
         .from("agent_audit_log")
@@ -310,6 +381,15 @@ api.post("/tools/execute", async (c) => {
         .limit(limit);
       if (error) return c.json({ error: error.message }, 500);
       summary = summarizeTableRows("support_audit_log", data ?? []);
+    } else if (table === "member_time_off") {
+      const { data, error } = await admin
+        .from("member_time_off")
+        .select("id, member_kind, helper_id, person_id, start_at, end_at, created_at")
+        .eq("household_id", householdId)
+        .order("start_at", { ascending: false })
+        .limit(limit);
+      if (error) return c.json({ error: error.message }, 500);
+      summary = summarizeTableRows("member_time_off", data ?? []);
     } else {
       // chores/helpers/alerts are household-scoped
       const select = table === "helpers"
@@ -343,9 +423,27 @@ api.post("/tools/execute", async (c) => {
       const helperCheck = await validateHelperBelongsToHousehold(admin, String(payload.helper_id), householdId);
       if (!helperCheck.ok) return c.json({ error: helperCheck.error }, 400);
     }
-    const { data: created, error } = await admin.from(table).insert(payload).select("id").maybeSingle();
-    if (error) return c.json({ error: error.message }, 500);
-    summary = `Inserted 1 row into ${table}. id=${created?.id ?? "(unknown)"}`;
+
+    if (table === "member_time_off") {
+      const adminCheck = await isHouseholdAdminUser(admin, householdId, actorUserId);
+      if (!adminCheck.ok) {
+        return c.json({ error: "Only a home admin can manage time off." }, 403);
+      }
+    }
+
+    if (table === "home_profiles") {
+      const adminCheck = await isHouseholdAdminUser(admin, householdId, actorUserId);
+      if (!adminCheck.ok) {
+        return c.json({ error: "Only a home admin can update the home profile." }, 403);
+      }
+      const { error } = await admin.from("home_profiles").upsert(payload, { onConflict: "household_id" });
+      if (error) return c.json({ error: error.message }, 500);
+      summary = "Saved your home profile.";
+    } else {
+      const { data: created, error } = await admin.from(table).insert(payload).select("id").maybeSingle();
+      if (error) return c.json({ error: error.message }, 500);
+      summary = `Inserted 1 row into ${table}. id=${created?.id ?? "(unknown)"}`;
+    }
   }
 
   if (tc.tool === "db.update") {
@@ -357,6 +455,13 @@ api.post("/tools/execute", async (c) => {
       return c.json({ error: `Update not allowed for table '${table}'` }, 403);
     }
     if (table === "profiles" && id !== actorUserId) return c.json({ error: "Cannot update other users' profiles" }, 403);
+
+    if (table === "member_time_off") {
+      const adminCheck = await isHouseholdAdminUser(admin, householdId, actorUserId);
+      if (!adminCheck.ok) {
+        return c.json({ error: "Only a home admin can manage time off." }, 403);
+      }
+    }
 
     const patchValidation = validatePatch(patch as Record<string, unknown>);
     if (!patchValidation.ok) return c.json({ error: patchValidation.reason }, 400);
@@ -382,6 +487,13 @@ api.post("/tools/execute", async (c) => {
     if (typeof id !== "string" || !id.trim()) return c.json({ error: "db.delete requires args.id" }, 400);
     if (table === "household_members" || table === "households" || table === "agent_audit_log" || table === "support_audit_log" || table === "profiles") {
       return c.json({ error: `Delete not allowed for table '${table}'` }, 403);
+    }
+
+    if (table === "member_time_off") {
+      const adminCheck = await isHouseholdAdminUser(admin, householdId, actorUserId);
+      if (!adminCheck.ok) {
+        return c.json({ error: "Only a home admin can manage time off." }, 403);
+      }
     }
 
     const { data: before, error: beforeErr } = await admin.from(table).select("household_id").eq("id", id).maybeSingle();
@@ -485,6 +597,19 @@ async function isHouseholdMember(admin: ReturnType<typeof supabaseAdmin>, househ
   if (error) return { ok: false as const, error: error.message };
   if (!data) return { ok: false as const };
   return { ok: true as const };
+}
+
+async function isHouseholdAdminUser(admin: ReturnType<typeof supabaseAdmin>, householdId: string, userId: string) {
+  const { data, error } = await admin
+    .from("household_members")
+    .select("role")
+    .eq("household_id", householdId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) return { ok: false as const, error: error.message };
+  if (!data) return { ok: false as const };
+  return { ok: data.role === "admin" || data.role === "owner" };
 }
 
 async function validateHelperBelongsToHousehold(
