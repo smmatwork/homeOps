@@ -1000,7 +1000,8 @@ api.get("/chat/state", async (c) => {
     .from("chat_messages")
     .select("id, role, content, created_at")
     .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true })
+    // Pull the most recent N messages (then reverse below for chronological UI).
+    .order("created_at", { ascending: false })
     .limit(limit);
   if (msgErr) return c.json({ error: msgErr.message }, 500);
 
@@ -1008,7 +1009,7 @@ api.get("/chat/state", async (c) => {
     ok: true,
     conversation_id: conversationId,
     summary: (summaryRow?.summary as string | undefined) ?? "",
-    messages: messages ?? [],
+    messages: (messages ?? []).slice().reverse(),
   });
 });
 

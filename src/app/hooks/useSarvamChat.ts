@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { streamChat, HOMEOPS_SYSTEM_PROMPT, type ChatMessage } from "../services/sarvamApi";
-import { appendChatMessages, getChatState, type ChatScope, type ChatRole } from "../services/agentApi";
+import { appendChatMessages, clearChatState, getChatState, type ChatScope, type ChatRole } from "../services/agentApi";
 import { useAuth } from "../auth/AuthProvider";
+import { supabase } from "../services/supabaseClient";
 
 export interface ChatEntry {
   id: number;
@@ -35,6 +36,15 @@ function sanitizeForSarvam(messages: ChatMessage[]): ChatMessage[] {
     .map((m) => ({ ...m, content: m.content.trim() }))
     .filter((m) => m.content);
 
+  const uiLang = (() => {
+    try {
+      const raw = localStorage.getItem("homeops.ui.lang") ?? "en";
+      return raw === "hi" || raw === "kn" ? raw : "en";
+    } catch {
+      return "en";
+    }
+  })();
+
   const out: ChatMessage[] = [];
   let started = false;
   let expected: "user" | "assistant" = "user";
@@ -57,7 +67,18 @@ function sanitizeForSarvam(messages: ChatMessage[]): ChatMessage[] {
     expected = expected === "user" ? "assistant" : "user";
   }
 
-  return [...system, ...out];
+  const uiLangInstruction: ChatMessage = {
+    role: "system",
+    content: `UI language: ${uiLang}. Respond in this language for all user-facing text (including labels/names you generate), unless the user explicitly asks for a different language.`,
+  };
+
+  const mergedSystemContent = [...system, uiLangInstruction]
+    .map((m) => (typeof m.content === "string" ? m.content.trim() : ""))
+    .filter(Boolean)
+    .join("\n\n");
+
+  // Sarvam requires the system message to appear only once, at the beginning.
+  return [{ role: "system", content: mergedSystemContent }, ...out];
 }
 
 export function useSarvamChat() {
@@ -65,6 +86,7 @@ export function useSarvamChat() {
   const [messages, setMessages] = useState<ChatEntry[]>(INITIAL_MESSAGES);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string>("");
 
   const [memoryReady, setMemoryReady] = useState(false);
 
@@ -86,6 +108,58 @@ export function useSarvamChat() {
   const memoryScopeRef = useRef<ChatScope>(memoryScope);
   const conversationIdRef = useRef<string>("");
   const abortRef = useRef<AbortController | null>(null);
+  const messageIdRef = useRef(0);
+
+  const instanceIdRef = useRef<string>("");
+  if (!instanceIdRef.current) instanceIdRef.current = `${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+
+  const chatSyncChannelName = "homeops:chat-sync";
+  const chatSyncChannelRef = useRef<BroadcastChannel | null>(null);
+  const chatSyncStorageKey = "homeops.chat.last_sync";
+
+  const broadcastChatSync = useCallback(() => {
+    try {
+      window.dispatchEvent(new CustomEvent("homeops:chat-sync", { detail: { ts: Date.now() } }));
+    } catch {
+      // ignore
+    }
+
+    try {
+      chatSyncChannelRef.current?.postMessage({ source: instanceIdRef.current, ts: Date.now() });
+    } catch {
+      // ignore
+    }
+
+    try {
+      localStorage.setItem(chatSyncStorageKey, JSON.stringify({ source: instanceIdRef.current, ts: Date.now() }));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      chatSyncChannelRef.current = new BroadcastChannel(chatSyncChannelName);
+      return () => {
+        try {
+          chatSyncChannelRef.current?.close();
+        } catch {
+          // ignore
+        }
+        chatSyncChannelRef.current = null;
+      };
+    } catch {
+      // ignore
+      return;
+    }
+  }, []);
+
+  const nextMessageId = useCallback(() => {
+    // Date.now() alone can collide when multiple messages are appended in the same millisecond
+    // (e.g., approving a tool call while other state updates are occurring).
+    messageIdRef.current += 1;
+    return Date.now() * 1000 + (messageIdRef.current % 1000);
+  }, []);
 
   const MAX_CONTEXT_MESSAGES = 24;
   const SUMMARIZE_TRIGGER_MESSAGES = 48;
@@ -99,24 +173,39 @@ export function useSarvamChat() {
     }
   }, [memoryScope]);
 
+  // Keep scope synced across multiple chat instances.
+  useEffect(() => {
+    const handler = (ev: StorageEvent) => {
+      if (ev.key !== "homeops.chat.scope") return;
+      const raw = (ev.newValue ?? "").trim();
+      const next: ChatScope = raw === "household" ? "household" : "user";
+      setMemoryScope((prev) => (prev === next ? prev : next));
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, []);
+
   const getAgentSetup = () => {
     const token = authedAccessToken.trim();
     const householdId = authedHouseholdId.trim();
+
     if (token && householdId) return { accessToken: token, householdId };
+
     try {
-      const accessToken = localStorage.getItem("homeops.agent.access_token") ?? "";
-      const householdId = localStorage.getItem("homeops.agent.household_id") ?? "";
-      return { accessToken: accessToken.trim(), householdId: householdId.trim() };
+      const fallbackToken = token || (localStorage.getItem("homeops.agent.access_token") ?? "").trim();
+      const fallbackHouseholdId = householdId || (localStorage.getItem("homeops.agent.household_id") ?? "").trim();
+      return { accessToken: fallbackToken, householdId: fallbackHouseholdId };
     } catch {
-      return { accessToken: "", householdId: "" };
+      return { accessToken: token, householdId };
     }
   };
 
   const appendAssistantMessage = useCallback((content: string) => {
     const trimmed = content.trim();
     if (!trimmed) return;
+    if (import.meta.env.DEV) console.debug("[useSarvamChat] appendAssistantMessage", { len: trimmed.length });
     const entry: ChatEntry = {
-      id: Date.now(),
+      id: nextMessageId(),
       role: "assistant",
       content: trimmed,
       timestamp: getTime(),
@@ -125,45 +214,179 @@ export function useSarvamChat() {
     setMessages((prev) => [...prev, entry]);
     historyRef.current = [...historyRef.current, { role: "assistant", content: trimmed }];
     void appendToMemory([{ role: "assistant", content: trimmed }]);
-  }, []);
+  }, [nextMessageId, broadcastChatSync]);
+
+  const appendUserMessage = useCallback((content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    setError(null);
+    if (import.meta.env.DEV) console.debug("[useSarvamChat] appendUserMessage", { len: trimmed.length });
+
+    const userEntry: ChatEntry = {
+      id: nextMessageId(),
+      role: "user",
+      content: trimmed,
+      timestamp: getTime(),
+    };
+    setMessages((prev) => [...prev, userEntry]);
+
+    historyRef.current = sanitizeForSarvam([...historyRef.current, { role: "user", content: trimmed }]);
+    void appendToMemory([{ role: "user", content: trimmed }]);
+  }, [nextMessageId, broadcastChatSync]);
 
   const appendToMemory = async (items: Array<{ role: ChatRole; content: string }>) => {
-    const { accessToken, householdId } = getAgentSetup();
-    if (!accessToken || !householdId) return;
+    try {
+      if (import.meta.env.DEV) console.debug("[useSarvamChat] appendToMemory", { n: items.length, scope: memoryScopeRef.current });
 
-    await appendChatMessages({
-      accessToken,
-      householdId,
-      scope: memoryScopeRef.current,
-      messages: items,
-      summary: memorySummaryRef.current,
-    });
+      let { accessToken, householdId } = getAgentSetup();
+      if (!accessToken || !householdId) {
+        // Try to hydrate from the current Supabase session (covers cases where useAuth is stale)
+        // and from localStorage (covers Agent Setup fallback).
+        try {
+          const { data } = await supabase.auth.getSession();
+          const sessionToken = data.session?.access_token ? String(data.session.access_token).trim() : "";
+          if (!accessToken && sessionToken) accessToken = sessionToken;
+        } catch {
+          // ignore
+        }
+
+        if (!accessToken) {
+          try {
+            const refresh = await supabase.auth.refreshSession();
+            const nextToken = refresh.data.session?.access_token ? String(refresh.data.session.access_token).trim() : "";
+            if (nextToken) accessToken = nextToken;
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!householdId) {
+          try {
+            householdId = (localStorage.getItem("homeops.agent.household_id") ?? "").trim() || householdId;
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!accessToken || !householdId) {
+          if (import.meta.env.DEV) console.debug("[useSarvamChat] appendToMemory skipped (missing token/household)", { accessToken: !!accessToken, householdId: !!householdId });
+          setError(
+            "Chat history isn't saving because access token or household id is missing. Open Agent Setup and confirm you're logged in + linked to a home.",
+          );
+          return;
+        }
+      }
+
+      const res = await appendChatMessages({
+        accessToken,
+        householdId,
+        scope: memoryScopeRef.current,
+        messages: items,
+        summary: memorySummaryRef.current,
+      });
+
+      if (res.ok === false) {
+        const msg = `Chat history couldn't be saved. (${res.error}${typeof res.status === "number" ? `, status=${res.status}` : ""})`;
+        console.error("appendChatMessages failed", res);
+        setError(msg);
+        return;
+      }
+
+      // Broadcast only after the server memory is updated so other chat instances
+      // don't reload before the new messages are actually persisted.
+      broadcastChatSync();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error saving chat history";
+      console.error("appendToMemory crashed", e);
+      setError(`Chat history couldn't be saved. (${msg})`);
+    }
   };
 
   const loadMemory = useCallback(async (scope: ChatScope) => {
     setMemoryReady(false);
     setError(null);
-    const { accessToken, householdId } = getAgentSetup();
+    let { accessToken, householdId } = getAgentSetup();
     if (!accessToken || !householdId) {
-      historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
-      setMessages(INITIAL_MESSAGES);
-      if (!accessToken) {
-        setError("Chat history isn't loading because you're not logged in (missing access token). Please log in again.");
-      } else {
-        setError(
-          "Chat history isn't loading because your account isn't linked to a home yet (missing household id). Open Agent Setup and click 'Set up my home' / 'Refresh my home link'.",
-        );
+      // Try to hydrate from the Supabase session and localStorage before giving up.
+      try {
+        const { data } = await supabase.auth.getSession();
+        const sessionToken = data.session?.access_token ? String(data.session.access_token).trim() : "";
+        if (!accessToken && sessionToken) accessToken = sessionToken;
+      } catch {
+        // ignore
       }
-      setMemoryReady(true);
-      return;
+
+      if (!accessToken) {
+        try {
+          const refresh = await supabase.auth.refreshSession();
+          const nextToken = refresh.data.session?.access_token ? String(refresh.data.session.access_token).trim() : "";
+          if (nextToken) accessToken = nextToken;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!householdId) {
+        try {
+          householdId = (localStorage.getItem("homeops.agent.household_id") ?? "").trim() || householdId;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!accessToken || !householdId) {
+        historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+        setMessages((prev) => (prev.length > 0 ? prev : INITIAL_MESSAGES));
+        if (!accessToken) {
+          setError("Chat history isn't loading because you're not logged in (missing access token). Please log in again.");
+        } else {
+          setError(
+            "Chat history isn't loading because your account isn't linked to a home yet (missing household id). Open Agent Setup and click 'Set up my home' / 'Refresh my home link'.",
+          );
+        }
+        setMemoryReady(true);
+        return;
+      }
     }
 
-    const res = await getChatState({
+    // Proactively refresh session if Supabase thinks it needs it.
+    try {
+      const { data } = await supabase.auth.getSession();
+      const sessionToken = data.session?.access_token ? String(data.session.access_token).trim() : "";
+      if (sessionToken) accessToken = sessionToken;
+    } catch {
+      // ignore
+    }
+
+    let res = await getChatState({
       accessToken,
       householdId,
       scope,
       limit: 50,
     });
+
+    // If user JWT expired, refresh once and retry.
+    if (res.ok === false) {
+      const errRes = res as { ok: false; error: string; status?: number };
+      if (errRes.status === 401) {
+        try {
+          const refresh = await supabase.auth.refreshSession();
+          const nextToken = refresh.data.session?.access_token ? String(refresh.data.session.access_token).trim() : "";
+          if (nextToken) {
+            accessToken = nextToken;
+            res = await getChatState({
+              accessToken,
+              householdId,
+              scope,
+              limit: 50,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     if (res.ok === false) {
       const errRes = res as { ok: false; error: string; status?: number };
       const base = "Chat history couldn't be loaded.";
@@ -174,11 +397,13 @@ export function useSarvamChat() {
             ? " The server endpoint wasn't found — ensure Supabase Edge Functions are running locally."
             : "";
       setError(`${base}${hint}${errRes.error ? ` (${errRes.error})` : ""}`);
+      setMessages((prev) => (prev.length > 0 ? prev : INITIAL_MESSAGES));
       setMemoryReady(true);
       return;
     }
 
     conversationIdRef.current = res.conversationId;
+    setConversationId(res.conversationId);
     memorySummaryRef.current = res.summary || "";
 
     const loadedEntries: ChatEntry[] = res.messages
@@ -191,11 +416,14 @@ export function useSarvamChat() {
         streaming: false,
       }));
 
-    if (loadedEntries.length > 0) {
-      setMessages(loadedEntries);
-    } else {
-      setMessages(INITIAL_MESSAGES);
-    }
+    // Update messages from server when history has advanced.
+    // Never clobber local UI with a shorter server history — that can happen
+    // briefly right after the user sends a message (race with persistence).
+    setMessages((prev) => {
+      if (loadedEntries.length === 0) return prev.length > 0 ? prev : INITIAL_MESSAGES;
+      if (loadedEntries.length >= prev.length) return loadedEntries;
+      return prev;
+    });
 
     const memoryBlock = memorySummaryRef.current.trim()
       ? `Long-term memory summary (authoritative):\n${memorySummaryRef.current.trim()}`
@@ -212,6 +440,66 @@ export function useSarvamChat() {
     setError(null);
     setMemoryReady(true);
   }, []);
+
+  useEffect(() => {
+    let last = 0;
+    let timer: any = null;
+
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      // Small delay to avoid racing with persistence and to coalesce bursts.
+      timer = setTimeout(() => {
+        if (isStreaming) return;
+        void loadMemory(memoryScopeRef.current);
+      }, 250);
+    };
+
+    const applyIncoming = (detail: any) => {
+      const source = typeof detail?.source === "string" ? detail.source : "";
+      const ts = typeof detail?.ts === "number" ? detail.ts : Date.now();
+      if (source && source === instanceIdRef.current) return;
+      if (ts <= last) return;
+      last = ts;
+      scheduleReload();
+    };
+
+    const handler = (ev: Event) => {
+      const ce = ev as CustomEvent;
+      applyIncoming((ce as any)?.detail);
+    };
+
+    const bc = chatSyncChannelRef.current;
+    const bcHandler = (ev: MessageEvent) => applyIncoming(ev?.data);
+
+    const storageHandler = (ev: StorageEvent) => {
+      if (ev.key !== chatSyncStorageKey) return;
+      if (!ev.newValue) return;
+      try {
+        const parsed = JSON.parse(ev.newValue);
+        applyIncoming(parsed);
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener("homeops:chat-sync", handler as EventListener);
+    window.addEventListener("storage", storageHandler);
+    try {
+      bc?.addEventListener("message", bcHandler);
+    } catch {
+      // ignore
+    }
+    return () => {
+      window.removeEventListener("homeops:chat-sync", handler as EventListener);
+      window.removeEventListener("storage", storageHandler);
+      try {
+        bc?.removeEventListener("message", bcHandler);
+      } catch {
+        // ignore
+      }
+      if (timer) clearTimeout(timer);
+    };
+  }, [loadMemory, isStreaming]);
 
   // Load long-term memory when agent setup exists and when scope changes
   useEffect(() => {
@@ -281,27 +569,44 @@ export function useSarvamChat() {
     }
   }, []);
 
-  const sendMessage = useCallback(async (text: string) => {
+  const sendMessage = useCallback(async (text: string, opts?: { silent?: boolean; allowWhileStreaming?: boolean }) => {
     const trimmed = text.trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed) return;
+
+    const allowWhileStreaming = Boolean(opts?.allowWhileStreaming);
+    if (isStreaming && !allowWhileStreaming) return;
+
+    const silent = Boolean(opts?.silent);
 
     setError(null);
 
-    // Add user message to UI
-    const userEntry: ChatEntry = {
-      id: Date.now(),
-      role: "user",
-      content: trimmed,
-      timestamp: getTime(),
-    };
-    setMessages((prev) => [...prev, userEntry]);
+    // Clarification/control replies may need to be sent while the assistant is still streaming.
+    // Abort any in-flight stream so we can send the user's response deterministically.
+    if (allowWhileStreaming && isStreaming) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setIsStreaming(false);
+    }
+
+    // Add user message to UI unless it's an internal control message.
+    if (!silent) {
+      const userEntry: ChatEntry = {
+        id: nextMessageId(),
+        role: "user",
+        content: trimmed,
+        timestamp: getTime(),
+      };
+      setMessages((prev) => [...prev, userEntry]);
+    }
 
     // Append to API history
     historyRef.current = sanitizeForSarvam([...historyRef.current, { role: "user", content: trimmed }]);
-    void appendToMemory([{ role: "user", content: trimmed }]);
+    if (!silent) {
+      void appendToMemory([{ role: "user", content: trimmed }]);
+    }
 
     // Placeholder assistant message (streaming)
-    const assistantId = Date.now() + 1;
+    const assistantId = nextMessageId();
     const assistantEntry: ChatEntry = {
       id: assistantId,
       role: "assistant",
@@ -317,6 +622,14 @@ export function useSarvamChat() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const watchdog = window.setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {
+        // ignore
+      }
+    }, 25000);
+
     let fullResponse = "";
     try {
       const outbound = sanitizeForSarvam(historyRef.current);
@@ -330,7 +643,18 @@ export function useSarvamChat() {
         );
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") return;
+      if (err instanceof Error && err.name === "AbortError") {
+        const errMsg = "Request was cancelled or timed out. Please try again.";
+        setError(errMsg);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: `⚠️ ${errMsg}`, streaming: false }
+              : m,
+          ),
+        );
+        return;
+      }
       const errMsg =
         err instanceof Error ? err.message : "Unknown error from Sarvam AI";
       setError(errMsg);
@@ -343,7 +667,11 @@ export function useSarvamChat() {
       );
       return;
     } finally {
+      window.clearTimeout(watchdog);
       setIsStreaming(false);
+      // Safety net: always clear the placeholder streaming flag so the UI never gets stuck
+      // showing the blinking cursor if the stream returns early or the message update path is skipped.
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)));
     }
 
     // Mark streaming done & append to history
@@ -362,14 +690,27 @@ export function useSarvamChat() {
 
     void appendToMemory([{ role: "assistant", content: fullResponse }]);
 
+    broadcastChatSync();
+
     void maybeSummarizeAndTrim();
-  }, [isStreaming]);
+  }, [isStreaming, broadcastChatSync]);
 
   const clearHistory = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setMessages(INITIAL_MESSAGES);
     historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+    memorySummaryRef.current = "";
+    conversationIdRef.current = "";
+    setConversationId("");
     setError(null);
+    setIsStreaming(false);
+
+    const { accessToken, householdId } = getAgentSetup();
+    if (accessToken && householdId) {
+      void clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
+    }
   }, []);
 
-  return { messages, sendMessage, isStreaming, error, clearHistory, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage };
+  return { messages, sendMessage, appendUserMessage, isStreaming, error, clearHistory, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, conversationId };
 }
