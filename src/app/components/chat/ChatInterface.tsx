@@ -55,6 +55,7 @@ import { keyframes } from "@emotion/react";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { QuickActionsPanel } from "./QuickActionsPanel";
+import { inferSpaceFromText, normalizeChoreTextFromUserUtterance, normalizeSpaceName } from "./chatTextUtils";
 import { buildThreadKey, useClarificationStore } from "../../stores/clarificationThreadStore";
 import { useSarvamChat } from "../../hooks/useSarvamChat";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
@@ -156,12 +157,7 @@ function normalizeDatetimeLocal(value: string): string | null {
   return `${yyyy2}-${mm2}-${dd2}T${hh2}:${mi2}:${ss2}${sign}${tzh}:${tzm}`;
 }
 
-function normalizeSpaceName(value: string): string {
-  return value
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
+ 
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -218,15 +214,15 @@ const EMPTY_APPROVED_TOOLCALL_KEYS: Record<string, boolean> = {};
 
 function buildClientChoreToolCall(params: { userText: string; dueAt: string; space: string }): ToolCall {
   const { userText, dueAt, space } = params;
-  const title = userText.trim().slice(0, 120) || "Chore";
+  const norm = normalizeChoreTextFromUserUtterance(userText);
   const tc: ToolCall = {
     id: `client_chore_${Date.now()}`,
     tool: "db.insert",
     args: {
       table: "chores",
       record: {
-        title,
-        description: userText.trim(),
+        title: norm.title,
+        description: norm.description,
         due_at: dueAt,
         priority: 2,
         metadata: { space },
@@ -1086,6 +1082,42 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     return base;
   }, []);
 
+  const buildMasterSpaceOptions = useCallback((params: {
+    homeType: string;
+    bhk: number;
+    numBathrooms: number | null;
+    balconyCount: number | null;
+    terraceCount: number | null;
+  }): string[] => {
+    const { homeType, bhk, numBathrooms, balconyCount, terraceCount } = params;
+    const out = new Set<string>();
+    const baseline = getBaselineSpaces(homeType, bhk);
+    baseline.forEach((s) => out.add(s));
+
+    const nb = typeof numBathrooms === "number" && Number.isFinite(numBathrooms) ? Math.max(0, Math.floor(numBathrooms)) : 0;
+    if (nb > 0) {
+      out.add("master bathroom");
+      out.add("common bathroom");
+      out.add("guest bathroom");
+      out.add("attached bathroom");
+      for (let i = 3; i <= nb; i += 1) out.add(`bathroom ${i}`);
+    }
+
+    const bc = typeof balconyCount === "number" && Number.isFinite(balconyCount) ? Math.max(0, Math.floor(balconyCount)) : 0;
+    if (bc > 1) {
+      out.delete("balcony");
+      for (let i = 1; i <= bc; i += 1) out.add(`balcony ${i}`);
+    }
+
+    const tc = typeof terraceCount === "number" && Number.isFinite(terraceCount) ? Math.max(0, Math.floor(terraceCount)) : 0;
+    if (tc > 1) {
+      out.delete("terrace");
+      for (let i = 1; i <= tc; i += 1) out.add(`terrace ${i}`);
+    }
+
+    return Array.from(out).sort((a, b) => a.localeCompare(b));
+  }, [getBaselineSpaces]);
+
   const getAgentSetup = useCallback(() => {
     const token = authedAccessToken.trim() || agentAccessToken.trim();
     const householdId = authedHouseholdId.trim() || agentHouseholdId.trim();
@@ -1177,74 +1209,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         .maybeSingle();
       if (error) return [];
       const spacesRaw = Array.isArray((data as any)?.spaces) ? ((data as any).spaces as unknown[]).map(String).filter(Boolean) : [];
-      const countsRaw = (data as any)?.space_counts;
-      const counts = countsRaw && typeof countsRaw === "object" && !Array.isArray(countsRaw) ? (countsRaw as Record<string, unknown>) : {};
-      const balconyCount = Math.max(0, Math.floor(asNumberOrNull(counts.balcony) ?? 0));
-      const terraceCount = Math.max(0, Math.floor(asNumberOrNull(counts.terrace) ?? 0));
-      const bedroomCount0 = Math.max(0, Math.floor(asNumberOrNull((counts as any).bedroom ?? (counts as any).bedrooms) ?? 0));
-      const bhkBedrooms = Math.max(0, Math.floor(asNumberOrNull((data as any)?.bhk) ?? 0));
-      const bedroomCount = Math.max(bedroomCount0, bhkBedrooms);
-      const kitchenCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).kitchen ?? (counts as any).kitchens) ?? 0));
-      const livingCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).living ?? (counts as any).living_room ?? (counts as any).living_rooms) ?? 0));
-      const diningCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).dining ?? (counts as any).dining_room ?? (counts as any).dining_rooms) ?? 0));
-      const numBathrooms = Math.max(0, Math.floor(asNumberOrNull((data as any)?.num_bathrooms) ?? 0));
-
-      const synthetic: string[] = [];
-      const countDistinctBy = (predicate: (norm: string) => boolean): number => {
-        const set = new Set<string>();
-        for (const s of spacesRaw) {
-          const n = normalizeSpaceName(String(s));
-          if (!n) continue;
-          if (predicate(n)) set.add(n);
-        }
-        return set.size;
-      };
-      if (balconyCount > 1) {
-        const distinctBalconyLabels = countDistinctBy((n) => n.includes("balcony") || n.includes("terrace") || n.includes("deck"));
-        if (distinctBalconyLabels < 2) {
-          for (let i = 1; i <= balconyCount; i += 1) synthetic.push(`Balcony ${i}`);
-        }
-      }
-      if (terraceCount > 1) {
-        const distinctTerraceLabels = countDistinctBy((n) => n.includes("terrace") || n.includes("deck"));
-        if (distinctTerraceLabels < 2) {
-          for (let i = 1; i <= terraceCount; i += 1) synthetic.push(`Terrace ${i}`);
-        }
-      }
-
-      const distinctBedroomLabels = countDistinctBy((n) => n.includes("bed"));
-      if (bedroomCount > 1 && distinctBedroomLabels < 2) {
-        for (let i = 1; i <= bedroomCount; i += 1) synthetic.push(`Bedroom ${i}`);
-      }
-
-      const distinctKitchenLabels = countDistinctBy((n) => n.includes("kitchen") || n.includes("pantry"));
-      if (kitchenCount > 1 && distinctKitchenLabels < 2) {
-        for (let i = 1; i <= kitchenCount; i += 1) synthetic.push(`Kitchen ${i}`);
-      }
-
-      const distinctLivingLabels = countDistinctBy((n) => n.includes("living") || n.includes("hall") || n.includes("lounge"));
-      if (livingCount > 1 && distinctLivingLabels < 2) {
-        for (let i = 1; i <= livingCount; i += 1) synthetic.push(`Living Room ${i}`);
-      }
-
-      const distinctDiningLabels = countDistinctBy((n) => n.includes("dining"));
-      if (diningCount > 1 && distinctDiningLabels < 2) {
-        for (let i = 1; i <= diningCount; i += 1) synthetic.push(`Dining Area ${i}`);
-      }
-
-      // If there are multiple bathrooms but the spaces list doesn't contain any specific bathroom labels,
-      // synthesize common bathroom names so we can ask "Which bathroom?".
-      const hasAnyBathroomLabel = spacesRaw.some((s) => {
-        const n = normalizeSpaceName(String(s));
-        return n.includes("bath") || n.includes("wash") || n.includes("toilet") || n.includes("powder");
-      });
-      if (!hasAnyBathroomLabel && numBathrooms > 1) {
-        synthetic.push("Master Bathroom");
-        synthetic.push("Common Bathroom");
-        for (let i = 3; i <= numBathrooms; i += 1) synthetic.push(`Bathroom ${i}`);
-      }
-
-      const spaces = uniqStrings([...spacesRaw, ...synthetic]);
+      const spaces = uniqStrings(spacesRaw);
       setHomeSpacesCache((prev) => ({ ...prev, [hid]: spaces }));
       return spaces;
     },
@@ -1335,6 +1300,14 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   }
 
   const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat();
+
+  const latestUserText = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m: any = messages[i];
+      if (m?.role === "user" && typeof m?.content === "string") return String(m.content);
+    }
+    return "";
+  }, [messages]);
 
   const [clientConversationId] = useState<string>(() => {
     try {
@@ -1448,6 +1421,13 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const which = clientChoreSession.category === "living" ? "living room" : clientChoreSession.category === "dining" ? "dining area" : clientChoreSession.category;
     const title = `Which ${which}?`;
     const options = allLabel ? [allLabel, ...clientChoreSession.spaceOptions] : clientChoreSession.spaceOptions;
+
+    const inferred = inferSpaceFromText(options, clientChoreSession.requestText);
+    if (inferred) {
+      const sels = normalizeSpaceName(inferred).startsWith("all ") ? clientChoreSession.spaceOptions : [inferred];
+      dispatchClientChore({ type: "SET_SPACES", selectedSpaces: sels });
+      return;
+    }
 
     openSpaceClarification({
       title,
@@ -1931,211 +1911,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       return;
     }
 
-    const isQueryIntent = (text: string): boolean => {
-      const t = (text || "").trim().toLowerCase();
-      if (!t) return false;
-      // Query/analytics questions should never start the client chore create flow.
-      if (t.includes("?")) return true;
-      if (/\bhow\s+many\b/.test(t)) return true;
-      if (/\b(count|number\s+of|total)\b/.test(t)) return true;
-      if (/\b(list|show|get|fetch)\b/.test(t)) return true;
-      if (/\b(exist|exists|existing|created|already)\b/.test(t)) return true;
-      if (/\b(status|pending|completed|overdue|due)\b/.test(t)) return true;
-      return false;
-    };
-
-    const isChoreCreateImperative = (text: string): boolean => {
-      const t = (text || "").trim().toLowerCase();
-      if (!t) return false;
-      // If it's a query, do not treat as a create request.
-      if (isQueryIntent(t)) return false;
-      // Strong signals for creation/planning.
-      if (/\b(add|create|schedule|plan|set\s*up|book)\b/.test(t) && /\bchore\b/.test(t)) return true;
-      if (/\b(remind\s+me\s+to)\b/.test(t)) return true;
-      // Imperative verb at the start is treated as a create request.
-      if (/^\s*(deep\s*clean|deepclean|clean|mop|sweep)\b/i.test(t)) return true;
-      return false;
-    };
-    const isHelpersQuery = /\bhelpers?\b/.test(lower) && /\b(list|show|get|what|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-    const isChoresQuery = /\bchores?\b/.test(lower) && /\b(list|show|get|what|pending|overdue|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-    const isAlertsQuery = /\balerts?\b/.test(lower) && /\b(list|show|get|what|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-
-    const directTables: Array<"chores" | "helpers" | "alerts"> = [];
-    if (isChoresQuery) directTables.push("chores");
-    if (isHelpersQuery) directTables.push("helpers");
-    if (isAlertsQuery) directTables.push("alerts");
-
-    // If the assistant is currently streaming, still allow deterministic direct-table queries
-    // (e.g., "show chores") to run. For other messages, ignore sends while streaming.
-    if (isStreaming && directTables.length === 0) return;
-
-    if (directTables.length > 0) {
-      // Add the user message to the chat UI/history without starting an LLM stream.
-      // This prevents the UI from showing typing dots for direct DB queries.
-      appendUserMessage(trimmed);
-      setInput("");
-
-      const { token, householdId } = getAgentSetup();
-      if (!token || !householdId) {
-        appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        return;
-      }
-
-      void (async () => {
-        setToolError(null);
-        const summaries: string[] = [];
-        const wantsCount = /\b(how\s+many|count|number\s+of|total)\b/.test(lower);
-        const actionKeyword = (() => {
-          const k = lower;
-          if (/\bdeep\s*clean|deepclean\b/.test(k)) return "deep clean";
-          if (/\bclean(ing)?\b/.test(k)) return "clean";
-          if (/\bmop(ping)?\b/.test(k)) return "mop";
-          if (/\bsweep(ing)?\b/.test(k)) return "sweep";
-          if (/\bvacuum(ing)?\b/.test(k)) return "vacuum";
-          return "";
-        })();
-        const choreKeyword = (() => {
-          const k = lower;
-          if (/\bbalcony\b/.test(k)) return "balcony";
-          if (/\bterrace\b/.test(k)) return "terrace";
-          if (/\bbath(room)?\b|\btoilet\b|\bwash(room)?\b/.test(k)) return "bathroom";
-          if (/\bbed(room)?\b/.test(k)) return "bedroom";
-          if (/\bkitchen\b/.test(k)) return "kitchen";
-          if (/\bliving\b|\bhall\b|\blounge\b/.test(k)) return "living";
-          if (/\bdining\b/.test(k)) return "dining";
-          return "";
-        })();
-        for (const table of directTables) {
-          if (table === "chores" && wantsCount && choreKeyword) {
-            // If the user also included an action verb (clean/sweep/mop/etc.), prefer semantic search.
-            // This lets us match "clean balcony" instead of matching everything that mentions "balcony".
-            if (actionKeyword) {
-              const sem = await semanticSearch({
-                accessToken: token,
-                householdId,
-                query: trimmed,
-                entityTypes: ["chores"],
-                matchCount: 50,
-                minSimilarity: 0.25,
-              });
-              if (sem.ok) {
-                const matches = (sem.matches ?? []).filter((m: any) => (m as any)?.entity_type === "chores");
-                const n = matches.length;
-                summaries.push(`Found ${n} chores matching ${actionKeyword} + ${choreKeyword}.`);
-                continue;
-              }
-            }
-
-            const { count, error } = await supabase
-              .from("chores")
-              .select("id", { count: "exact", head: true })
-              .eq("household_id", householdId)
-              .is("deleted_at", null)
-              .or(`title.ilike.%${choreKeyword}%,metadata->>space.ilike.%${choreKeyword}%`);
-            if (error) {
-              setToolError(error.message || "Couldn’t fetch the information");
-              return;
-            }
-            const n = typeof count === "number" ? count : 0;
-            summaries.push(`Found ${n} chores matching ${choreKeyword}.`);
-            continue;
-          }
-          const tc: ToolCall = {
-            id: `direct_${table}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-            tool: "db.select",
-            args: {
-              table,
-              limit: 50,
-            },
-            reason: `Fetch ${table} from the database`,
-          };
-          const res = await executeToolCall({
-            accessToken: token,
-            householdId,
-            scope: memoryScope,
-            toolCall: withHouseholdId(tc, householdId),
-          });
-          if (!res.ok) {
-            setToolError("error" in res ? res.error : "Couldn’t fetch the information");
-            return;
-          }
-          summaries.push(res.summary);
-        }
-
-        appendAssistantMessage(summaries.join("\n\n"));
-      })();
-
-      return;
-    }
-
-    // Fuzzy query routing: if this looks like a question (and isn't a deterministic direct-table query),
-    // try semantic search across entities before calling the LLM.
-    if (isQueryIntent(trimmed) && !isChoreCreateImperative(trimmed)) {
-      appendUserMessage(trimmed);
-      setInput("");
-
-      const { token, householdId } = getAgentSetup();
-      if (!token || !householdId) {
-        setToolError("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        return;
-      }
-
-      try {
-        const res = await semanticSearch({
-          accessToken: token,
-          householdId,
-          query: trimmed,
-          entityTypes: ["chores", "helpers", "alerts"],
-          matchCount: 10,
-          minSimilarity: 0.15,
-        });
-        if (res.ok) {
-          const matches = res.matches ?? [];
-          const top = matches.length > 0 ? matches[0] : null;
-          const topSim = top && typeof (top as any).similarity === "number" ? Number((top as any).similarity) : 0;
-          if (matches.length > 0 && topSim >= 0.15) {
-            const lines = matches.slice(0, 10).map((m: any) => {
-              const et = typeof m?.entity_type === "string" ? m.entity_type : "";
-              const title = typeof m?.title === "string" ? m.title : "";
-              const sim = typeof m?.similarity === "number" ? m.similarity.toFixed(3) : "";
-              return `- [${et}] ${title}${sim ? ` (sim=${sim})` : ""}`;
-            });
-            appendAssistantMessage(lines.length > 0 ? lines.join("\n") : "No semantic matches found.");
-            return;
-          }
-
-          if (matches.length > 0) {
-            const lines = matches.slice(0, 5).map((m: any) => {
-              const et = typeof m?.entity_type === "string" ? m.entity_type : "";
-              const title = typeof m?.title === "string" ? m.title : "";
-              const sim = typeof m?.similarity === "number" ? m.similarity.toFixed(3) : "";
-              return `- [${et}] ${title}${sim ? ` (sim=${sim})` : ""}`;
-            });
-            appendAssistantMessage(`Best semantic candidates (low confidence):\n${lines.join("\n")}`);
-          }
-        }
-      } catch {
-        // fall back to LLM
-      }
-
-      // No confident semantic match: fall back to LLM, but don't duplicate the user message.
-      sendMessage(trimmed, { silent: true });
-      return;
-    }
-
-    if (isChoreCreateImperative(trimmed)) {
-      appendUserMessage(trimmed);
-      setInput("");
-      if (threadKey) clearThreadAnswers(threadKey);
-      dispatchClientChore({ type: "RESET" });
-      await startClientChoreSession(trimmed);
-      return;
-    }
+    // If the assistant is currently streaming, ignore sends.
+    if (isStreaming) return;
 
     sendMessage(trimmed);
     setInput("");
-  }, [input, isStreaming, sendMessage, memoryScope, appendAssistantMessage, lang, appendUserMessage, getAgentSetup, startClientChoreSession, threadKey, clearThreadAnswers, semanticSearch]);
+  }, [input, isStreaming, sendMessage, appendAssistantMessage, lang, appendUserMessage, setDeleteChoresFlowSynced, deleteChoresFlow.phase, deleteChoresFlow.scope, deleteChoresFlow.choreIds, runDeleteChores, runDeleteScopePreview, loadSpecificChoresPreview]);
 
   const handleQuickAction = useCallback((prompt: string) => {
     setInput(prompt);
@@ -2260,6 +2041,33 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         const ambiguous = detectAmbiguousAreaChoreClient(record, spaces);
         if (ambiguous.ok) continue;
 
+        const recordTitle = typeof record.title === "string" ? record.title : "";
+        const recordDesc = typeof record.description === "string" ? record.description : "";
+        const recordText = `${recordTitle} ${recordDesc}`.trim();
+        const inferred =
+          inferSpaceFromText((ambiguous as any).options ?? [], recordText) ||
+          inferSpaceFromText((ambiguous as any).options ?? [], latestUserText);
+        if (inferred) {
+          if (threadKey) setThreadAnswer(threadKey, { spaces: [inferred] });
+          const args2: any = tc.args ?? {};
+          const rec2 = args2.record && typeof args2.record === "object" && !Array.isArray(args2.record) ? args2.record : {};
+          const meta2 =
+            rec2?.metadata && typeof rec2.metadata === "object" && !Array.isArray(rec2.metadata) ? { ...rec2.metadata } : {};
+          const patched: ToolCall = {
+            ...tc,
+            args: {
+              ...args2,
+              record: {
+                ...rec2,
+                metadata: { ...meta2, space: inferred },
+              },
+            },
+          };
+          setToolCallOverridesByKey((prev) => ({ ...prev, [key]: patched }));
+          pendingSpaceToolCallKeyRef.current = null;
+          continue;
+        }
+
         if (storedSpaces.length > 0) {
           const space = storedSpaces.join(", ");
           const args2: any = tc.args ?? {};
@@ -2321,7 +2129,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [spaceClarifyOpen, dedupedWriteToolCalls, toolCallOverridesByKey, ensureHomeSpacesForValidation, openSpaceClarification, getAgentSetup]);
+  }, [spaceClarifyOpen, dedupedWriteToolCalls, toolCallOverridesByKey, ensureHomeSpacesForValidation, openSpaceClarification, getAgentSetup, latestUserText]);
 
   const hasProposals =
     proposedActions.length > 0 ||
@@ -2332,14 +2140,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   const [autoExecutedToolCallIds, setAutoExecutedToolCallIds] = useState<Record<string, boolean>>({});
 
   const [automationSuggestionBusyId, setAutomationSuggestionBusyId] = useState<string | null>(null);
-
-  const latestUserText = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const m: any = messages[i];
-      if (m?.role === "user" && typeof m?.content === "string") return String(m.content);
-    }
-    return "";
-  }, [messages]);
 
   const recentUserTextWindow = useMemo(() => {
     const parts: string[] = [];
@@ -3123,7 +2923,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       }
       const res = await semanticReindex({ accessToken: token, householdId, entityTypes: ["chores", "helpers", "alerts"] });
       if (!res.ok) {
-        setSemanticDebugError(res.error);
+        setSemanticDebugError("error" in res ? res.error : "Semantic reindex failed.");
         return;
       }
       setSemanticDebugLastReindex(`Indexed ${res.indexed} rows in ${res.batches} batches.`);
@@ -3156,7 +2956,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         minSimilarity: 0.15,
       });
       if (!res.ok) {
-        setSemanticDebugError(res.error);
+        setSemanticDebugError("error" in res ? res.error : "Semantic search failed.");
         return;
       }
       setSemanticDebugMatches(res.matches as any[]);
@@ -3351,6 +3151,20 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       const title = proposedClarification.title || "Choose spaces";
       const options = filterBathroomOptionsIfNeeded(optionsClean, title);
       if (options.length === 0) return;
+
+      const inferred = inferSpaceFromText(options, latestUserText);
+      if (inferred) {
+        const resp: any = { spaces: [inferred] };
+        const dueAt = pendingClarificationRef.current?.due_at;
+        if (dueAt) resp.due_at = dueAt;
+        if (threadKey) setThreadAnswer(threadKey, { spaces: [inferred] });
+        if (clarificationKey) {
+          dismissedClarificationKeyRef.current = clarificationKey;
+          if (threadKey) setDismissedClarificationKey(threadKey, clarificationKey);
+        }
+        sendMessage(JSON.stringify({ clarification_response: resp }), { silent: true, allowWhileStreaming: true });
+        return;
+      }
 
       openedSpaceClarificationKeyRef.current = clarificationKey;
       setPendingClarification((prev) =>
@@ -4969,73 +4783,29 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
               if (homeProfileWizardStep === 1) {
                 const hasBalconySpace = spaces.some((s) => s.toLowerCase().includes("balcony"));
                 const hasTerraceSpace = spaces.some((s) => s.toLowerCase().includes("terrace"));
+                const masterOptions = buildMasterSpaceOptions({
+                  homeType,
+                  bhk,
+                  numBathrooms,
+                  balconyCount,
+                  terraceCount,
+                });
                 return (
                   <Stack spacing={2}>
                     <Typography variant="body2" color="text.secondary">
                       Add notable spaces. You can select suggestions or type your own.
                     </Typography>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                      <TextField
-                        label="Add a space (free text)"
-                        value={homeProfileNewSpace}
-                        onChange={(e) => setHomeProfileNewSpace(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key !== "Enter") return;
-                          e.preventDefault();
-                          const next = homeProfileNewSpace.trim();
-                          if (!next) return;
-                          const nextSpaces = Array.from(new Set([...spaces, next]));
-                          const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                          updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                          setHomeProfileNewSpace("");
-                        }}
-                        fullWidth
-                        size="small"
-                        placeholder="e.g. battery room"
-                      />
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          const next = homeProfileNewSpace.trim();
-                          if (!next) return;
-                          const nextSpaces = Array.from(new Set([...spaces, next]));
-                          const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                          updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                          setHomeProfileNewSpace("");
-                        }}
-                        disabled={!homeProfileNewSpace.trim()}
-                        sx={{ flexShrink: 0 }}
-                      >
-                        Add
-                      </Button>
-                    </Stack>
-
-                    <Box>
-                      <Typography variant="caption" color="text.secondary" display="block" mb={0.75}>
-                        Common spaces (tap to select)
-                      </Typography>
-                      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                        {HOME_SPACE_SUGGESTIONS.map((opt) => {
-                          const selected = spaces.some((s) => s.toLowerCase() === opt.toLowerCase());
-                          return (
-                            <Chip
-                              key={opt}
-                              label={opt}
-                              size="small"
-                              color={selected ? "primary" : "default"}
-                              variant={selected ? "filled" : "outlined"}
-                              onClick={() => {
-                                const nextSpaces = selected
-                                  ? spaces.filter((s) => s.toLowerCase() !== opt.toLowerCase())
-                                  : Array.from(new Set([...spaces, opt]));
-                                const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                                updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                              }}
-                            />
-                          );
-                        })}
-                      </Stack>
-                    </Box>
+                    <Autocomplete
+                      multiple
+                      options={masterOptions}
+                      value={spaces}
+                      onChange={(_, next) => {
+                        const nextSpaces = (Array.isArray(next) ? next : []).map(String).filter(Boolean);
+                        const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
+                        updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
+                      }}
+                      renderInput={(params) => <TextField {...params} label="Spaces" size="small" />}
+                    />
 
                     {spaces.length > 0 && (
                       <Box>

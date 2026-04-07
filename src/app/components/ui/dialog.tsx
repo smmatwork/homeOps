@@ -14,7 +14,7 @@ import {
 interface DialogPropsExtended extends DialogProps {
   open: boolean;
   onClose: () => void;
-  title: string;
+  title?: string;
   description?: string;
   confirmText?: string;
   cancelText?: string;
@@ -34,11 +34,13 @@ export function Dialog({
 }: DialogPropsExtended) {
   return (
     <MuiDialog open={open} onClose={onClose} {...props}>
-      <DialogTitle>
-        <Typography variant="h6" fontWeight="bold">
-          {title}
-        </Typography>
-      </DialogTitle>
+      {title ? (
+        <DialogTitle>
+          <Typography variant="h6" fontWeight="bold">
+            {title}
+          </Typography>
+        </DialogTitle>
+      ) : null}
       <DialogContent>
         {description && (
           <Typography variant="body2" color="textSecondary" mb={2}>
@@ -61,4 +63,20 @@ export function Dialog({
   );
 }
 
-export { DialogTitle, DialogContent };
+function DialogHeader({ children, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div {...props}>
+      {children}
+    </div>
+  );
+}
+
+function DialogDescription({ children, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div {...props}>
+      {children}
+    </div>
+  );
+}
+
+export { DialogTitle, DialogContent, DialogHeader, DialogDescription };

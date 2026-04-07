@@ -34,9 +34,11 @@ import {
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
+import { useI18n } from "../../i18n";
 
 type AlertRow = {
   id: string;
+  household_id: string;
   title: string;
   body: string | null;
   severity: number;
@@ -45,11 +47,27 @@ type AlertRow = {
   metadata: Record<string, unknown> | null;
 };
 
+function localDateTimeLabel(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(d);
+}
+
 export function Alerts() {
   const [filter, setFilter] = useState<"all" | "critical" | "warning" | "info">("all");
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const { householdId } = useAuth();
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
@@ -115,33 +133,33 @@ export function Alerts() {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box>
           <Typography variant="h4" fontWeight="bold">
-            Alerts & Notifications
+            {t("alerts.title")}
           </Typography>
           <Typography color="textSecondary">
-            Stay informed about household activities and reminders
+            {t("alerts.subtitle")}
           </Typography>
           {unreadCount > 0 && (
             <Badge badgeContent={unreadCount} color="error" sx={{ mt: 1 }}>
-              Unread
+              {t("alerts.unread")}
             </Badge>
           )}
         </Box>
         <Box display="flex" gap={2}>
           <Button variant="outlined" startIcon={<CheckCircle />}>
-            Mark All Read
+            {t("alerts.mark_all_read")}
           </Button>
           <Button variant="contained" startIcon={<AddAlert />} onClick={() => setDialogOpen(true)}>
-            Create Alert
+            {t("alerts.create")}
           </Button>
         </Box>
       </Box>
 
       {/* Filter Tabs */}
       <Tabs value={filter} onChange={(e, newValue) => setFilter(newValue)} variant="scrollable">
-        <Tab label={`All (${alerts.length})`} value="all" />
-        <Tab label={`Critical (${alerts.filter((a) => alertType(a) === "critical").length})`} value="critical" />
-        <Tab label={`Warning (${alerts.filter((a) => alertType(a) === "warning").length})`} value="warning" />
-        <Tab label={`Info (${alerts.filter((a) => alertType(a) === "info").length})`} value="info" />
+        <Tab label={`${t("alerts.all")} (${alerts.length})`} value="all" />
+        <Tab label={`${t("alerts.critical_tab")} (${alerts.filter((a) => alertType(a) === "critical").length})`} value="critical" />
+        <Tab label={`${t("alerts.warning_tab")} (${alerts.filter((a) => alertType(a) === "warning").length})`} value="warning" />
+        <Tab label={`${t("alerts.info_tab")} (${alerts.filter((a) => alertType(a) === "info").length})`} value="info" />
       </Tabs>
 
       {/* Alerts List */}
@@ -165,7 +183,7 @@ export function Alerts() {
                     {alert.body ?? ""}
                   </Typography>
                   <Typography variant="caption" color="textSecondary">
-                    {new Date(alert.created_at).toLocaleString()}
+                    {localDateTimeLabel(alert.created_at)}
                   </Typography>
                 </Box>
                 <IconButton>
@@ -180,42 +198,42 @@ export function Alerts() {
       {filteredAlerts.length === 0 && (
         <Box textAlign="center" py={4}>
           <NotificationsActive fontSize="large" color="disabled" />
-          <Typography variant="h6">No alerts</Typography>
-          <Typography color="textSecondary">You're all caught up!</Typography>
+          <Typography variant="h6">{t("alerts.no_alerts")}</Typography>
+          <Typography color="textSecondary">{t("alerts.caught_up")}</Typography>
         </Box>
       )}
 
       {/* Create Alert Dialog */}
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>Create Custom Alert</DialogTitle>
+        <DialogTitle>{t("alerts.create_custom")}</DialogTitle>
         <DialogContent>
           <Box display="flex" flexDirection="column" gap={2}>
-            <TextField label="Alert Title" fullWidth />
-            <TextField label="Message" fullWidth multiline rows={3} />
+            <TextField label={t("alerts.alert_title")} fullWidth />
+            <TextField label={t("alerts.message")} fullWidth multiline rows={3} />
             <FormControl fullWidth>
-              <InputLabel>Priority</InputLabel>
+              <InputLabel>{t("alerts.priority")}</InputLabel>
               <Select>
-                <MenuItem value="critical">Critical</MenuItem>
-                <MenuItem value="warning">Warning</MenuItem>
-                <MenuItem value="info">Info</MenuItem>
+                <MenuItem value="critical">{t("alerts.critical")}</MenuItem>
+                <MenuItem value="warning">{t("alerts.warning")}</MenuItem>
+                <MenuItem value="info">{t("alerts.info")}</MenuItem>
               </Select>
             </FormControl>
             <FormControl fullWidth>
-              <InputLabel>Category</InputLabel>
+              <InputLabel>{t("alerts.category")}</InputLabel>
               <Select>
-                <MenuItem value="maintenance">Maintenance</MenuItem>
-                <MenuItem value="bills">Bills</MenuItem>
-                <MenuItem value="inventory">Inventory</MenuItem>
-                <MenuItem value="safety">Safety</MenuItem>
-                <MenuItem value="reminders">Reminders</MenuItem>
+                <MenuItem value="maintenance">{t("alerts.maintenance")}</MenuItem>
+                <MenuItem value="bills">{t("alerts.bills")}</MenuItem>
+                <MenuItem value="inventory">{t("alerts.inventory")}</MenuItem>
+                <MenuItem value="safety">{t("alerts.safety")}</MenuItem>
+                <MenuItem value="reminders">{t("alerts.reminders")}</MenuItem>
               </Select>
             </FormControl>
-            <TextField label="Alert Date & Time" type="datetime-local" fullWidth />
+            <TextField label={t("alerts.alert_date_time")} type="datetime-local" fullWidth />
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
-          <Button variant="contained">Create Alert</Button>
+          <Button onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
+          <Button variant="contained">{t("alerts.create")}</Button>
         </DialogActions>
       </Dialog>
     </Box>

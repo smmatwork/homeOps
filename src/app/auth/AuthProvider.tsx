@@ -94,6 +94,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const baseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? "").trim().replace(/\/$/, "");
       if (!baseUrl) return { ok: false as const, error: "App setup is incomplete (missing server URL)." };
 
+      const anon = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? "").trim();
+      if (!anon) return { ok: false as const, error: "App setup is incomplete (missing anon key)." };
+
       const fullName = typeof params?.fullName === "string" ? params.fullName.trim() : "";
       const householdName = typeof params?.householdName === "string" ? params.householdName.trim() : "";
 
@@ -103,7 +106,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+            apikey: anon,
+            Authorization: `Bearer ${anon}`,
+            "x-user-authorization": `Bearer ${token}`,
           },
           body: JSON.stringify({
             full_name: fullName,

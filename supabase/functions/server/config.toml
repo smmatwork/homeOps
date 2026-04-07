@@ -1,0 +1,4 @@
+# Supabase Edge Function configuration
+# Disables Kong JWT verification for this function. The function itself still performs
+# authorization checks where required.
+verify_jwt = false

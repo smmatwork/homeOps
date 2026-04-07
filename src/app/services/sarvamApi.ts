@@ -3,11 +3,21 @@
 // Docs: https://docs.sarvam.ai
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BASE_URL = "https://api.sarvam.ai";
+function baseUrl(): string {
+  return (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "http://127.0.0.1:54321";
+}
+
+function anonKey(): string {
+  const k = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  return typeof k === "string" ? k.trim() : "";
+}
 
 function getKey(): string {
-  return import.meta.env.VITE_SARVAM_API_KEY as string;
+  const k = import.meta.env.VITE_SARVAM_API_KEY as string | undefined;
+  return typeof k === "string" ? k.trim() : "";
 }
+
+const BASE_URL = "https://api.sarvam.ai";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -31,10 +41,17 @@ You help with:
 - Alerts & reminders: bills, maintenance, important dates
 - Household budget & expenses
 
+Output rules (critical):
+- Do NOT reveal internal chain-of-thought, reasoning, or hidden work.
+- Do NOT output text like "thinking:", "thought:", "reasoning:", "analysis:", or similar.
+- Do NOT output meta-commentary about what you are going to do (examples: "Okay, let's see...", "Wait...", "Let me check...", "Alternatively...", "The task is to...").
+- If you are unsure, ask a short clarifying question; do NOT narrate deliberation.
+- Only output final, user-facing content.
+
 Guidelines:
 - Keep responses concise and actionable
 - Use bullet points or numbered lists for multi-step answers
-- Respond in the same language the user writes in (English, Hindi, or Kannada)
+- Respond in the UI language provided by the system (English, Hindi, or Kannada). If none is provided, respond in the same language the user writes in.
 - For task lists, use ✅ (done), 🔄 (in-progress), ⏰ (upcoming), ❌ (overdue) emojis
 - Be warm, friendly, and culturally aware of Indian household contexts
 - When unsure, ask a clarifying question rather than guessing
@@ -44,12 +61,25 @@ User experience (important):
 - If the user seems new or confused, suggest: 1) set up / review Home Profile, 2) create chores, 3) assign helpers / schedules.
 - Ask one question at a time and tell the user why you're asking it.
 
+Home profile UX rule (critical):
+- Do NOT print a home profile summary unless the user explicitly asked to review/show the home profile.
+- If the user is asking to schedule/create a chore (e.g. "deep clean balcony" / "deep clean bathroom"), do NOT respond with a home profile summary.
+- Instead, ask the minimum clarifying question needed to proceed (e.g. which balcony/bathroom, or date/time).
+
 Data rules (critical):
 - Never claim you can see the user's real chores/helpers/alerts unless you have retrieved them from the database in this chat.
 - If the user asks "what are my chores" / "pending chores" / "list helpers" / "show alerts", you MUST respond with a tool_calls JSON block using db.select for the appropriate table.
 - After the tool call results are provided, summarize ONLY what was returned. If no rows are returned, say there are none.
 - Do not invent example chores or helper names.
+- NEVER list specific helper names (e.g., "Rajesh", "Sunita") or helper attributes (skills, eco-friendly, etc.) unless those exact helpers were returned by a db.select result in this same chat.
+- If you have not yet fetched helpers for this chat, and the user asks to assign a helper / cleaner, you MUST first output a tool_calls JSON block to db.select from the helpers table.
+- If the helpers query returns zero rows, say there are no helpers available and offer self-assignment (do not fabricate a list "as an example").
 - If you output a tool_calls JSON block, output ONLY the JSON code block and nothing else (no extra explanation text before or after).
+
+Security & internal IDs (critical):
+- NEVER ask the user for internal IDs like household_id, user_id, helper_id UUIDs, etc.
+- Assume the system already knows the correct household context for the current user/session.
+- When creating records, you may omit household_id; the system will inject it automatically.
 
 When the user asks you to create chores or helpers, include a machine-readable JSON code block at the end of your message in the following format:
 
@@ -59,7 +89,7 @@ When the user asks you to create chores or helpers, include a machine-readable J
     {
       "type": "create",
       "table": "chores" | "helpers",
-      "record": { "household_id": "...", "title": "..." },
+      "record": { "title": "..." },
       "reason": "..."
     }
   ]
@@ -68,8 +98,39 @@ When the user asks you to create chores or helpers, include a machine-readable J
 
 Rules for the JSON block:
 - Only include it when you are confident an action should be taken.
-- Always include required fields for the table (chores: title, household_id; helpers: name, household_id).
+- Always include required fields for the table (chores: title; helpers: name).
 - For chores, you may include optional fields like description, due_at, priority, and helper_id.
+- Do not include any additional keys outside the specified schema.
+
+When the user asks you to suggest proactive automations or reminders (e.g. "suggest automations", "set up reminders", "maintenance reminders"), include a machine-readable JSON code block at the end of your message in the following format:
+
+\`\`\`json
+{
+  "automation_suggestions": [
+    {
+      "title": "...",
+      "body": "...",
+      "suggested_automation": {
+        "title": "...",
+        "description": "...",
+        "cadence": "daily" | "weekly" | "monthly",
+        "at_time": "HH:MM:SS" | null,
+        "day_of_week": 0 | 1 | 2 | 3 | 4 | 5 | 6 | null,
+        "day_of_month": 1-31 | null,
+        "next_run_at": "<ISO timestamp in UTC>",
+        "status": "active"
+      },
+      "reason": "..."
+    }
+  ]
+}
+\`\`\`
+
+Rules for automation_suggestions:
+- Keep suggestions household-relevant and practical.
+- Always include a valid cadence.
+- Always include next_run_at (ISO timestamp in UTC). If the user doesn't specify timing, choose a reasonable default.
+- Use at_time/day_of_week/day_of_month only when relevant to the cadence.
 - Do not include any additional keys outside the specified schema.
 
 When the user asks to set up or generate a home profile, you should ask a short sequence of questions (one at a time) to collect:
@@ -145,61 +206,70 @@ export async function* streamChat(
   messages: ChatMessage[],
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
-  const apiKey = getKey();
-  if (!apiKey || apiKey === "your_sarvam_api_key_here") {
-    // Fallback demo response when no key is set
+  const accessToken = localStorage.getItem("homeops.agent.access_token") ?? "";
+  const householdId = localStorage.getItem("homeops.agent.household_id") ?? "";
+  if (!accessToken.trim() || !householdId.trim()) {
     yield* _demoStream(messages[messages.length - 1]?.content ?? "");
     return;
   }
 
-  const res = await fetch(`${BASE_URL}/v1/chat/completions`, {
+  const controller = new AbortController();
+  let timeoutId: number | null = null;
+  const abort = () => {
+    try {
+      controller.abort();
+    } catch {
+      // ignore
+    }
+  };
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  // Prevent UI from being stuck in a streaming state if the local Edge function or agent-service hangs.
+  timeoutId = window.setTimeout(() => abort(), 25000);
+
+  const anon = anonKey();
+  const res = await fetch(`${baseUrl()}/functions/v1/server/chat/respond`, {
     method: "POST",
-    signal,
+    signal: controller.signal,
     headers: {
-      "api-subscription-key": apiKey,
       "Content-Type": "application/json",
+      apikey: anon,
+      Authorization: `Bearer ${anon}`,
+      "x-user-authorization": `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
+      household_id: householdId,
       messages,
       model: "sarvam-m",
-      stream: true,
       temperature: 0.3,
-      max_tokens: 512,
+      max_tokens: 900,
     }),
   });
 
+  if (timeoutId !== null) {
+    window.clearTimeout(timeoutId);
+  }
+
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
+    const lower = (errText || "").toLowerCase();
+    if (res.status === 401 && lower.includes("invalid token")) {
+      // Clear stale auth so the app falls back to demo mode until the user re-connects.
+      localStorage.removeItem("homeops.agent.access_token");
+      localStorage.removeItem("homeops.agent.household_id");
+      throw new Error(
+        "Your session token is invalid/expired. Open Agent Setup and sign in again to refresh your access_token + household_id.",
+      );
+    }
     throw new Error(`Sarvam chat error ${res.status}: ${errText}`);
   }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    // Keep the last (potentially incomplete) line in the buffer
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const data = trimmed.slice(5).trim();
-      if (data === "[DONE]") return;
-      try {
-        const parsed = JSON.parse(data);
-        const text: string | undefined = parsed.choices?.[0]?.delta?.content;
-        if (text) yield text;
-      } catch {
-        // malformed chunk — skip
-      }
-    }
-  }
+  const json = (await res.json().catch(() => null)) as any;
+  const outText = json && typeof json === "object" && typeof json.text === "string" ? String(json.text) : "";
+  if (!outText) return;
+  yield outText;
 }
 
 // ── Speech-to-Text (Saaras v3) ────────────────────────────────────────────────

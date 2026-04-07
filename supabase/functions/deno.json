@@ -1,7 +1,11 @@
 {
   "nodeModulesDir": "auto",
   "imports": {
-    "react/jsx-runtime": "npm:react/jsx-runtime"
+    "react/jsx-runtime": "npm:react/jsx-runtime",
+    "hono": "jsr:@hono/hono@4",
+    "hono/cors": "jsr:@hono/hono@4/cors",
+    "hono/logger": "jsr:@hono/hono@4/logger",
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2.49.8"
   },
   "compilerOptions": {
     "lib": ["deno.ns", "dom"],

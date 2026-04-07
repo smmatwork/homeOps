@@ -365,10 +365,11 @@ export function useSarvamChat() {
       limit: 50,
     });
 
-    // If user JWT expired, refresh once and retry.
+    // If user JWT expired/invalid, refresh once and retry.
     if (res.ok === false) {
       const errRes = res as { ok: false; error: string; status?: number };
-      if (errRes.status === 401) {
+      const invalidToken = typeof errRes.error === "string" && /invalid token/i.test(errRes.error);
+      if (errRes.status === 401 || invalidToken) {
         try {
           const refresh = await supabase.auth.refreshSession();
           const nextToken = refresh.data.session?.access_token ? String(refresh.data.session.access_token).trim() : "";

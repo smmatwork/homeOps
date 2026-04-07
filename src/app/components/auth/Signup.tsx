@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { Box, Button, Card, CardContent, CardHeader, TextField, Typography, Checkbox, FormControlLabel, Alert } from "@mui/material";
+import { Box, Button, Card, CardContent, CardHeader, Divider, TextField, Typography, Checkbox, FormControlLabel, Alert } from "@mui/material";
 import { Link, useNavigate } from "react-router";
 import { supabase } from "../../services/supabaseClient";
+import { useI18n } from "../../i18n";
+import { LanguageSwitcher } from "../LanguageSwitcher";
 
 export function Signup() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -120,49 +123,52 @@ export function Signup() {
         padding: 2,
       }}
     >
+      <Box sx={{ position: "fixed", top: 12, right: 12, zIndex: 10 }}>
+        <LanguageSwitcher />
+      </Box>
       <Card sx={{ width: "100%", maxWidth: 400 }}>
         <CardHeader
           title={
             <Typography variant="h5" fontWeight="bold" align="center">
-              Create Account
+              {t("auth.signup.create_account")}
             </Typography>
           }
           subheader={
             <Typography variant="body2" color="textSecondary" align="center">
-              Join your household or start managing your home
+              {t("auth.signup.subtitle")}
             </Typography>
           }
         />
         <CardContent>
           <Box display="flex" flexDirection="column" gap={2}>
             {error && <Alert severity="error">{error}</Alert>}
-            <TextField label="Full Name" type="text" placeholder="John Doe" fullWidth value={fullName} onChange={(e) => setFullName(e.target.value)} />
-            <TextField label="Email" type="email" placeholder="you@example.com" fullWidth value={email} onChange={(e) => setEmail(e.target.value)} />
+            <TextField label={t("auth.signup.full_name")} type="text" placeholder="John Doe" fullWidth value={fullName} onChange={(e) => setFullName(e.target.value)} />
+            <TextField label={t("auth.login.email")} type="email" placeholder="you@example.com" fullWidth value={email} onChange={(e) => setEmail(e.target.value)} />
             <TextField
-              label="Household Code (Optional)"
+              label={t("auth.signup.household_code")}
               type="text"
-              placeholder="Enter existing household code"
+              placeholder={t("auth.signup.household_code_placeholder")}
               fullWidth
-              helperText="Leave empty to create a new household"
+              helperText={t("auth.signup.household_code_help")}
             />
-            <TextField label="Password" type="password" placeholder="••••••••" fullWidth value={password} onChange={(e) => setPassword(e.target.value)} />
-            <TextField label="Confirm Password" type="password" placeholder="••••••••" fullWidth value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            <TextField label={t("auth.login.password")} type="password" placeholder="••••••••" fullWidth value={password} onChange={(e) => setPassword(e.target.value)} />
+            <TextField label={t("auth.signup.confirm_password")} type="password" placeholder="••••••••" fullWidth value={confirm} onChange={(e) => setConfirm(e.target.value)} />
             <FormControlLabel
               control={<Checkbox />}
               label={
                 <Typography variant="body2" color="textSecondary">
-                  I agree to the Terms of Service and Privacy Policy
+                  {t("auth.signup.terms")}
                 </Typography>
               }
             />
             <Button variant="contained" size="large" fullWidth disabled={busy} onClick={onSubmit}>
-              Create Account
+              {t("auth.signup.create")}
             </Button>
             <Typography variant="body2" color="textSecondary" align="center">
-              Already have an account?{" "}
+              {t("auth.signup.have_account")}{" "}
               <Link to="/login">
                 <Typography component="span" color="primary" fontWeight="medium" sx={{ cursor: "pointer" }}>
-                  Sign in
+                  {t("auth.signup.sign_in")}
                 </Typography>
               </Link>
             </Typography>

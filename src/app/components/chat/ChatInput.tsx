@@ -1,7 +1,8 @@
-import { Box, Stack, TextField, IconButton, Typography, Tooltip } from "@mui/material";
+import { Box, Stack, TextField, IconButton, Typography, Tooltip, ToggleButtonGroup, ToggleButton } from "@mui/material";
 import { Mic, MicOff, Send } from "@mui/icons-material";
 import { keyframes } from "@emotion/react";
 import type { SpeechLang } from "../../hooks/useSarvamSTT";
+import { useI18n } from "../../i18n";
 
 const pulseRing = keyframes`
   0%   { box-shadow: 0 0 0 0   rgba(211, 47, 47, 0.45); }
@@ -28,6 +29,8 @@ interface ChatInputProps {
   onMicToggle: () => void;
   voiceSupported: boolean;
   lang: SpeechLang;
+  transliterationMode?: "off" | "hi" | "kn";
+  onTransliterationModeChange?: (mode: "off" | "hi" | "kn") => void;
   disabled?: boolean;
 }
 
@@ -40,8 +43,11 @@ export function ChatInput({
   onMicToggle,
   voiceSupported,
   lang,
+  transliterationMode = "off",
+  onTransliterationModeChange,
   disabled = false,
 }: ChatInputProps) {
+  const { t } = useI18n();
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -68,13 +74,31 @@ export function ChatInput({
             color={isTranscribing ? "warning.main" : "error.main"}
             fontWeight={500}
           >
-            {isTranscribing ? "Transcribing…" : "Listening…"}
+            {isTranscribing ? t("chat.transcribing") : t("chat.listening")}
           </Typography>
         </Stack>
       )}
 
       {/* Input row */}
       <Stack direction="row" spacing={1} alignItems="flex-end">
+        <Stack spacing={0.5} sx={{ flex: 1 }}>
+          {onTransliterationModeChange && (
+            <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={transliterationMode}
+                onChange={(_, v) => {
+                  if (v === null) return;
+                  onTransliterationModeChange(v);
+                }}
+              >
+                <ToggleButton value="off">{t("chat.transliteration_off")}</ToggleButton>
+                <ToggleButton value="hi">{t("chat.transliteration_hi")}</ToggleButton>
+                <ToggleButton value="kn">{t("chat.transliteration_kn")}</ToggleButton>
+              </ToggleButtonGroup>
+            </Box>
+          )}
         <TextField
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -85,6 +109,7 @@ export function ChatInput({
           multiline
           maxRows={4}
           disabled={disabled}
+          inputProps={{ lang: transliterationMode === "hi" ? "hi" : transliterationMode === "kn" ? "kn" : "en" }}
           sx={{
             "& .MuiOutlinedInput-root": {
               borderRadius: "24px",
@@ -92,11 +117,12 @@ export function ChatInput({
             },
           }}
         />
+        </Stack>
 
         {/* Mic button */}
         {voiceSupported && (
           <Tooltip
-            title={isTranscribing ? "Transcribing…" : isListening ? "Stop listening" : "Voice input"}
+            title={isTranscribing ? t("chat.transcribing") : isListening ? t("chat.stop_listening") : t("chat.voice_input")}
             placement="top"
           >
             <span>
@@ -124,7 +150,7 @@ export function ChatInput({
         )}
 
         {/* Send button */}
-        <Tooltip title="Send message" placement="top">
+        <Tooltip title={t("chat.send_message")} placement="top">
           <span>
             <IconButton
               onClick={onSend}

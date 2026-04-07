@@ -31,7 +31,9 @@ import {
   Edit,
   Delete,
 } from "@mui/icons-material";
-import { getYoutubeSettings, setYoutubeSettings } from "../../services/agentApi";
+import { executeToolCall, getYoutubeSettings, setYoutubeSettings } from "../../services/agentApi";
+import { useI18n } from "../../i18n";
+import { useAuth } from "../../auth/AuthProvider";
 
 type YoutubeSettings = {
   queryTemplate: string;
@@ -58,6 +60,8 @@ function buildYoutubeQuery(params: {
 }
 
 export function Recipes() {
+  const { householdId, accessToken } = useAuth();
+  const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState("");
   const [category, setCategory] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -199,10 +203,10 @@ export function Recipes() {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box>
           <Typography variant="h4" fontWeight="bold">
-            Recipes
+            {t("recipes.title")}
           </Typography>
           <Typography color="textSecondary">
-            Your family's favorite meals and cooking ideas
+            {t("recipes.subtitle")}
           </Typography>
         </Box>
         <Button
@@ -210,18 +214,18 @@ export function Recipes() {
           startIcon={<Add />}
           onClick={() => setDialogOpen(true)}
         >
-          Add Recipe
+          {t("recipes.add_recipe")}
         </Button>
       </Box>
 
       {/* YouTube Recipe Search */}
       <Card variant="outlined" sx={{ mb: 3 }}>
         <CardHeader
-          title="YouTube Recipe Search"
-          subheader="Search recipes on YouTube with customizable query options"
+          title={t("recipes.youtube_search")}
+          subheader={t("recipes.youtube_search_subtitle")}
           action={
             <Button variant="outlined" size="small" onClick={() => setYtSettingsOpen(true)}>
-              Search Options
+              {t("recipes.search_options")}
             </Button>
           }
         />
@@ -237,7 +241,7 @@ export function Recipes() {
             )}
 
             <TextField
-              label="Recipe"
+              label={t("recipes.recipe")}
               value={ytSearchText}
               onChange={(e) => setYtSearchText(e.target.value)}
               placeholder="e.g. paneer butter masala"
@@ -246,7 +250,7 @@ export function Recipes() {
             />
 
             <TextField
-              label="Generated query"
+              label={t("recipes.generated_query")}
               value={ytEffectiveQuery}
               fullWidth
               size="small"
@@ -255,10 +259,10 @@ export function Recipes() {
 
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
               <Button variant="contained" onClick={openYoutubeSearch} disabled={!ytEffectiveQuery}>
-                Search on YouTube
+                {t("recipes.search_youtube")}
               </Button>
               <Button variant="text" onClick={() => setYtSearchText(searchQuery)} disabled={!searchQuery.trim()}>
-                Use current page search
+                {t("recipes.use_current_search")}
               </Button>
             </Stack>
           </Stack>
@@ -268,7 +272,7 @@ export function Recipes() {
       {/* Search and Filter */}
       <Box display="flex" gap={2} mb={4}>
         <TextField
-          placeholder="Search recipes by name or cuisine..."
+          placeholder={t("recipes.search_placeholder")}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           fullWidth
@@ -277,13 +281,13 @@ export function Recipes() {
           }}
         />
         <FormControl size="small" sx={{ minWidth: 200 }}>
-          <InputLabel>Category</InputLabel>
+          <InputLabel>{t("recipes.category")}</InputLabel>
           <Select value={category} onChange={(e) => setCategory(e.target.value)}>
-            <MenuItem value="all">All</MenuItem>
-            <MenuItem value="Breakfast">Breakfast</MenuItem>
-            <MenuItem value="Lunch">Lunch</MenuItem>
-            <MenuItem value="Dinner">Dinner</MenuItem>
-            <MenuItem value="Dessert">Dessert</MenuItem>
+            <MenuItem value="all">{t("recipes.all")}</MenuItem>
+            <MenuItem value="Breakfast">{t("recipes.breakfast")}</MenuItem>
+            <MenuItem value="Lunch">{t("recipes.lunch")}</MenuItem>
+            <MenuItem value="Dinner">{t("recipes.dinner")}</MenuItem>
+            <MenuItem value="Dessert">{t("recipes.dessert")}</MenuItem>
           </Select>
         </FormControl>
       </Box>
@@ -308,7 +312,7 @@ export function Recipes() {
                 <Chip label={recipe.difficulty} />
               </Box>
               <Typography variant="body2" color="textSecondary">
-                Ingredients:
+                {t("recipes.ingredients")}
               </Typography>
               <ul>
                 {recipe.ingredients.slice(0, 3).map((ingredient, idx) => (
@@ -318,7 +322,7 @@ export function Recipes() {
                 ))}
                 {recipe.ingredients.length > 3 && (
                   <Typography variant="caption" color="textSecondary">
-                    + {recipe.ingredients.length - 3} more...
+                    + {recipe.ingredients.length - 3} {t("recipes.more")}
                   </Typography>
                 )}
               </ul>
@@ -326,7 +330,7 @@ export function Recipes() {
             <Divider />
             <Box display="flex" justifyContent="space-between" p={2}>
               <Button variant="outlined" size="small">
-                View Full Recipe
+                {t("recipes.view_full")}
               </Button>
               <Box>
                 <IconButton>
@@ -343,46 +347,46 @@ export function Recipes() {
 
       {filteredRecipes.length === 0 && (
         <Box textAlign="center" py={4}>
-          <Typography variant="h6">No recipes found</Typography>
+          <Typography variant="h6">{t("recipes.no_recipes")}</Typography>
           <Typography color="textSecondary">
-            Try adjusting your search or add a new recipe
+            {t("recipes.no_recipes_hint")}
           </Typography>
         </Box>
       )}
 
       {/* Add Recipe Dialog */}
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>Add New Recipe</DialogTitle>
+        <DialogTitle>{t("recipes.add_new_recipe")}</DialogTitle>
         <DialogContent>
           <Box display="flex" flexDirection="column" gap={2}>
-            <TextField label="Recipe Title" fullWidth />
-            <TextField label="Description" fullWidth multiline rows={2} />
+            <TextField label={t("recipes.recipe_title")} fullWidth />
+            <TextField label={t("recipes.description")} fullWidth multiline rows={2} />
             <Box display="flex" gap={2}>
-              <TextField label="Category" fullWidth />
-              <TextField label="Cuisine" fullWidth />
+              <TextField label={t("recipes.category")} fullWidth />
+              <TextField label={t("recipes.cuisine")} fullWidth />
             </Box>
             <Box display="flex" gap={2}>
-              <TextField label="Prep Time" fullWidth />
-              <TextField label="Cook Time" fullWidth />
-              <TextField label="Servings" fullWidth type="number" />
+              <TextField label={t("recipes.prep_time")} fullWidth />
+              <TextField label={t("recipes.cook_time")} fullWidth />
+              <TextField label={t("recipes.servings")} fullWidth type="number" />
             </Box>
-            <TextField label="Ingredients" fullWidth multiline rows={4} />
-            <TextField label="Instructions" fullWidth multiline rows={6} />
+            <TextField label={t("recipes.ingredients")} fullWidth multiline rows={4} />
+            <TextField label={t("recipes.instructions")} fullWidth multiline rows={6} />
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
-          <Button variant="contained">Save Recipe</Button>
+          <Button onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
+          <Button variant="contained">{t("recipes.save_recipe")}</Button>
         </DialogActions>
       </Dialog>
 
       {/* YouTube Settings Dialog */}
       <Dialog open={ytSettingsOpen} onClose={() => setYtSettingsOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>YouTube Search Options</DialogTitle>
+        <DialogTitle>{t("recipes.youtube_options")}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
             <TextField
-              label="Query template"
+              label={t("recipes.query_template")}
               value={ytSettings.queryTemplate}
               onChange={(e) => setYtSettings((prev) => ({ ...prev, queryTemplate: e.target.value }))}
               helperText='Use "{recipe}" placeholder. Example: "{recipe} hebbars kitchen"'
@@ -390,7 +394,7 @@ export function Recipes() {
               size="small"
             />
             <TextField
-              label="Preferred channels / keywords (optional)"
+              label={t("recipes.preferred_channels")}
               value={ytSettings.preferredChannels}
               onChange={(e) => setYtSettings((prev) => ({ ...prev, preferredChannels: e.target.value }))}
               helperText='Example: "Hebbars Kitchen" or "Ranveer Brar"'
@@ -398,22 +402,22 @@ export function Recipes() {
               size="small"
             />
             <FormControl fullWidth size="small">
-              <InputLabel>Include Shorts</InputLabel>
+              <InputLabel>{t("recipes.include_shorts")}</InputLabel>
               <Select
                 value={ytSettings.includeShorts ? "yes" : "no"}
-                label="Include Shorts"
+                label={t("recipes.include_shorts")}
                 onChange={(e) => setYtSettings((prev) => ({ ...prev, includeShorts: e.target.value === "yes" }))}
               >
-                <MenuItem value="no">No</MenuItem>
-                <MenuItem value="yes">Yes</MenuItem>
+                <MenuItem value="no">{t("recipes.no")}</MenuItem>
+                <MenuItem value="yes">{t("recipes.yes")}</MenuItem>
               </Select>
             </FormControl>
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setYtSettingsOpen(false)}>Cancel</Button>
+          <Button onClick={() => setYtSettingsOpen(false)}>{t("common.cancel")}</Button>
           <Button variant="contained" onClick={saveYoutubeSettings} disabled={ytBusy}>
-            Save
+            {t("common.save")}
           </Button>
         </DialogActions>
       </Dialog>

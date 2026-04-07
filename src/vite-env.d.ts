@@ -1,4 +1,11 @@
 /// <reference types="vite/client" />
+
+declare module "@sanskrit-coders/sanscript" {
+  const Sanscript: {
+    t: (input: string, from: string, to: string) => string;
+  };
+  export default Sanscript;
+}
 /// <reference types="vite-plugin-svgr/client" />
 
 // ── Vite env variables ────────────────────────────────────────────────────────

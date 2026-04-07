@@ -1,4 +1,5 @@
-import { Stack, Card, CardHeader, CardContent, Button, Divider, Typography } from "@mui/material";
+import { useEffect, useState } from "react";
+import { Stack, Card, CardHeader, CardContent, Button, Divider, Typography, Collapse, IconButton, Tooltip } from "@mui/material";
 import {
   AddTask,
   ShoppingCart,
@@ -11,6 +12,8 @@ import {
   NotificationsActive,
   Bolt,
   Link as LinkIcon,
+  ExpandMore,
+  ExpandLess,
 } from "@mui/icons-material";
 import { useNavigate } from "react-router";
 
@@ -36,6 +39,8 @@ interface QuickActionsPanelProps {
   onGenerateCoverage?: () => void;
   onRecommendChores?: () => void;
   homeProfileExists?: boolean;
+  defaultQuickCommandsCollapsed?: boolean;
+  storageKey?: string;
 }
 
 export function QuickActionsPanel({
@@ -46,8 +51,30 @@ export function QuickActionsPanel({
   onGenerateCoverage,
   onRecommendChores,
   homeProfileExists = false,
+  defaultQuickCommandsCollapsed = false,
+  storageKey,
 }: QuickActionsPanelProps) {
   const navigate = useNavigate();
+
+  const quickCommandsStorageKey = storageKey || "homeops.chat.quick_commands_collapsed";
+  const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem(quickCommandsStorageKey);
+      if (raw === "true") return true;
+      if (raw === "false") return false;
+      return defaultQuickCommandsCollapsed;
+    } catch {
+      return defaultQuickCommandsCollapsed;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(quickCommandsStorageKey, String(quickCommandsCollapsed));
+    } catch {
+      // ignore
+    }
+  }, [quickCommandsCollapsed]);
 
   return (
     <Stack spacing={2}>
@@ -65,95 +92,29 @@ export function QuickActionsPanel({
               Tap to try these
             </Typography>
           }
+          action={
+            <Tooltip title={quickCommandsCollapsed ? "Expand" : "Collapse"}>
+              <IconButton
+                size="small"
+                onClick={() => setQuickCommandsCollapsed((v) => !v)}
+                aria-label={quickCommandsCollapsed ? "Expand quick commands" : "Collapse quick commands"}
+              >
+                {quickCommandsCollapsed ? <ExpandMore fontSize="small" /> : <ExpandLess fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          }
           sx={{ pb: 1, "& .MuiCardHeader-content": { minWidth: 0 } }}
         />
-        <CardContent sx={{ pt: 0 }}>
-          <Stack spacing={0.75}>
-            <Button
-              variant="outlined"
-              fullWidth
-              size="small"
-              startIcon={<Home fontSize="small" />}
-              disabled={!onReviewHomeProfile}
-              onClick={() => onReviewHomeProfile?.()}
-              sx={{
-                justifyContent: "flex-start",
-                textTransform: "none",
-                fontSize: "0.82rem",
-                borderRadius: "8px",
-                color: "text.primary",
-                borderColor: "divider",
-                "&:hover": {
-                  borderColor: "primary.main",
-                  bgcolor: "grey.50",
-                },
-              }}
-            >
-              Review home profile
-            </Button>
-
-            {onGenerateCoverage ? (
-              <Button
-                variant="outlined"
-                fullWidth
-                size="small"
-                startIcon={<BarChart fontSize="small" />}
-                onClick={() => onGenerateCoverage()}
-                sx={{
-                  justifyContent: "flex-start",
-                  textTransform: "none",
-                  fontSize: "0.82rem",
-                  borderRadius: "8px",
-                  color: "text.primary",
-                  borderColor: "divider",
-                  "&:hover": {
-                    borderColor: "primary.main",
-                    bgcolor: "grey.50",
-                  },
-                }}
-              >
-                Generate coverage
-              </Button>
-            ) : null}
-
-            {onRecommendChores ? (
-              <Button
-                variant="outlined"
-                fullWidth
-                size="small"
-                startIcon={<AddTask fontSize="small" />}
-                onClick={() => onRecommendChores()}
-                sx={{
-                  justifyContent: "flex-start",
-                  textTransform: "none",
-                  fontSize: "0.82rem",
-                  borderRadius: "8px",
-                  color: "text.primary",
-                  borderColor: "divider",
-                  "&:hover": {
-                    borderColor: "primary.main",
-                    bgcolor: "grey.50",
-                  },
-                }}
-              >
-                Recommend chores
-              </Button>
-            ) : null}
-
-            {!homeProfileExists && (
+        <Collapse in={!quickCommandsCollapsed} timeout="auto" unmountOnExit>
+          <CardContent sx={{ pt: 0 }}>
+            <Stack spacing={0.75}>
               <Button
                 variant="outlined"
                 fullWidth
                 size="small"
                 startIcon={<Home fontSize="small" />}
-                disabled={!onCreateHomeProfile && !onQuickAction}
-                onClick={() => {
-                  if (onCreateHomeProfile) {
-                    onCreateHomeProfile();
-                    return;
-                  }
-                  onQuickAction("Generate my home profile");
-                }}
+                disabled={!onReviewHomeProfile}
+                onClick={() => onReviewHomeProfile?.()}
                 sx={{
                   justifyContent: "flex-start",
                   textTransform: "none",
@@ -167,36 +128,115 @@ export function QuickActionsPanel({
                   },
                 }}
               >
-                Create home profile
+                Review home profile
               </Button>
-            )}
 
-            {QUICK_COMMANDS.map(({ label, icon: Icon, prompt }) => (
-              <Button
-                key={label}
-                variant="outlined"
-                fullWidth
-                size="small"
-                startIcon={<Icon fontSize="small" />}
-                onClick={() => onQuickAction(prompt)}
-                sx={{
-                  justifyContent: "flex-start",
-                  textTransform: "none",
-                  fontSize: "0.82rem",
-                  borderRadius: "8px",
-                  color: "text.primary",
-                  borderColor: "divider",
-                  "&:hover": {
-                    borderColor: "primary.main",
-                    bgcolor: "grey.50",
-                  },
-                }}
-              >
-                {label}
-              </Button>
-            ))}
-          </Stack>
-        </CardContent>
+              {onGenerateCoverage ? (
+                <Button
+                  variant="outlined"
+                  fullWidth
+                  size="small"
+                  startIcon={<BarChart fontSize="small" />}
+                  onClick={() => onGenerateCoverage()}
+                  sx={{
+                    justifyContent: "flex-start",
+                    textTransform: "none",
+                    fontSize: "0.82rem",
+                    borderRadius: "8px",
+                    color: "text.primary",
+                    borderColor: "divider",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      bgcolor: "grey.50",
+                    },
+                  }}
+                >
+                  Generate coverage
+                </Button>
+              ) : null}
+
+              {onRecommendChores ? (
+                <Button
+                  variant="outlined"
+                  fullWidth
+                  size="small"
+                  startIcon={<AddTask fontSize="small" />}
+                  onClick={() => onRecommendChores()}
+                  sx={{
+                    justifyContent: "flex-start",
+                    textTransform: "none",
+                    fontSize: "0.82rem",
+                    borderRadius: "8px",
+                    color: "text.primary",
+                    borderColor: "divider",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      bgcolor: "grey.50",
+                    },
+                  }}
+                >
+                  Recommend chores
+                </Button>
+              ) : null}
+
+              {!homeProfileExists && (
+                <Button
+                  variant="outlined"
+                  fullWidth
+                  size="small"
+                  startIcon={<Home fontSize="small" />}
+                  disabled={!onCreateHomeProfile && !onQuickAction}
+                  onClick={() => {
+                    if (onCreateHomeProfile) {
+                      onCreateHomeProfile();
+                      return;
+                    }
+                    onQuickAction("Generate my home profile");
+                  }}
+                  sx={{
+                    justifyContent: "flex-start",
+                    textTransform: "none",
+                    fontSize: "0.82rem",
+                    borderRadius: "8px",
+                    color: "text.primary",
+                    borderColor: "divider",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      bgcolor: "grey.50",
+                    },
+                  }}
+                >
+                  Create home profile
+                </Button>
+              )}
+
+              {QUICK_COMMANDS.map(({ label, icon: Icon, prompt }) => (
+                <Button
+                  key={label}
+                  variant="outlined"
+                  fullWidth
+                  size="small"
+                  startIcon={<Icon fontSize="small" />}
+                  onClick={() => onQuickAction(prompt)}
+                  sx={{
+                    justifyContent: "flex-start",
+                    textTransform: "none",
+                    fontSize: "0.82rem",
+                    borderRadius: "8px",
+                    color: "text.primary",
+                    borderColor: "divider",
+                    "&:hover": {
+                      borderColor: "primary.main",
+                      bgcolor: "grey.50",
+                    },
+                  }}
+                >
+                  {label}
+                </Button>
+              ))}
+            </Stack>
+          </CardContent>
+        </Collapse>
       </Card>
 
       {/* Jump To */}

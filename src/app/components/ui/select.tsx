@@ -10,18 +10,18 @@ import {
   FormHelperText,
 } from "@mui/material";
 
-interface SelectProps extends MuiSelectProps {
+type SelectProps = MuiSelectProps & {
   label: string;
   options: Array<{ value: string; label: string }>;
   helperText?: string;
   error?: boolean;
-}
+};
 
 export function Select({ label, options, helperText, error, ...props }: SelectProps) {
   return (
     <FormControl fullWidth error={error}>
       <InputLabel>{label}</InputLabel>
-      <MuiSelect {...props}>
+      <MuiSelect label={label} {...props}>
         {options.map((option, index) => (
           <MenuItem key={index} value={option.value}>
             {option.label}

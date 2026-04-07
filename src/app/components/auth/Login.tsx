@@ -2,11 +2,14 @@ import { useState } from "react";
 import { Box, Button, Card, CardContent, CardHeader, Divider, TextField, Typography, Checkbox, FormControlLabel, Alert } from "@mui/material";
 import { Link, useLocation, useNavigate } from "react-router";
 import { supabase } from "../../services/supabaseClient";
+import { useI18n } from "../../i18n";
+import { LanguageSwitcher } from "../LanguageSwitcher";
 
 export function Login() {
   const navigate = useNavigate();
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from ?? "/";
+  const { t } = useI18n();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -39,53 +42,56 @@ export function Login() {
         padding: 2,
       }}
     >
+      <Box sx={{ position: "fixed", top: 12, right: 12, zIndex: 10 }}>
+        <LanguageSwitcher />
+      </Box>
       <Card sx={{ width: "100%", maxWidth: 400 }}>
         <CardHeader
           title={
             <Typography variant="h5" fontWeight="bold" align="center">
-              Welcome Back
+              {t("auth.login.welcome_back")}
             </Typography>
           }
           subheader={
             <Typography variant="body2" color="textSecondary" align="center">
-              Sign in to your Home Operations Manager
+              {t("auth.login.subtitle")}
             </Typography>
           }
         />
         <CardContent>
           <Box display="flex" flexDirection="column" gap={2}>
             {error && <Alert severity="error">{error}</Alert>}
-            <TextField label="Email" type="email" placeholder="you@example.com" fullWidth value={email} onChange={(e) => setEmail(e.target.value)} />
-            <TextField label="Password" type="password" placeholder="••••••••" fullWidth value={password} onChange={(e) => setPassword(e.target.value)} />
+            <TextField label={t("auth.login.email")} type="email" placeholder="you@example.com" fullWidth value={email} onChange={(e) => setEmail(e.target.value)} />
+            <TextField label={t("auth.login.password")} type="password" placeholder="••••••••" fullWidth value={password} onChange={(e) => setPassword(e.target.value)} />
             <Box display="flex" justifyContent="space-between" alignItems="center">
-              <FormControlLabel control={<Checkbox />} label="Remember me" />
+              <FormControlLabel control={<Checkbox />} label={t("auth.login.remember_me")} />
               <Link to="#">
                 <Typography variant="body2" color="primary" sx={{ cursor: "pointer" }}>
-                  Forgot password?
+                  {t("auth.login.forgot_password")}
                 </Typography>
               </Link>
             </Box>
             <Button variant="contained" size="large" fullWidth disabled={busy} onClick={onSubmit}>
-              Sign In
+              {t("auth.login.sign_in")}
             </Button>
             <Divider>
               <Typography variant="caption" color="textSecondary">
-                Or
+                {t("common.or")}
               </Typography>
             </Divider>
             <Box display="flex" gap={2}>
               <Button variant="outlined" fullWidth>
-                Google
+                {t("auth.login.google")}
               </Button>
               <Button variant="outlined" fullWidth>
-                Microsoft
+                {t("auth.login.microsoft")}
               </Button>
             </Box>
             <Typography variant="body2" color="textSecondary" align="center">
-              Don't have an account?{" "}
+              {t("auth.login.no_account")}{" "}
               <Link to="/signup">
                 <Typography component="span" color="primary" fontWeight="medium" sx={{ cursor: "pointer" }}>
-                  Sign up
+                  {t("auth.login.sign_up")}
                 </Typography>
               </Link>
             </Typography>
