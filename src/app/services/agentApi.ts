@@ -39,10 +39,26 @@ const setClientConversationId = (conversationId: string): void => {
   }
 };
 
+const getClientSessionId = (): string => {
+  try {
+    const k = "homeops.chat.client_session_id";
+    const existing = sessionStorage.getItem(k);
+    if (typeof existing === "string" && existing.trim()) return existing.trim();
+    const next = makeRequestId();
+    sessionStorage.setItem(k, next);
+    return next;
+  } catch {
+    // Fall back to a per-request id if sessionStorage is unavailable.
+    return makeRequestId();
+  }
+};
+
 const correlationHeaders = (): Record<string, string> => {
   const headers: Record<string, string> = { "x-request-id": makeRequestId() };
   const cid = getClientConversationId();
   if (cid) headers["x-conversation-id"] = cid;
+  const sid = getClientSessionId();
+  if (sid) headers["x-session-id"] = sid;
   return headers;
 };
 

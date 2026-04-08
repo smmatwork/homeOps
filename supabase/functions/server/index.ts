@@ -37,6 +37,28 @@ async function sha256Hex(input: string): Promise<string> {
   return out;
 }
 
+function sanitizeLangfuseChatInput(
+  msgs: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+): { message_count: number; last_user: string | null; messages_tail: Array<{ role: string; content: string }> } {
+  const tail = msgs.slice(-12).map((m) => ({ role: m.role, content: (m.content || "").slice(0, 1000) }));
+  let lastUser: string | null = null;
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const m = msgs[i];
+    if (m?.role === "user") {
+      lastUser = (m.content || "").slice(0, 500);
+      break;
+    }
+  }
+  return { message_count: msgs.length, last_user: lastUser, messages_tail: tail };
+}
+
+async function ensureLangfuseTraceId(c: any, seed: string): Promise<string> {
+  const incoming = (c.req.header("x-langfuse-trace-id") ?? "").trim();
+  if (isHex32(incoming)) return incoming.toLowerCase();
+  const derived = await makeLangfuseTraceId(seed);
+  return isHex32(derived) ? derived.toLowerCase() : "";
+}
+
 async function makeLangfuseTraceId(seed: string): Promise<string> {
   const s = (seed || "").trim();
   const base = s || crypto.randomUUID();
@@ -662,10 +684,19 @@ function assertMessagesArray(raw: unknown): Array<{ role: "system" | "user" | "a
 
 api.post("/tools/execute", async (c) => {
   const token = getBearerToken(c.req.raw);
-  if (!token) return c.json({ error: "Missing authorization header" }, 401);
-
   const admin = supabaseAdmin();
-  const actorUserId = await getAuthedUserId(admin, token);
+
+  // Normal path: frontend requests are authorized with a bearer token.
+  // Internal path (manager pattern): agent-service may execute tools without a user bearer token,
+  // but must present the shared x-agent-service-key and a concrete x-user-id.
+  const internalKey = (c.req.header("x-agent-service-key") ?? "").trim();
+  const expectedInternalKey = (optionalEnv("AGENT_SERVICE_KEY") || "").trim();
+  const internalUserId = (c.req.header("x-user-id") ?? "").trim();
+
+  const isInternal = !token && Boolean(expectedInternalKey) && internalKey === expectedInternalKey && Boolean(internalUserId);
+  if (!token && !isInternal) return c.json({ error: "Missing authorization header" }, 401);
+
+  const actorUserId = isInternal ? internalUserId : await getAuthedUserId(admin, token as string);
   if (!actorUserId) return c.json({ error: "Invalid token" }, 401);
   try {
     c.set("actor_user_id", actorUserId);
@@ -701,6 +732,77 @@ api.post("/tools/execute", async (c) => {
   if (!isToolName(tc.tool)) return c.json({ error: "Unsupported tool" }, 400);
   if (!tc.args || typeof tc.args !== "object" || Array.isArray(tc.args)) return c.json({ error: "tool_call.args is required" }, 400);
 
+  const reqId = (c.req.header("x-request-id") ?? "").trim();
+  const convId = (c.req.header("x-conversation-id") ?? "").trim();
+  const sessId = (c.req.header("x-session-id") ?? "").trim();
+  const langfuseSessionId = sessId || convId || reqId;
+  const langfuseTraceSeed = convId || sessId || reqId || `${Date.now()}`;
+  const lfTraceId = await ensureLangfuseTraceId(c, langfuseTraceSeed);
+
+  const traceNowIso = new Date().toISOString();
+  if (lfTraceId) {
+    await langfuseIngest([
+      {
+        id: crypto.randomUUID(),
+        timestamp: traceNowIso,
+        type: "trace-create",
+        body: {
+          id: lfTraceId,
+          timestamp: traceNowIso,
+          name: "edge.tools.execute",
+          environment: optionalEnv("LANGFUSE_ENV") || optionalEnv("NODE_ENV") || "default",
+          userId: actorUserId || null,
+          sessionId: langfuseSessionId || null,
+          input: {
+            request_id: reqId || null,
+            conversation_id: convId || null,
+          },
+          metadata: {
+            request_id: reqId || undefined,
+            conversation_id: convId || undefined,
+            session_id: langfuseSessionId || undefined,
+          },
+          tags: [],
+          public: false,
+        },
+      },
+    ]);
+  }
+
+  const toolSpanId = lfTraceId
+    ? (await sha256Hex(`span:tools.execute:${langfuseTraceSeed}:${crypto.randomUUID()}`)).slice(0, 16)
+    : "";
+  const toolSpanStartIso = new Date().toISOString();
+  if (lfTraceId && toolSpanId) {
+    await langfuseIngest([
+      {
+        id: crypto.randomUUID(),
+        timestamp: toolSpanStartIso,
+        type: "span-create",
+        body: {
+          id: toolSpanId,
+          traceId: lfTraceId,
+          name: "edge.tools.execute",
+          startTime: toolSpanStartIso,
+          environment: optionalEnv("LANGFUSE_ENV") || optionalEnv("NODE_ENV") || "default",
+          input: {
+            tool: tc.tool,
+            tool_call_id: tc.id,
+            rpc: tc.tool === "query.rpc" ? (tc.args as any)?.name : null,
+            table: tc.tool !== "query.rpc" ? (tc.args as any)?.table : null,
+          },
+          metadata: {
+            request_id: reqId || undefined,
+            conversation_id: convId || undefined,
+            session_id: langfuseSessionId || undefined,
+            actor_user_id: actorUserId || undefined,
+            household_id: householdId || undefined,
+          },
+        },
+      },
+    ]);
+  }
+
   // query.rpc: run allowlisted Postgres RPCs server-side.
   if (tc.tool === "query.rpc") {
     const args = tc.args as Record<string, unknown>;
@@ -712,12 +814,60 @@ api.post("/tools/execute", async (c) => {
     }
 
     const params = (paramsRaw && typeof paramsRaw === "object" ? (paramsRaw as Record<string, unknown>) : {}) as Record<string, unknown>;
+
+    // Backward-compat: older tool-call templates used separate params like p_status.
+    // Our curated analytics RPCs accept a single p_filters jsonb.
+    if ((name === "count_chores" || name === "group_chores_by_status" || name === "group_chores_by_assignee" || name === "list_chores_enriched") && !("p_filters" in params)) {
+      const legacyStatus = typeof (params as any).p_status === "string" ? String((params as any).p_status).trim() : "";
+      const legacyHelperId = typeof (params as any).p_helper_id === "string" ? String((params as any).p_helper_id).trim() : "";
+      const legacySpace = typeof (params as any).p_space === "string" ? String((params as any).p_space).trim() : "";
+      const legacyOverdue = (params as any).p_overdue;
+
+      const filters: Record<string, unknown> = {};
+      if (legacyStatus) filters.status = legacyStatus;
+      if (legacyHelperId) filters.helper_id = legacyHelperId;
+      if (legacySpace) filters.space = legacySpace;
+      if (legacyOverdue === true) filters.overdue = true;
+
+      if (Object.keys(filters).length > 0) {
+        (params as any).p_filters = filters;
+      }
+      delete (params as any).p_status;
+      delete (params as any).p_helper_id;
+      delete (params as any).p_space;
+      delete (params as any).p_overdue;
+    }
     // Enforce household + actor in RPC params.
     const rpcParams: Record<string, unknown> = {
       ...params,
       p_household_id: householdId,
       p_actor_user_id: actorUserId,
     };
+
+    const rpcSpanId = lfTraceId
+      ? (await sha256Hex(`span:tools.execute.rpc:${langfuseTraceSeed}:${name}:${crypto.randomUUID()}`)).slice(0, 16)
+      : "";
+    const rpcSpanStartIso = new Date().toISOString();
+    if (lfTraceId && rpcSpanId) {
+      await langfuseIngest([
+        {
+          id: crypto.randomUUID(),
+          timestamp: rpcSpanStartIso,
+          type: "span-create",
+          body: {
+            id: rpcSpanId,
+            traceId: lfTraceId,
+            name: `db.rpc.${name}`,
+            startTime: rpcSpanStartIso,
+            environment: optionalEnv("LANGFUSE_ENV") || optionalEnv("NODE_ENV") || "default",
+            input: {
+              name,
+              params_keys: Object.keys(rpcParams || {}).slice(0, 40),
+            },
+          },
+        },
+      ]);
+    }
 
     const { data, error } = await admin.rpc(name, rpcParams);
     if (error) {
@@ -727,7 +877,66 @@ api.post("/tools/execute", async (c) => {
         actorUserId,
         error: error.message,
       });
-      return c.json({ error: error.message }, 500);
+      const rpcSpanEndIso = new Date().toISOString();
+      if (lfTraceId && rpcSpanId) {
+        await langfuseIngest([
+          {
+            id: crypto.randomUUID(),
+            timestamp: rpcSpanEndIso,
+            type: "span-update",
+            body: {
+              id: rpcSpanId,
+              traceId: lfTraceId,
+              endTime: rpcSpanEndIso,
+              output: { ok: false, error: error.message },
+              statusMessage: error.message,
+            },
+          },
+        ]);
+      }
+      const toolSpanEndIso = new Date().toISOString();
+      if (lfTraceId && toolSpanId) {
+        await langfuseIngest([
+          {
+            id: crypto.randomUUID(),
+            timestamp: toolSpanEndIso,
+            type: "span-update",
+            body: {
+              id: toolSpanId,
+              traceId: lfTraceId,
+              endTime: toolSpanEndIso,
+              output: { ok: false, error: error.message },
+              statusMessage: error.message,
+            },
+          },
+        ]);
+      }
+      return c.json(
+        {
+          ok: false,
+          tool_call_id: tc.id,
+          error: { message: error.message },
+          result: null,
+        },
+        200,
+      );
+    }
+
+    const rpcSpanEndIso = new Date().toISOString();
+    if (lfTraceId && rpcSpanId) {
+      await langfuseIngest([
+        {
+          id: crypto.randomUUID(),
+          timestamp: rpcSpanEndIso,
+          type: "span-update",
+          body: {
+            id: rpcSpanId,
+            traceId: lfTraceId,
+            endTime: rpcSpanEndIso,
+            output: { ok: true },
+          },
+        },
+      ]);
     }
 
     const payload = Array.isArray(data) ? (data.length === 1 ? data[0] : data) : data;
@@ -830,9 +1039,27 @@ api.post("/tools/execute", async (c) => {
       before: null,
       after: { summary },
     });
-    if (auditErr) return c.json({ error: auditErr.message }, 500);
+    if (auditErr) {
+      return c.json({ ok: false, tool_call_id: tc.id, error: { message: auditErr.message }, result: null }, 200);
+    }
 
-    return c.json({ ok: true, tool_call_id: tc.id, summary });
+    const toolSpanEndIso = new Date().toISOString();
+    if (lfTraceId && toolSpanId) {
+      await langfuseIngest([
+        {
+          id: crypto.randomUUID(),
+          timestamp: toolSpanEndIso,
+          type: "span-update",
+          body: {
+            id: toolSpanId,
+            traceId: lfTraceId,
+            endTime: toolSpanEndIso,
+            output: { ok: true, tool: tc.tool, rpc: name },
+          },
+        },
+      ]);
+    }
+    return c.json({ ok: true, tool_call_id: tc.id, summary, result: payload });
   }
 
   const table = (tc.args as { table?: unknown }).table;
@@ -856,7 +1083,12 @@ api.post("/tools/execute", async (c) => {
         .from("household_members")
         .select("user_id")
         .eq("household_id", householdId);
-      if (memErr) return c.json({ error: memErr.message }, 500);
+      if (memErr) {
+        return c.json(
+          { ok: false, tool_call_id: tc.id, error: { message: memErr.message }, result: null },
+          200,
+        );
+      }
       const ids = (members ?? [])
         .map((m) => (m && typeof m === "object" ? (m as Record<string, unknown>).user_id : null))
         .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
@@ -865,7 +1097,7 @@ api.post("/tools/execute", async (c) => {
         .select("id, full_name, avatar_url")
         .in("id", ids)
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("profiles", data ?? []);
     } else if (table === "households") {
       const { data, error } = await admin
@@ -873,7 +1105,7 @@ api.post("/tools/execute", async (c) => {
         .select("id, name")
         .eq("id", householdId)
         .limit(1);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("households", data ?? []);
     } else if (table === "household_members") {
       const { data, error } = await admin
@@ -881,80 +1113,70 @@ api.post("/tools/execute", async (c) => {
         .select("user_id, role")
         .eq("household_id", householdId)
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("household_members", data ?? []);
     } else if (table === "home_profiles") {
       const { data, error } = await admin
         .from("home_profiles")
         .select(
-          "household_id, home_type, bhk, has_balcony, has_pets, has_kids, square_feet, floors, spaces, space_counts, flooring_type, num_bathrooms, updated_at",
+          "household_id, timezone, address, home_type, home_size_sqft, bedrooms, bathrooms, occupants, pets, notes"
         )
         .eq("household_id", householdId)
         .limit(1);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("home_profiles", data ?? []);
     } else if (table === "agent_audit_log") {
-      const { data, error } = await admin
-        .from("agent_audit_log")
-        .select("created_at, actor_user_id, table_name, action")
-        .eq("household_id", householdId)
-        .order("created_at", { ascending: false })
-        .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      const { data, error } = await admin.from("agent_audit_log").select("*").eq("household_id", householdId).order("created_at", { ascending: false }).limit(limit);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("agent_audit_log", data ?? []);
     } else if (table === "support_audit_log") {
-      const { data, error } = await admin
-        .from("support_audit_log")
-        .select("created_at, support_user_id, table_name, action")
-        .eq("household_id", householdId)
-        .order("created_at", { ascending: false })
-        .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      const { data, error } = await admin.from("support_audit_log").select("*").eq("household_id", householdId).order("created_at", { ascending: false }).limit(limit);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("support_audit_log", data ?? []);
     } else if (table === "member_time_off") {
       const { data, error } = await admin
         .from("member_time_off")
-        .select("id, member_kind, helper_id, person_id, start_at, end_at, created_at")
+        .select("*")
         .eq("household_id", householdId)
         .order("start_at", { ascending: false })
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("member_time_off", data ?? []);
     } else if (table === "chore_helper_assignments") {
       const { data, error } = await admin
         .from("chore_helper_assignments")
-        .select("id, chore_id, helper_id, action, created_at")
+        .select("*")
         .eq("household_id", householdId)
         .order("created_at", { ascending: false })
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("chore_helper_assignments", data ?? []);
     } else if (table === "helper_feedback") {
       const { data, error } = await admin
         .from("helper_feedback")
-        .select("id, helper_id, rating, occurred_at, created_at")
+        .select("*")
         .eq("household_id", householdId)
         .order("occurred_at", { ascending: false })
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("helper_feedback", data ?? []);
     } else if (table === "helper_rewards") {
       const { data, error } = await admin
         .from("helper_rewards")
-        .select("id, helper_id, quarter, reward_type, amount, currency, created_at")
+        .select("*")
         .eq("household_id", householdId)
         .order("created_at", { ascending: false })
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("helper_rewards", data ?? []);
     } else if (table === "helper_reward_snapshots") {
       const { data, error } = await admin
         .from("helper_reward_snapshots")
-        .select("id, helper_id, quarter, avg_rating, feedback_count, leave_days, assigned_completed_count, computed_at")
+        .select("*")
         .eq("household_id", householdId)
         .order("computed_at", { ascending: false })
         .limit(limit);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("helper_reward_snapshots", data ?? []);
     } else {
       // chores/helpers/alerts are household-scoped
@@ -1008,7 +1230,7 @@ api.post("/tools/execute", async (c) => {
               helperName,
               error: error.message,
             });
-            return c.json({ error: error.message }, 500);
+            return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
           }
 
           const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | null;
@@ -1028,15 +1250,14 @@ api.post("/tools/execute", async (c) => {
           q = applyToolWhere(q, where);
           const { count, error } = await q;
           if (error) {
-            console.error("tools.execute db.select count failed", {
-              table,
+            console.error("tools.execute db.count failed", {
               householdId,
               actorUserId,
               columns: columnsRaw,
               where,
               error: error.message,
             });
-            return c.json({ error: error.message }, 500);
+            return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
           }
           summary = `Counted ${count ?? 0} rows in ${table}.`;
         }
@@ -1055,7 +1276,7 @@ api.post("/tools/execute", async (c) => {
             limit,
             error: error.message,
           });
-          return c.json({ error: error.message }, 500);
+          return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
         }
         summary = summarizeTableRows(table, data ?? []);
       }
@@ -1154,11 +1375,11 @@ api.post("/tools/execute", async (c) => {
         return c.json({ error: "Only a home admin can update the home profile." }, 403);
       }
       const { error } = await admin.from("home_profiles").upsert(payload, { onConflict: "household_id" });
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = "Saved your home profile.";
     } else {
       const { data: created, error } = await admin.from(table).insert(payload).select("id").maybeSingle();
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = `Inserted 1 row into ${table}. id=${created?.id ?? "(unknown)"}`;
     }
   }
@@ -1195,7 +1416,9 @@ api.post("/tools/execute", async (c) => {
       const beforeSelect = table === "chores" ? "household_id, helper_id" : "household_id";
       const adminDyn = admin as unknown as _SupabaseDynamicFrom;
       const { data: before, error: beforeErr } = await adminDyn.from(table).select(beforeSelect).eq("id", id).maybeSingle();
-      if (beforeErr) return c.json({ error: beforeErr.message }, 500);
+      if (beforeErr) {
+        return c.json({ ok: false, tool_call_id: tc.id, error: { message: beforeErr.message }, result: null }, 200);
+      }
       const beforeObj = before as Record<string, unknown> | null;
       if (!beforeObj || beforeObj.household_id !== householdId) return c.json({ error: "Row not found" }, 404);
 
@@ -1220,7 +1443,7 @@ api.post("/tools/execute", async (c) => {
     }
 
     const { error } = await admin.from(table).update(patch).eq("id", id);
-    if (error) return c.json({ error: error.message }, 500);
+    if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
 
     if (table === "chores" && hasHelperIdPatch) {
       const { data: after, error: afterErr } = await admin
@@ -1228,7 +1451,9 @@ api.post("/tools/execute", async (c) => {
         .select("id, helper_id")
         .eq("id", id)
         .maybeSingle();
-      if (afterErr) return c.json({ error: afterErr.message }, 500);
+      if (afterErr) {
+        return c.json({ ok: false, tool_call_id: tc.id, error: { message: afterErr.message }, result: null }, 200);
+      }
 
       const prevHelperIdRaw = beforeRow?.helper_id;
       const prevHelperId = typeof prevHelperIdRaw === "string" && prevHelperIdRaw.trim() ? prevHelperIdRaw.trim() : null;
@@ -1245,7 +1470,9 @@ api.post("/tools/execute", async (c) => {
           assigned_by: actorUserId,
           metadata: { previous_helper_id: prevHelperId, next_helper_id: actualNext },
         });
-        if (histErr) return c.json({ error: histErr.message }, 500);
+        if (histErr) {
+          return c.json({ ok: false, tool_call_id: tc.id, error: { message: histErr.message }, result: null }, 200);
+        }
       }
     }
 
@@ -1267,11 +1494,13 @@ api.post("/tools/execute", async (c) => {
     }
 
     const { data: before, error: beforeErr } = await admin.from(table).select("household_id").eq("id", id).maybeSingle();
-    if (beforeErr) return c.json({ error: beforeErr.message }, 500);
+    if (beforeErr) {
+      return c.json({ ok: false, tool_call_id: tc.id, error: { message: beforeErr.message }, result: null }, 200);
+    }
     if (!before || before.household_id !== householdId) return c.json({ error: "Row not found" }, 404);
 
     const { error } = await admin.from(table).delete().eq("id", id);
-    if (error) return c.json({ error: error.message }, 500);
+    if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
     summary = `Deleted 1 row from ${table}. id=${id}`;
   }
 
@@ -1288,9 +1517,28 @@ api.post("/tools/execute", async (c) => {
     before: null,
     after: { summary },
   });
-  if (auditErr) return c.json({ error: auditErr.message }, 500);
+  if (auditErr) {
+    return c.json({ ok: false, tool_call_id: tc.id, error: { message: auditErr.message }, result: null }, 200);
+  }
 
-  return c.json({ ok: true, tool_call_id: tc.id, summary });
+  const toolSpanEndIso = new Date().toISOString();
+  if (lfTraceId && toolSpanId) {
+    await langfuseIngest([
+      {
+        id: crypto.randomUUID(),
+        timestamp: toolSpanEndIso,
+        type: "span-update",
+        body: {
+          id: toolSpanId,
+          traceId: lfTraceId,
+          endTime: toolSpanEndIso,
+          output: { ok: true, tool: tc.tool, table },
+        },
+      },
+    ]);
+  }
+
+  return c.json({ ok: true, tool_call_id: tc.id, summary, result: payload });
 });
 
 api.post("/queries/chores/count_assigned_to", async (c) => {
@@ -2381,7 +2629,7 @@ api.post("/chat/respond", async (c) => {
     }
   }
 
-  const langfuseTraceSeed = reqId || `${convId}:${sessId}:${Date.now()}`;
+  const langfuseTraceSeed = convId || sessId || reqId || `${Date.now()}`;
   const langfuseTraceId = await makeLangfuseTraceId(langfuseTraceSeed);
 
   const nowIso = new Date().toISOString();
@@ -2389,6 +2637,7 @@ api.post("/chat/respond", async (c) => {
   const lfSpanId = sha256Hex(`span:${langfuseTraceSeed}:${crypto.randomUUID()}`).then((h) => h.slice(0, 16));
 
   if (lfTraceId) {
+    const chatInput = sanitizeLangfuseChatInput(msgs);
     await langfuseIngest([
       {
         id: crypto.randomUUID(),
@@ -2404,7 +2653,9 @@ api.post("/chat/respond", async (c) => {
           input: {
             request_id: reqId || null,
             conversation_id: convId || null,
-            message_count: Array.isArray(msgs) ? msgs.length : null,
+            message_count: chatInput.message_count,
+            last_user: chatInput.last_user,
+            messages_tail: chatInput.messages_tail,
           },
           metadata: {
             request_id: reqId || undefined,
@@ -2426,6 +2677,7 @@ api.post("/chat/respond", async (c) => {
   if (convId) upstreamHeaders["x-conversation-id"] = convId;
   if (sessId) upstreamHeaders["x-session-id"] = sessId;
   if (actorUserId) upstreamHeaders["x-user-id"] = actorUserId;
+  if (householdId) upstreamHeaders["x-household-id"] = householdId;
   if (traceparent) upstreamHeaders["traceparent"] = traceparent;
   if (langfuseTraceId) upstreamHeaders["x-langfuse-trace-id"] = langfuseTraceId;
 
@@ -2456,7 +2708,8 @@ api.post("/chat/respond", async (c) => {
     ]);
   }
 
-  let upstream: Response;
+  let upstream: Response | null = null;
+  let upstreamErr: unknown = null;
   try {
     upstream = await fetch(`${agentUrl}/v1/chat/respond`, {
       method: "POST",
@@ -2467,6 +2720,12 @@ api.post("/chat/respond", async (c) => {
         temperature: typeof body.temperature === "number" ? body.temperature : undefined,
         max_tokens: typeof body.max_tokens === "number" ? body.max_tokens : undefined,
       }),
+    });
+  } catch (e) {
+    upstreamErr = e;
+    console.error("chat.respond upstream fetch failed", {
+      agentUrl,
+      error: String((e as any)?.message ?? e),
     });
   } finally {
     const spanEndIso = new Date().toISOString();
@@ -2480,10 +2739,17 @@ api.post("/chat/respond", async (c) => {
             id: spanId,
             traceId: lfTraceId,
             endTime: spanEndIso,
+            output: upstream ? { ok: upstream.ok, status: upstream.status } : { ok: false, error: "upstream_fetch_failed" },
+            statusMessage: upstreamErr ? String((upstreamErr as any)?.message ?? upstreamErr) : undefined,
           },
         },
       ]);
     }
+  }
+
+  if (!upstream) {
+    const msg = upstreamErr ? String((upstreamErr as any)?.message ?? upstreamErr) : "Agent service unavailable";
+    return c.json({ error: msg }, 502);
   }
 
   const text = await upstream.text().catch(() => "");

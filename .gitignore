@@ -7,3 +7,8 @@ dist/
 build/
 .vite/
 .DS_Store
+.venv-agent/
+remote.dump
+test-results/
+supabase/.temp/
+supabase/snippets/Untitled\ query\ *.sql

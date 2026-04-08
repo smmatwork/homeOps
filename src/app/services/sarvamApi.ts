@@ -203,13 +203,17 @@ Rules for tool_calls:
  * Yields text delta strings until the stream is done.
  */
 export async function* streamChat(
-  messages: ChatMessage[],
+  messages: Array<{ role: string; content: string }> | string,
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const accessToken = localStorage.getItem("homeops.agent.access_token") ?? "";
   const householdId = localStorage.getItem("homeops.agent.household_id") ?? "";
   if (!accessToken.trim() || !householdId.trim()) {
-    yield* _demoStream(messages[messages.length - 1]?.content ?? "");
+    const lastText =
+      typeof messages === "string"
+        ? messages
+        : (messages[messages.length - 1] && typeof messages[messages.length - 1].content === "string" ? messages[messages.length - 1].content : "");
+    yield* _demoStream(lastText);
     return;
   }
 
@@ -227,7 +231,10 @@ export async function* streamChat(
     else signal.addEventListener("abort", abort, { once: true });
   }
   // Prevent UI from being stuck in a streaming state if the local Edge function or agent-service hangs.
-  timeoutId = window.setTimeout(() => abort(), 25000);
+  const timeoutMsRaw = (import.meta as any)?.env?.VITE_CHAT_TIMEOUT_MS;
+  const timeoutMsNum = typeof timeoutMsRaw === "string" ? Number(timeoutMsRaw) : NaN;
+  const timeoutMs = Number.isFinite(timeoutMsNum) && timeoutMsNum > 0 ? timeoutMsNum : 90000;
+  timeoutId = window.setTimeout(() => abort(), timeoutMs);
 
   const anon = anonKey();
   const res = await fetch(`${baseUrl()}/functions/v1/server/chat/respond`, {
@@ -266,8 +273,33 @@ export async function* streamChat(
     throw new Error(`Sarvam chat error ${res.status}: ${errText}`);
   }
 
-  const json = (await res.json().catch(() => null)) as any;
-  const outText = json && typeof json === "object" && typeof json.text === "string" ? String(json.text) : "";
+  const rawText = await res.text().catch(() => "");
+  let parsed: any = null;
+  try {
+    parsed = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    parsed = null;
+  }
+
+  let outText = "";
+  if (parsed && typeof parsed === "object") {
+    if (typeof (parsed as any).text === "string") {
+      outText = String((parsed as any).text);
+    } else if (typeof (parsed as any).final_text === "string") {
+      outText = String((parsed as any).final_text);
+    } else if (typeof (parsed as any).finalText === "string") {
+      outText = String((parsed as any).finalText);
+    } else if (Array.isArray((parsed as any).tool_calls)) {
+      try {
+        outText = "```json\n" + JSON.stringify({ tool_calls: (parsed as any).tool_calls }, null, 2) + "\n```";
+      } catch {
+        outText = "";
+      }
+    }
+  }
+  if (!outText) {
+    outText = rawText;
+  }
   if (!outText) return;
   yield outText;
 }

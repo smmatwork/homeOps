@@ -11,10 +11,27 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "strict": false,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "noFallthroughCasesInSwitch": true
+    
+    // Enhanced type safety
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    
+    // Path aliases for better imports
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@/components/*": ["src/app/components/*"],
+      "@/services/*": ["src/app/services/*"],
+      "@/hooks/*": ["src/app/hooks/*"],
+      "@/stores/*": ["src/app/stores/*"],
+      "@/styles/*": ["src/app/styles/*"],
+      "@/utils/*": ["src/app/utils/*"]
+    }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts", "vitest.config.ts"]
 }

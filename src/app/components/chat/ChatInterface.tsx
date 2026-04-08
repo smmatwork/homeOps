@@ -1916,7 +1916,21 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
     sendMessage(trimmed);
     setInput("");
-  }, [input, isStreaming, sendMessage, appendAssistantMessage, lang, appendUserMessage, setDeleteChoresFlowSynced, deleteChoresFlow.phase, deleteChoresFlow.scope, deleteChoresFlow.choreIds, runDeleteChores, runDeleteScopePreview, loadSpecificChoresPreview]);
+  }, [
+    input,
+    isStreaming,
+    sendMessage,
+    appendAssistantMessage,
+    lang,
+    appendUserMessage,
+    setDeleteChoresFlowSynced,
+    deleteChoresFlow.phase,
+    deleteChoresFlow.phase === "awaiting_confirm" ? deleteChoresFlow.scope : "",
+    deleteChoresFlow.phase === "awaiting_confirm" ? stableStringify(deleteChoresFlow.choreIds) : "",
+    runDeleteChores,
+    runDeleteScopePreview,
+    loadSpecificChoresPreview,
+  ]);
 
   const handleQuickAction = useCallback((prompt: string) => {
     setInput(prompt);
@@ -1960,8 +1974,23 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     () => proposedActions.some((a) => a.type === "create" && a.table === "chores"),
     [proposedActions],
   );
+  const isReadOnlyRpc = (tc: ToolCall): boolean => {
+    if (tc.tool !== "query.rpc") return false;
+    const nm = (tc.args as any)?.name;
+    return (
+      nm === "resolve_helper" ||
+      nm === "resolve_space" ||
+      nm === "count_chores_assigned_to" ||
+      nm === "count_chores" ||
+      nm === "group_chores_by_status" ||
+      nm === "group_chores_by_assignee" ||
+      nm === "list_chores_enriched"
+    );
+  };
+
   const proposedWriteToolCalls = proposedToolCalls
     .filter((tc) => tc.tool !== "db.select")
+    .filter((tc) => !isReadOnlyRpc(tc))
     // If the model emits BOTH actions (for chore drafts) and tool_calls (db.insert chores),
     // hide the insert tool calls to avoid duplicate approvals.
     .filter((tc) => {
@@ -3071,11 +3100,27 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   }, [approveToolCall, scheduleDialogValue, scheduleDialogDate, scheduleDialogTime, schedulePendingToolCall, schedulePendingDraftIds, pendingClarification, sendMessage, proposedClarification, proposedClarificationKey, threadKey, setThreadAnswer]);
 
   const executeReadOnlyToolCall = useCallback(async (tc: ToolCall) => {
-    if (tc.tool !== "db.select") return;
+    const isReadOnlyRpc = (v: ToolCall): boolean => {
+      if (v.tool !== "query.rpc") return false;
+      const nm = (v.args as any)?.name;
+      return (
+        nm === "resolve_helper" ||
+        nm === "resolve_space" ||
+        nm === "count_chores_assigned_to" ||
+        nm === "count_chores" ||
+        nm === "group_chores_by_status" ||
+        nm === "group_chores_by_assignee" ||
+        nm === "list_chores_enriched"
+      );
+    };
 
-    const table = typeof (tc.args as any)?.table === "string" ? String((tc.args as any).table) : "";
-    const allowlistedTables = new Set<string>(["chores", "helpers", "alerts", "automations", "automation_suggestions", "home_profiles"]);
-    if (table && !allowlistedTables.has(table)) return;
+    if (tc.tool !== "db.select" && !isReadOnlyRpc(tc)) return;
+
+    if (tc.tool === "db.select") {
+      const table = typeof (tc.args as any)?.table === "string" ? String((tc.args as any).table) : "";
+      const allowlistedTables = new Set<string>(["chores", "helpers", "alerts", "automations", "automation_suggestions", "home_profiles"]);
+      if (table && !allowlistedTables.has(table)) return;
+    }
 
     const key = toolCallKey(tc);
     if (autoExecutedToolCallIds[key]) return;
@@ -3085,6 +3130,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     if (!token || !householdId) return;
 
     setAutoExecutedToolCallIds((prev) => ({ ...prev, [key]: true }));
+
+    try {
+      appendAssistantMessage(`Executing ${tc.tool}...`);
+    } catch {
+      // ignore
+    }
 
     const tcWithHousehold = withHouseholdId(tc, householdId);
     const res = await executeToolCall({
@@ -3096,6 +3147,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
     if (!res.ok) {
       setToolError("error" in res ? res.error : t("chat.could_not_fetch"));
+      try {
+        const msg = "error" in res ? res.error : t("chat.could_not_fetch");
+        appendAssistantMessage(`⚠️ ${msg}`);
+      } catch {
+        // ignore
+      }
       setAutoExecutedToolCallIds((prev) => {
         const next = { ...prev };
         delete next[key];
@@ -3293,8 +3350,22 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const { token, householdId } = getAgentSetup();
     if (!token || !householdId) return;
     // Auto-run at most one read-only tool call per assistant turn.
-    const firstSelect = proposedToolCalls.find((tc) => tc.tool === "db.select");
-    if (firstSelect) void executeReadOnlyToolCall(firstSelect);
+    const isReadOnlyRpc = (v: ToolCall): boolean => {
+      if (v.tool !== "query.rpc") return false;
+      const nm = (v.args as any)?.name;
+      return (
+        nm === "resolve_helper" ||
+        nm === "resolve_space" ||
+        nm === "count_chores_assigned_to" ||
+        nm === "count_chores" ||
+        nm === "group_chores_by_status" ||
+        nm === "group_chores_by_assignee" ||
+        nm === "list_chores_enriched"
+      );
+    };
+
+    const firstRead = proposedToolCalls.find((tc) => tc.tool === "db.select" || isReadOnlyRpc(tc));
+    if (firstRead) void executeReadOnlyToolCall(firstRead);
   }, [proposedToolCalls, executeReadOnlyToolCall, getAgentSetup]);
 
   const confirmClearChat = useCallback(() => {

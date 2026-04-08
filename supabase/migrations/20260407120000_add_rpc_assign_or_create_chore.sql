@@ -230,8 +230,8 @@ begin
   end if;
 
   inserted_title := initcap(q_task);
-  insert into public.chores (household_id, title, status, due_at, helper_id)
-  values (p_household_id, inserted_title, 'pending', computed_due, helper_id)
+  insert into public.chores (household_id, user_id, title, status, due_at, helper_id)
+  values (p_household_id, p_actor_user_id, inserted_title, 'pending', computed_due, helper_id)
   returning id into insert_id;
 
   action := 'created';

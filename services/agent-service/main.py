@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel, Field
+from starlette.responses import JSONResponse
 
 from langgraph.graph import END, StateGraph
 
@@ -82,6 +83,24 @@ class _CorrelationFilter(logging.Filter):
         except Exception:
             record.session_id = "-"
         return True
+
+
+def _wants_unassigned_count(messages: list[dict[str, Any]]) -> bool:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return False
+    lower = last_user.lower()
+    if "unassigned" not in lower:
+        return False
+    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
+        return False
+    if not ("how many" in lower or "count" in lower or "number" in lower or "total" in lower):
+        return False
+    return True
 
 
 _logger = logging.getLogger("homeops.agent_service")
@@ -250,6 +269,11 @@ def _deterministic_trim_chain_of_thought(text: str) -> str:
         "i need to",
         "here's my plan",
         "here is my plan",
+        "alternatively,",
+        "alternatively ",
+        "maybe the system",
+        "maybe this",
+        "issues:",
     )
     while lines:
         head = lines[0].lower().lstrip("- ").strip()
@@ -268,6 +292,144 @@ def _deterministic_trim_chain_of_thought(text: str) -> str:
         if last:
             return last
     return s2 or s
+
+
+def _extract_count_assigned_to_name(messages: list[dict[str, Any]]) -> str:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return ""
+
+    s = last_user.strip()
+    lower = s.lower()
+    if "chore" not in lower and "chores" not in lower:
+        return ""
+    if "assigned to" not in lower:
+        return ""
+    if not ("how many" in lower or "count" in lower or "number of" in lower or "total" in lower):
+        return ""
+
+    # Extract the substring after "assigned to" (strip punctuation).
+    try:
+        after = re.split(r"assigned\s+to\s+", s, flags=re.IGNORECASE, maxsplit=1)[1]
+    except Exception:
+        return ""
+    after = after.strip().strip(".?!)\"]} ")
+    # Keep only the first clause if the user continues with more text.
+    after = re.split(r"[\n,;]|\s+and\s+|\s+with\s+|\s+in\s+|\s+for\s+", after, maxsplit=1)[0].strip()
+    # Avoid returning something obviously not a name.
+    if not after or len(after) > 80:
+        return ""
+    return after
+
+
+def _wants_total_pending_count(messages: list[dict[str, Any]]) -> bool:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return False
+    lower = last_user.lower()
+    if not ("pending" in lower and ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower)):
+        return False
+    if not ("total" in lower or "how many" in lower or "count" in lower or "number" in lower):
+        return False
+    return True
+
+
+def _wants_status_breakdown(messages: list[dict[str, Any]]) -> bool:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return False
+    lower = last_user.lower()
+    wants = False
+    if "by status" in lower or "status breakdown" in lower:
+        wants = True
+    if ("group" in lower and "status" in lower) or ("breakdown" in lower and "status" in lower):
+        wants = True
+    if ("other status" in lower or "other statuses" in lower or "all status" in lower or "all statuses" in lower) and "status" in lower:
+        wants = True
+    if not wants:
+        return False
+    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
+        return False
+    return True
+
+
+def _wants_assignee_breakdown(messages: list[dict[str, Any]]) -> bool:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return False
+    lower = last_user.lower()
+    if not ("by assignee" in lower or "by helper" in lower or "assignee breakdown" in lower):
+        return False
+    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
+        return False
+    return True
+
+
+def _extract_space_list_query(messages: list[dict[str, Any]]) -> str:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return ""
+    s = last_user.strip()
+    lower = s.lower()
+    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
+        return ""
+    m = re.search(r"\b(in|for)\s+([A-Za-z][A-Za-z0-9\s\-]{1,40})\b", s, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    cand = (m.group(2) or "").strip().strip(".?!)\"]} ")
+    if not cand or len(cand) > 40:
+        return ""
+    return cand
+
+
+def _extract_list_assigned_to_name(messages: list[dict[str, Any]]) -> str:
+    last_user = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return ""
+
+    s = last_user.strip()
+    lower = s.lower()
+    if "assigned to" not in lower:
+        return ""
+    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
+        return ""
+    # If the user is explicitly asking for a count, let the count shortcut handle it.
+    if "how many" in lower or "count" in lower or "number of" in lower or "total" in lower:
+        return ""
+
+    try:
+        after = re.split(r"assigned\s+to\s+", s, flags=re.IGNORECASE, maxsplit=1)[1]
+    except Exception:
+        return ""
+    after = after.strip().strip(".?!)\"]} ")
+    after = re.split(r"[\n,;]|\s+and\s+|\s+with\s+|\s+in\s+|\s+for\s+", after, maxsplit=1)[0].strip()
+    if not after or len(after) > 80:
+        return ""
+    return after
 
 
 def _try_normalize_tool_calls_block(text: str) -> str:
@@ -1058,6 +1220,16 @@ class ChatRespondRequest(BaseModel):
     max_tokens: int = 900
 
 
+def _ensure_tool_reason(tc: dict[str, Any], reason: str) -> dict[str, Any]:
+    if not isinstance(tc, dict):
+        return tc
+    if isinstance(tc.get("reason"), str) and str(tc.get("reason") or "").strip():
+        return tc
+    tc2 = dict(tc)
+    tc2["reason"] = reason
+    return tc2
+
+
 def _try_parse_json_obj(text: str) -> dict[str, Any] | None:
     try:
         obj = json.loads(text)
@@ -1403,6 +1575,15 @@ def _fallback_chore_proposal(user_input: dict[str, Any]) -> ProposalOutput:
 
 app = FastAPI(title="HomeOps Agent Service", version="0.1.0")
 
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    try:
+        # Avoid leaking stack traces, but return the exception string so callers (Edge) can show actionable errors.
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+    except Exception:
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
 _init_otel()
 try:
     HTTPXClientInstrumentor().instrument()
@@ -1583,6 +1764,7 @@ async def chat_respond(
     x_conversation_id: str | None = Header(default=None, alias="x-conversation-id"),
     x_session_id: str | None = Header(default=None, alias="x-session-id"),
     x_user_id: str | None = Header(default=None, alias="x-user-id"),
+    x_household_id: str | None = Header(default=None, alias="x-household-id"),
     x_langfuse_trace_id: str | None = Header(default=None, alias="x-langfuse-trace-id"),
 ) -> dict[str, Any]:
     # Called by Edge function; require shared secret.
@@ -1598,6 +1780,7 @@ async def chat_respond(
     conv_id = (x_conversation_id or "").strip()
     sess_id = (x_session_id or "").strip()
     user_id = (x_user_id or "").strip()
+    household_id = (x_household_id or "").strip()
 
     model = (req.model or SARVAM_MODEL_DEFAULT or "sarvam-m").strip()
     messages = [m.model_dump() for m in req.messages]
@@ -1682,13 +1865,53 @@ async def chat_respond(
             lf = None
             lf_trace = None
 
+        lf_trace_id = None
+        try:
+            lf_trace_id = getattr(lf_trace, "id", None) if lf_trace is not None else None
+        except Exception:
+            lf_trace_id = None
+
+        def _lf_span(name: str, *, input: Any | None = None, output: Any | None = None, status_message: str | None = None, level: Any | None = None) -> None:
+            if lf is None or lf_trace_id is None:
+                return
+            try:
+                sp = lf.span(name=name, trace_id=str(lf_trace_id), input=input, level=level)
+                sp.end(output=output, status_message=status_message)
+            except Exception:
+                return
+
         def _lf_return(out: dict[str, Any]) -> dict[str, Any]:
             _langfuse_safe_update(lf_trace, output=out, status="success")
             _langfuse_flush(lf)
             return out
 
-        # Helper intent route
         helper_intent = _is_helper_intent(messages)
+        last_user = ""
+        for m in reversed(messages or []):
+            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                last_user = str(m.get("content") or "").strip()
+                break
+        _lf_span(
+            "orchestrator.intent_route",
+            input={"last_user": last_user[:600]},
+            output={"helper_intent": bool(helper_intent)},
+        )
+        try:
+            dbg_raw = (os.environ.get("DEBUG_INTENT_ROUTING") or "").strip().lower()
+            dbg = dbg_raw in {"1", "true", "yes", "y", "on"}
+            if dbg:
+                last_user = ""
+                for m in reversed(messages or []):
+                    if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                        last_user = str(m.get("content") or "").strip()
+                        break
+                _lf_span(
+                    "orchestrator.intent_route",
+                    input={"last_user": last_user[:600]},
+                    output={"helper_intent": bool(helper_intent)},
+                )
+        except Exception:
+            pass
         try:
             dbg_raw = (os.environ.get("DEBUG_INTENT_ROUTING") or "").strip().lower()
             dbg = dbg_raw in {"1", "true", "yes", "y", "on"}
@@ -1714,7 +1937,306 @@ async def chat_respond(
         except Exception:
             pass
 
+        # Deterministic analytics shortcut: "How many chores are assigned to <name>?"
+        # Prefer the curated read-only RPC count_chores_assigned_to which accepts p_helper_name.
+        try:
+            helper_name = _extract_count_assigned_to_name(messages)
+        except Exception:
+            helper_name = ""
+        if helper_name:
+            _lf_span(
+                "orchestrator.deterministic.count_chores_assigned_to",
+                input={"helper_name": helper_name},
+                output={"tool": "query.rpc", "name": "count_chores_assigned_to"},
+            )
+            payload = {
+                "tool_calls": [
+                    {
+                        "id": "tc_count_chores_assigned_to_1",
+                        "tool": "query.rpc",
+                        "args": {"name": "count_chores_assigned_to", "params": {"p_helper_name": helper_name}},
+                        "reason": "Count chores assigned to the specified helper.",
+                    }
+                ]
+            }
+            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
+
+        # Deterministic analytics shortcut (manager pattern): total number of pending tasks/chores.
+        if _wants_unassigned_count(messages):
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "count_chores", "params": {"p_filters": {"unassigned": True}}},
+                "reason": "Count unassigned chores in the household.",
+            }
+            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                if msg2:
+                    return _lf_return({"ok": True, "text": f"Tool error while counting unassigned tasks: {msg2}"})
+                return _lf_return({"ok": True, "text": "Tool error while counting unassigned tasks."})
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            chore_count: Any = None
+            if isinstance(payload, dict):
+                chore_count = payload.get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), dict):
+                    chore_count = (payload.get("result") or {}).get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), list) and payload.get("result"):
+                    first = payload.get("result")[0]
+                    if isinstance(first, dict):
+                        chore_count = first.get("chore_count")
+            elif isinstance(payload, list) and payload:
+                first = payload[0]
+                if isinstance(first, dict):
+                    chore_count = first.get("chore_count")
+
+            if isinstance(chore_count, int):
+                return _lf_return({"ok": True, "text": f"Total unassigned tasks: {chore_count}."})
+            return _lf_return({"ok": True, "text": "There was an error retrieving the number of unassigned tasks. Please try again later."})
+
+        if _wants_total_pending_count(messages):
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {
+                    "name": "count_chores",
+                    "params": {
+                        "p_filters": {"status": "pending"},
+                    },
+                },
+                "reason": "Count pending chores in the household.",
+            }
+            one_payload = {"household_id": household_id, "tool_call": tc}
+            out = await _edge_execute_tools(one_payload, user_id=user_id)
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                if msg2:
+                    return _lf_return({"ok": True, "text": f"Tool error while counting pending tasks: {msg2}"})
+                return _lf_return({"ok": True, "text": "Tool error while counting pending tasks."})
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            chore_count: Any = None
+            if isinstance(payload, dict):
+                chore_count = payload.get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), dict):
+                    chore_count = (payload.get("result") or {}).get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), list) and payload.get("result"):
+                    first = payload.get("result")[0]
+                    if isinstance(first, dict):
+                        chore_count = first.get("chore_count")
+            elif isinstance(payload, list) and payload:
+                first = payload[0]
+                if isinstance(first, dict):
+                    chore_count = first.get("chore_count")
+            if isinstance(chore_count, int):
+                return _lf_return({"ok": True, "text": f"Total pending tasks: {chore_count}."})
+            return _lf_return({"ok": True, "text": "There was an error retrieving the total number of pending tasks. Please try again later."})
+
+        # Deterministic analytics shortcut (manager pattern): breakdown by status.
+        if _wants_status_breakdown(messages):
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "group_chores_by_status", "params": {"p_filters": {}}},
+                "reason": "Group chores by status.",
+            }
+            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                if msg2:
+                    return _lf_return({"ok": True, "text": f"Tool error while grouping chores by status: {msg2}"})
+                return _lf_return({"ok": True, "text": "Tool error while grouping chores by status."})
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            # Edge wraps RPC payload under out.result; RPC returns a row with key 'result' containing the list.
+            rows: list[Any] = []
+            if isinstance(payload, dict):
+                r0 = payload.get("result")
+                if isinstance(r0, list):
+                    rows = r0
+            elif isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                r0 = payload[0].get("result")
+                if isinstance(r0, list):
+                    rows = r0
+            if not rows:
+                return _lf_return({"ok": True, "text": "No chores found."})
+            lines: list[str] = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                st = str(r.get("status") or "").strip()
+                cnt = r.get("count")
+                if st and isinstance(cnt, int):
+                    lines.append(f"- {st}: {cnt}")
+            if len(lines) <= 1:
+                return _lf_return({"ok": True, "text": "Chores by status (only one status bucket found):\n" + "\n".join(lines)})
+            return _lf_return({"ok": True, "text": "Chores by status:\n" + "\n".join(lines)})
+
+        # Deterministic analytics shortcut (manager pattern): breakdown by assignee.
+        if _wants_assignee_breakdown(messages):
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "group_chores_by_assignee", "params": {"p_filters": {}}},
+                "reason": "Group chores by assignee.",
+            }
+            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+            payload = out.get("result") if isinstance(out, dict) else None
+            result = payload.get("result") if isinstance(payload, dict) else None
+            rows = result if isinstance(result, list) else []
+            if not rows:
+                return _lf_return({"ok": True, "text": "No chores found."})
+            lines = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                name = str(r.get("helper_name") or r.get("helper") or "").strip()
+                cnt = r.get("count")
+                if name and isinstance(cnt, int):
+                    lines.append(f"- {name}: {cnt}")
+            return _lf_return({"ok": True, "text": "Chores by assignee:\n" + "\n".join(lines)})
+
+        # Deterministic analytics shortcut (manager pattern): list chores in a space.
+        try:
+            space_q = _extract_space_list_query(messages)
+        except Exception:
+            space_q = ""
+        if space_q:
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "list_chores_enriched", "params": {"p_filters": {"space_query": space_q}, "p_limit": 25}},
+                "reason": "List chores for a space.",
+            }
+            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+            payload = out.get("result") if isinstance(out, dict) else None
+            match_type = payload.get("match_type") if isinstance(payload, dict) else None
+            if match_type == "ambiguous_space":
+                return _lf_return({"ok": True, "text": "Which space did you mean?"})
+            result = payload.get("result") if isinstance(payload, dict) else None
+            chores = result if isinstance(result, list) else []
+            if not chores:
+                return _lf_return({"ok": True, "text": f"No chores found for {space_q}."})
+            lines: list[str] = []
+            for c0 in chores[:25]:
+                if not isinstance(c0, dict):
+                    continue
+                title = str(c0.get("title") or "").strip()
+                status = str(c0.get("status") or "").strip()
+                if title and status:
+                    lines.append(f"- {title} [{status}]")
+                elif title:
+                    lines.append(f"- {title}")
+            return _lf_return({"ok": True, "text": f"Chores in {space_q}:\n" + "\n".join(lines)})
+
+        # Deterministic analytics shortcut (manager pattern): list tasks/chores assigned to a helper.
+        # Example: "tasks assigned to Sunita"
+        try:
+            list_name = _extract_list_assigned_to_name(messages)
+        except Exception:
+            list_name = ""
+        if list_name:
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
+
+            _lf_span(
+                "orchestrator.deterministic.list_chores_assigned_to",
+                input={"helper_query": list_name},
+                output={"tool": "query.rpc", "name": "list_chores_enriched"},
+            )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {
+                    "name": "list_chores_enriched",
+                    "params": {
+                        "p_filters": {"helper_query": list_name},
+                        "p_limit": 25,
+                    },
+                },
+                "reason": "List chores assigned to the specified helper.",
+            }
+            one_payload = {"household_id": household_id, "tool_call": tc}
+            out = await _edge_execute_tools(one_payload, user_id=user_id)
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            match_type = payload.get("match_type") if isinstance(payload, dict) else None
+            result = payload.get("result") if isinstance(payload, dict) else None
+            helper_candidates = payload.get("helper_candidates") if isinstance(payload, dict) else None
+
+            if match_type == "ambiguous_helper" and helper_candidates:
+                return _lf_return({"ok": True, "text": "Which helper did you mean? " + json.dumps(helper_candidates, ensure_ascii=False)})
+            if match_type == "none_helper":
+                return _lf_return({"ok": True, "text": f"I couldn't find a helper matching '{list_name}'."})
+
+            chores = result if isinstance(result, list) else []
+            if not chores:
+                return _lf_return({"ok": True, "text": f"No chores are currently assigned to {list_name}."})
+
+            lines: list[str] = []
+            for c0 in chores[:25]:
+                if not isinstance(c0, dict):
+                    continue
+                title = str(c0.get("title") or "").strip()
+                status = str(c0.get("status") or "").strip()
+                due_at = str(c0.get("due_at") or "").strip()
+                space = str(c0.get("space") or "").strip()
+                parts: list[str] = []
+                if title:
+                    parts.append(title)
+                if status:
+                    parts.append(f"[{status}]")
+                meta: list[str] = []
+                if due_at:
+                    meta.append(f"due {due_at}")
+                if space:
+                    meta.append(f"{space}")
+                suffix = f" — {', '.join(meta)}" if meta else ""
+                if parts:
+                    lines.append("- " + " ".join(parts) + suffix)
+
+            return _lf_return({"ok": True, "text": "Here are the chores assigned to " + list_name + ":\n" + "\n".join(lines)})
+
         if helper_intent:
+            _lf_span(
+                "orchestrator.route.helper_agent",
+                output={"routed": True},
+            )
             helper = await _run_helper_agent(
                 messages=messages,
                 model=model,
@@ -1751,7 +2273,7 @@ async def chat_respond(
             safe_summary = _deterministic_trim_chain_of_thought(user_summary or "")
             return _lf_return({"ok": True, "text": safe_summary or "What would you like to do?"})
 
-        # ── Orchestrator (minimal v1) ───────────────────────────────────────────
+        # ── Orchestrator (manager loop) ─────────────────────────────────────────
         # If Edge injected a CLARIFICATION NEEDED block, return a structured clarification
         # payload that the frontend can render (multi-select list).
         clarification_block = _extract_clarification_block(messages)
@@ -1804,6 +2326,11 @@ async def chat_respond(
                 }
             ]
             payload = {"tool_calls": tool_calls}
+            _lf_span(
+                "orchestrator.deterministic.apply_assignments",
+                input={"assignment_count": len(assignments)},
+                output={"tool": "query.rpc", "name": "apply_chore_assignments"},
+            )
             return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
 
         # Deterministic shortcut: "Assign a chore to <helper> to <task> tomorrow"
@@ -1811,6 +2338,15 @@ async def chat_respond(
         # so we use a single RPC that resolves helper + matches/creates chore server-side.
         assign_req = _extract_assign_or_create_chore(latest_user_text)
         if assign_req is not None:
+            _lf_span(
+                "orchestrator.deterministic.assign_or_create_chore",
+                input={
+                    "helper_query": str(assign_req.get("helper_query") or "")[:120],
+                    "task": str(assign_req.get("task") or "")[:240],
+                    "when": str(assign_req.get("when") or "")[:40],
+                },
+                output={"tool": "query.rpc", "name": "assign_or_create_chore"},
+            )
             tool_calls = [
                 {
                     "id": f"tc_{uuid.uuid4().hex}",
@@ -1832,6 +2368,14 @@ async def chat_respond(
         # Deterministic shortcut: complete a chore by title-ish query.
         complete_req = _extract_complete_chore_by_query(latest_user_text)
         if complete_req is not None:
+            _lf_span(
+                "orchestrator.deterministic.complete_chore_by_query",
+                input={
+                    "query": str(complete_req.get("query") or "")[:240],
+                    "when": str(complete_req.get("when") or "")[:40],
+                },
+                output={"tool": "query.rpc", "name": "complete_chore_by_query"},
+            )
             tool_calls = [
                 {
                     "id": f"tc_{uuid.uuid4().hex}",
@@ -1852,6 +2396,15 @@ async def chat_respond(
         # Deterministic shortcut: reassign or unassign a chore by title-ish query.
         reassign_req = _extract_reassign_or_unassign_chore(latest_user_text)
         if reassign_req is not None:
+            _lf_span(
+                "orchestrator.deterministic.reassign_chore_by_query",
+                input={
+                    "chore_query": str(reassign_req.get("chore_query") or "")[:240],
+                    "helper_query": str(reassign_req.get("helper_query") or "")[:120] if reassign_req.get("helper_query") is not None else None,
+                    "when": str(reassign_req.get("when") or "")[:40],
+                },
+                output={"tool": "query.rpc", "name": "reassign_chore_by_query"},
+            )
             tool_calls = [
                 {
                     "id": f"tc_{uuid.uuid4().hex}",
@@ -1982,8 +2535,20 @@ async def chat_respond(
             "  - db.delete: {\"table\": <string>, \"id\": <string>}\n"
             "  - query.rpc: {\"name\": <string>, \"params\": <object optional>}\n"
             "  - Allowlisted query.rpc names for analytics: resolve_helper, resolve_space, count_chores_assigned_to, count_chores, group_chores_by_status, group_chores_by_assignee, list_chores_enriched.\n"
+            "  - For analytics RPCs, pass filters via params.p_filters (json object). Example: {\"name\":\"count_chores\", \"params\":{\"p_filters\":{\"status\":\"closed\"}}}.\n"
             "  - Allowlisted query.rpc names for writes: apply_chore_assignments, assign_or_create_chore, complete_chore_by_query, reassign_chore_by_query.\n"
             "- For creating chores: use db.insert with table=\"chores\" and put fields under record (e.g., title, due_at, helper_id, metadata).\n"
+            "\nCanonical examples (follow structure exactly; do not copy IDs verbatim):\n"
+            "A) Count pending chores:\n"
+            "{\"tool_calls\":[{\"id\":\"tc_1\",\"tool\":\"query.rpc\",\"args\":{\"name\":\"count_chores\",\"params\":{\"p_filters\":{\"status\":\"pending\"}}},\"reason\":\"Count pending chores.\"}]}\n"
+            "B) Count unassigned chores:\n"
+            "{\"tool_calls\":[{\"id\":\"tc_1\",\"tool\":\"query.rpc\",\"args\":{\"name\":\"count_chores\",\"params\":{\"p_filters\":{\"unassigned\":true}}},\"reason\":\"Count unassigned chores.\"}]}\n"
+            "C) Group chores by status:\n"
+            "{\"tool_calls\":[{\"id\":\"tc_1\",\"tool\":\"query.rpc\",\"args\":{\"name\":\"group_chores_by_status\",\"params\":{\"p_filters\":{}}},\"reason\":\"Group chores by status.\"}]}\n"
+            "D) List chores in a space (example space query):\n"
+            "{\"tool_calls\":[{\"id\":\"tc_1\",\"tool\":\"query.rpc\",\"args\":{\"name\":\"list_chores_enriched\",\"params\":{\"p_filters\":{\"space_query\":\"Kitchen\"},\"p_limit\":25}},\"reason\":\"List chores for a space.\"}]}\n"
+            "E) Complete a chore by text query:\n"
+            "{\"tool_calls\":[{\"id\":\"tc_1\",\"tool\":\"query.rpc\",\"args\":{\"name\":\"complete_chore_by_query\",\"params\":{\"p_query\":\"mop kitchen\"}},\"reason\":\"Complete the matching chore.\"}]}\n"
         )
 
         if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
@@ -1993,12 +2558,57 @@ async def chat_respond(
         else:
             messages = [{"role": "system", "content": final_only_clause.strip()}] + messages
 
+        async def _orchestrator_once(orchestrator_messages: list[dict[str, Any]]) -> dict[str, Any]:
+            safe_msgs: list[dict[str, str]] = []
+            for m in orchestrator_messages or []:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                content = m.get("content")
+                if isinstance(role, str) and isinstance(content, str):
+                    safe_msgs.append({"role": role, "content": content})
+
+            raw = await _sarvam_chat(
+                messages=safe_msgs,
+                model=model,
+                temperature=float(req.temperature) if isinstance(req.temperature, (int, float)) else 0.0,
+                max_tokens=int(req.max_tokens) if isinstance(req.max_tokens, int) else 900,
+            )
+            parsed_local = _parse_strict_llm_payload(raw)
+            if parsed_local is None:
+                cleaned = _deterministic_trim_chain_of_thought(raw or "").strip()
+                return {"kind": "final_text", "final_text": cleaned}
+            return parsed_local
+
+        sarvam_messages: list[dict[str, str]] = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = m.get("content")
+            if isinstance(role, str) and isinstance(content, str):
+                sarvam_messages.append({"role": role, "content": content})
+
         text = await _sarvam_chat(
-            messages=messages,
+            messages=sarvam_messages,
             model=model,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
+            temperature=float(req.temperature) if isinstance(req.temperature, (int, float)) else 0.0,
+            max_tokens=int(req.max_tokens) if isinstance(req.max_tokens, int) else 900,
         )
+
+        try:
+            _lf_span(
+                "orchestrator.llm.chat",
+                input={
+                    "model": model,
+                    "temperature": float(req.temperature),
+                    "max_tokens": int(req.max_tokens),
+                    "message_count": len(messages or []),
+                },
+                output={"response_len": len(text) if isinstance(text, str) else None},
+            )
+        except Exception:
+            pass
 
         if isinstance(text, str):
             print(
@@ -2096,9 +2706,63 @@ async def chat_respond(
             # Deterministic safe fallback with no invented entities.
             return _lf_return({"ok": True, "text": "I can help with that. What date and time should I use?"})
 
+        # Manager pattern: if we get tool_calls, execute them via Edge, then run one more pass
+        # with the tool results injected, and return final_text.
         if parsed.get("kind") == "tool_calls":
-            payload = {"tool_calls": parsed.get("tool_calls")}
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
+            tool_calls = parsed.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                return _lf_return({"ok": True, "text": "I couldn't determine the next step. Please rephrase your request."})
+
+            if not household_id:
+                return _lf_return({"ok": True, "text": "I need your household context to run database tools. Please reconnect your home and try again."})
+            if not user_id:
+                return _lf_return({"ok": True, "text": "I need your user context to run database tools. Please reconnect your home and try again."})
+
+            _lf_span(
+                "orchestrator.tools.execute",
+                input={"tool_calls": tool_calls},
+            )
+            # Execute tool calls sequentially via Edge tool executor.
+            results: list[dict[str, Any]] = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tool_name = str(tc.get("tool") or "").strip()
+                tc = _ensure_tool_reason(tc, f"Execute {tool_name or 'tool'}.")
+                one_payload = {
+                    "household_id": household_id,
+                    "tool_call": tc,
+                }
+                try:
+                    out = await _edge_execute_tools(one_payload, user_id=user_id)
+                except Exception as e:
+                    out = {"ok": False, "error": str(e), "tool_call_id": tc.get("id")}
+                results.append(out)
+            tool_results = {"results": results}
+            _lf_span(
+                "orchestrator.tools.results",
+                output={"results": tool_results},
+            )
+
+            followup_messages = list(sarvam_messages)
+            followup_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "TOOL_RESULTS_JSON:\n"
+                        + json.dumps(tool_results, ensure_ascii=False)
+                        + "\n\n"
+                        + "Using the TOOL_RESULTS_JSON above, answer the user's request. "
+                        + "Return ONLY a single JSON object: {\"final_text\": <string>} and nothing else."
+                    ),
+                }
+            )
+
+            parsed2 = await _orchestrator_once(followup_messages)
+            final_text2 = _deterministic_trim_chain_of_thought(str(parsed2.get("final_text") or "").strip())
+            if not final_text2:
+                final_text2 = "I executed the database queries but couldn't format the answer. Please try again."
+            return _lf_return({"ok": True, "text": final_text2})
 
         final_text = _deterministic_trim_chain_of_thought(str(parsed.get("final_text") or "").strip())
 
@@ -2237,6 +2901,8 @@ async def _sarvam_chat(
     url = f"{SARVAM_BASE_URL.rstrip('/')}/v1/chat/completions"
     timeout = httpx.Timeout(SARVAM_TIMEOUT_MS / 1000.0)
 
+    messages = _sarvam_adapt_messages(messages)  # type: ignore[arg-type]
+
     last_err: Optional[Exception] = None
     for attempt in range(SARVAM_MAX_RETRIES + 1):
         try:
@@ -2257,36 +2923,21 @@ async def _sarvam_chat(
                     "max_tokens": max_tokens,
                 }
 
-                # Attempt to request lower reasoning output to improve structured JSON compliance.
-                # If Sarvam rejects unknown fields, we will retry once without them.
-                if SARVAM_REASONING_LEVEL:
-                    payload["reasoning_level"] = SARVAM_REASONING_LEVEL
-                    payload["reasoning"] = {"level": SARVAM_REASONING_LEVEL}
+                # NOTE: Sarvam payload validation has varied across versions.
+                # Avoid sending experimental fields (e.g. reasoning_level) that can trigger HTTP 400.
 
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     res = await client.post(
                         url,
                         headers={
+                            # Keep multiple common auth header variants for maximum compatibility.
                             "API-Subscription-Key": api_key,
+                            "api-subscription-key": api_key,
+                            "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json",
                         },
                         json=payload,
                     )
-
-                    # If Sarvam rejects reasoning fields, retry without them.
-                    if res.status_code == 400 and SARVAM_REASONING_LEVEL and (
-                        "reasoning" in payload or "reasoning_level" in payload
-                    ):
-                        payload.pop("reasoning", None)
-                        payload.pop("reasoning_level", None)
-                        res = await client.post(
-                            url,
-                            headers={
-                                "API-Subscription-Key": api_key,
-                                "Content-Type": "application/json",
-                            },
-                            json=payload,
-                        )
             if res.status_code >= 400:
                 # Log minimal debugging info without leaking the key.
                 req_id = None
@@ -2310,10 +2961,11 @@ async def _sarvam_chat(
                         "model": model,
                         "api_key_len": len(api_key),
                         "api_key_prefix": api_key[:6],
+                        "response_prefix": (res.text or "")[:500],
                     },
                 )
 
-                res.raise_for_status()
+                raise RuntimeError(f"Sarvam call failed {res.status_code}: {res.text}")
 
             data = res.json()
 
@@ -2370,6 +3022,32 @@ async def _edge_post(path: str, payload: dict[str, Any]) -> None:
         raise RuntimeError(f"Edge writeback failed {res.status_code}: {res.text}")
 
 
+async def _edge_execute_tools(payload: dict[str, Any], *, user_id: str) -> Any:
+    if not EDGE_BASE_URL:
+        raise RuntimeError("Missing EDGE_BASE_URL")
+    if not AGENT_SERVICE_KEY:
+        raise RuntimeError("Missing AGENT_SERVICE_KEY")
+
+    url = f"{EDGE_BASE_URL.rstrip('/')}/tools/execute"
+    headers = {
+        "x-agent-service-key": AGENT_SERVICE_KEY,
+        "Content-Type": "application/json",
+    }
+    if user_id:
+        headers["x-user-id"] = user_id
+    if EDGE_BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {EDGE_BEARER_TOKEN}"
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        res = await client.post(url, headers=headers, json=payload)
+    if res.status_code >= 400:
+        raise RuntimeError(f"Edge tools.execute failed {res.status_code}: {res.text}")
+    try:
+        return res.json()
+    except Exception:
+        raise RuntimeError("Edge tools.execute returned non-JSON")
+
+
 async def _edge_get(path: str, params: dict[str, str]) -> Any:
     if not EDGE_BASE_URL:
         raise RuntimeError("Missing EDGE_BASE_URL")
@@ -2395,6 +3073,55 @@ async def _edge_get(path: str, params: dict[str, str]) -> Any:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _sarvam_adapt_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Normalize messages to satisfy Sarvam constraints.
+
+    Constraints enforced:
+    - At most one system message, and it must be the first message.
+    - User/assistant turns must alternate, starting with a user message.
+    """
+
+    sys_parts: list[str] = []
+    non_sys_raw: list[dict[str, str]] = []
+
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                sys_parts.append(content.strip())
+            continue
+
+        if role not in {"user", "assistant"}:
+            continue
+        if not isinstance(content, str):
+            continue
+        c = content.strip("\n")
+        if not c.strip():
+            continue
+        non_sys_raw.append({"role": str(role), "content": c})
+
+    # Sarvam constraint: turns must alternate user/assistant starting with user.
+    # Normalize by dropping any leading assistant turns and merging consecutive same-role turns.
+    non_sys: list[dict[str, str]] = []
+    for item in non_sys_raw:
+        if not non_sys and item["role"] == "assistant":
+            continue
+        if non_sys and non_sys[-1]["role"] == item["role"]:
+            non_sys[-1]["content"] = (non_sys[-1]["content"].rstrip() + "\n\n" + item["content"].lstrip()).strip()
+            continue
+        non_sys.append(item)
+
+    out: list[dict[str, str]] = []
+    if sys_parts:
+        out.append({"role": "system", "content": "\n\n".join(sys_parts)})
+    out.extend(non_sys)
+    return out
 
 
 def _pick_helper_for_cleaning(
@@ -2443,7 +3170,7 @@ def _visitor_cleaning_templates(
 
 
 @app.post("/v1/runs/start")
-async def start_run(req: RunStartRequest) -> dict[str, Any]:
+async def runs_start(req: RunStartRequest, request: Request) -> dict[str, Any]:
     try:
         if req.mode != "propose":
             raise RuntimeError("agent-service only supports mode=propose")

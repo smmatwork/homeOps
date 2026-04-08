@@ -623,13 +623,17 @@ export function useSarvamChat() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const timeoutMsRaw = (import.meta as any)?.env?.VITE_CHAT_TIMEOUT_MS;
+    const timeoutMsNum = typeof timeoutMsRaw === "string" ? Number(timeoutMsRaw) : NaN;
+    const timeoutMs = Number.isFinite(timeoutMsNum) && timeoutMsNum > 0 ? timeoutMsNum : 90000;
+
     const watchdog = window.setTimeout(() => {
       try {
         controller.abort();
       } catch {
         // ignore
       }
-    }, 25000);
+    }, timeoutMs);
 
     let fullResponse = "";
     try {
