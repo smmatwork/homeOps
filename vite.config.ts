@@ -87,7 +87,7 @@ export default defineConfig({
     },
     
     // Enable minification optimizations
-    minify: 'terser',
+    minify: true,
   },
   
   // Development server optimizations

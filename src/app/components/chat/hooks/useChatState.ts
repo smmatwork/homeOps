@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import type { SpeechLang } from '@/hooks/useSarvamSTT';
+import type { SpeechLang } from '../../../hooks/useSarvamSTT';
 
 export interface ChatState {
   input: string;

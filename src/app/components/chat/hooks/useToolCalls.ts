@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from 'react';
-import type { ToolCall } from '@/services/agentActions';
+import type { ToolCall } from '../../../services/agentActions';
 
 export interface ToolCallState {
   toolBusy: boolean;
