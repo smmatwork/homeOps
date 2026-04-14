@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createClient } from "@supabase/supabase-js";
 import * as kv from "./kv_store.ts";
-import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 type HonoEnv = {
   Variables: {
@@ -349,7 +348,8 @@ type RpcName =
   | "count_chores"
   | "group_chores_by_status"
   | "group_chores_by_assignee"
-  | "list_chores_enriched";
+  | "list_chores_enriched"
+  | "find_chores_matching_keywords";
 
 function isRpcName(v: unknown): v is RpcName {
   return (
@@ -363,7 +363,8 @@ function isRpcName(v: unknown): v is RpcName {
     v === "count_chores" ||
     v === "group_chores_by_status" ||
     v === "group_chores_by_assignee" ||
-    v === "list_chores_enriched"
+    v === "list_chores_enriched" ||
+    v === "find_chores_matching_keywords"
   );
 }
 
@@ -1071,6 +1072,7 @@ api.post("/tools/execute", async (c) => {
 
   // Execute
   let summary = "";
+  let payload: any = null;
 
   if (tc.tool === "db.select") {
     const limitRaw = (tc.args as Record<string, unknown>).limit;
@@ -1099,6 +1101,7 @@ api.post("/tools/execute", async (c) => {
         .limit(limit);
       if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
       summary = summarizeTableRows("profiles", data ?? []);
+      payload = data;
     } else if (table === "households") {
       const { data, error } = await admin
         .from("households")
@@ -1291,7 +1294,7 @@ api.post("/tools/execute", async (c) => {
     if (table === "household_members" || table === "households" || table === "agent_audit_log" || table === "support_audit_log") {
       return c.json({ error: `Insert not allowed for table '${table}'` }, 403);
     }
-    const payload: Record<string, unknown> = { ...record, household_id: householdId };
+    payload = { ...record, household_id: householdId };
     if (table === "chores") {
       const titleRaw = typeof payload.title === "string" ? String(payload.title) : "";
       const descRaw = typeof payload.description === "string" ? String(payload.description) : "";
@@ -1476,6 +1479,7 @@ api.post("/tools/execute", async (c) => {
       }
     }
 
+    payload = patch;
     summary = `Updated 1 row in ${table}. id=${id}`;
   }
 
@@ -1501,6 +1505,7 @@ api.post("/tools/execute", async (c) => {
 
     const { error } = await admin.from(table).delete().eq("id", id);
     if (error) return c.json({ ok: false, tool_call_id: tc.id, error: { message: error.message }, result: null }, 200);
+    payload = { id };
     summary = `Deleted 1 row from ${table}. id=${id}`;
   }
 
@@ -2485,7 +2490,9 @@ api.get("/chat/state", async (c) => {
     .from("chat_conversations")
     .select("id, household_id, scope, user_id")
     .eq("household_id", householdId)
-    .eq("scope", scope);
+    .eq("scope", scope)
+    .order("created_at", { ascending: true })
+    .limit(1);
 
   const convoRes =
     scope === "user"
@@ -2767,7 +2774,7 @@ api.post("/chat/respond", async (c) => {
         : json && typeof json === "object" && (json as { error?: unknown }).error
           ? String((json as { error?: unknown }).error)
           : text || upstream.statusText;
-    return c.json({ error: msg }, { status: upstream.status as ContentfulStatusCode });
+    return c.json({ error: msg }, { status: upstream.status as any });
   }
 
   return c.body(text || JSON.stringify({ ok: true }), 200, {
@@ -2822,7 +2829,9 @@ api.post("/chat/append", async (c) => {
     .from("chat_conversations")
     .select("id, household_id, scope, user_id")
     .eq("household_id", householdId)
-    .eq("scope", scope);
+    .eq("scope", scope)
+    .order("created_at", { ascending: true })
+    .limit(1);
 
   const convoRes =
     scope === "user"
