@@ -277,13 +277,35 @@ export function useSarvamChat() {
         }
       }
 
-      const res = await appendChatMessages({
+      let res = await appendChatMessages({
         accessToken,
         householdId,
         scope: memoryScopeRef.current,
         messages: items,
         summary: memorySummaryRef.current,
       });
+
+      // The cached accessToken may be expired. On 401, force a refresh and
+      // retry once before surfacing the error to the user.
+      if (res.ok === false && res.status === 401) {
+        try {
+          const refresh = await supabase.auth.refreshSession();
+          const nextToken = refresh.data.session?.access_token
+            ? String(refresh.data.session.access_token).trim()
+            : "";
+          if (nextToken) {
+            res = await appendChatMessages({
+              accessToken: nextToken,
+              householdId,
+              scope: memoryScopeRef.current,
+              messages: items,
+              summary: memorySummaryRef.current,
+            });
+          }
+        } catch {
+          // fall through and surface the original 401 below
+        }
+      }
 
       if (res.ok === false) {
         const msg = `Chat history couldn't be saved. (${res.error}${typeof res.status === "number" ? `, status=${res.status}` : ""})`;
@@ -440,7 +462,7 @@ export function useSarvamChat() {
 
     setError(null);
     setMemoryReady(true);
-  }, []);
+  }, [authedHouseholdId, authedAccessToken]);
 
   useEffect(() => {
     let last = 0;

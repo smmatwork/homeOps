@@ -28,6 +28,8 @@ import {
   IconButton,
   Alert,
   FormControlLabel,
+  ToggleButton,
+  ToggleButtonGroup,
 } from "@mui/material";
 import {
   Add,
@@ -44,6 +46,12 @@ import { supabase } from "../../services/supabaseClient";
 import { agentCreate } from "../../services/agentApi";
 import { executeToolCall } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
+import { normalizeSpacesToRooms } from "../../config/homeProfileTemplates";
+import { Link as RouterLink } from "react-router";
+import { HealthAndSafety, Sync } from "@mui/icons-material";
+import { useSyncSchedule } from "../../hooks/useSyncSchedule";
+import { SyncResultsDrawer } from "./SyncResultsDrawer";
+import { HelperDailyView } from "./HelperDailyView";
 
 type ChoreRow = {
   id: string;
@@ -179,6 +187,8 @@ function startOfLocalWeekMonday(date: Date): Date {
 
 export function Chores() {
   const { t } = useI18n();
+  const scheduleSync = useSyncSchedule();
+  const [syncDrawerOpen, setSyncDrawerOpen] = useState(false);
   const [view, setView] = useState<"all" | "pending" | "in-progress" | "completed">("all");
   const [mode, setMode] = useState<"coverage" | "list" | "daily">("daily");
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
@@ -1135,9 +1145,20 @@ export function Chores() {
           utility: pickArr("utility", ["weekly"]),
         });
       }
-      const rawSpaces = Array.isArray((data as any)?.spaces)
-        ? ((data as any).spaces as unknown[]).map(String).map((s) => s.trim()).filter(Boolean)
-        : [];
+      // Spaces may be either string[] (legacy) or RoomEntry[] (current format).
+      // Defensive: if the JSONB column comes back as a string, parse it.
+      let rawSpacesField: unknown = (data as any)?.spaces;
+      if (typeof rawSpacesField === "string") {
+        try {
+          rawSpacesField = JSON.parse(rawSpacesField);
+        } catch {
+          // leave as-is, normalizeSpacesToRooms will return []
+        }
+      }
+      const rooms = normalizeSpacesToRooms(rawSpacesField);
+      const rawSpaces = rooms
+        .map((rm) => (rm.display_name || rm.template_name || "").trim())
+        .filter(Boolean);
       const seen = new Set<string>();
       const spaces: string[] = [];
       for (const s of rawSpaces) {
@@ -2295,6 +2316,21 @@ export function Chores() {
           <Typography color="textSecondary">{t("chores.subtitle")}</Typography>
         </Box>
         <Box display="flex" gap={1} alignItems="center">
+          {mode !== "coverage" ? (
+            <ToggleButtonGroup
+              value={mode}
+              exclusive
+              size="small"
+              onChange={(_, next) => {
+                if (next === "daily") enterDailyMode();
+                else if (next === "list") enterListMode({ space: null, cadence: null });
+              }}
+            >
+              <ToggleButton value="daily">Helper view</ToggleButton>
+              <ToggleButton value="list">Task view</ToggleButton>
+            </ToggleButtonGroup>
+          ) : null}
+
           {mode === "coverage" ? (
             <Button
               variant="outlined"
@@ -2323,6 +2359,19 @@ export function Chores() {
             </Button>
           ) : null}
           <Button
+            variant="outlined"
+            startIcon={<Sync />}
+            disabled={scheduleSync.busy}
+            onClick={async () => {
+              const result = await scheduleSync.sync({ mode: "confirm", trigger: "manual" });
+              if (result && (result.schedulerMutations.length > 0 || result.reactorAdjustments.length > 0)) {
+                setSyncDrawerOpen(true);
+              }
+            }}
+          >
+            {scheduleSync.busy ? t("engine.syncing") : t("engine.sync_schedule")}
+          </Button>
+          <Button
             variant="contained"
             startIcon={<Add />}
             onClick={() => setDialogOpen(true)}
@@ -2343,18 +2392,42 @@ export function Chores() {
               subheader={t("chores.planned_frequency")}
             />
             <CardContent>
-              <Box display="flex" justifyContent="flex-end" gap={1} mb={2}>
+              <Box display="flex" justifyContent="flex-end" gap={1} mb={2} flexWrap="wrap">
+                <Button
+                  variant="contained"
+                  startIcon={<HealthAndSafety />}
+                  component={RouterLink}
+                  to="/coverage"
+                >
+                  {t("coverage.audit_button")}
+                </Button>
                 <Button variant="outlined" onClick={openBaselineEditor} disabled={busy}>
                   {t("chores.edit_baseline")}
                 </Button>
                 <Button
-                  variant="contained"
+                  variant="outlined"
                   onClick={() => buildAutoFillRecommendations()}
                   disabled={busy || coverage.spaces.length === 0}
                 >
                   {t("chores.autofill_missing")}
                 </Button>
               </Box>
+
+              {!busy && coverage.spaces.length === 0 && (
+                <Box sx={{ textAlign: "center", py: 4 }}>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    {t("planner.empty_coverage")}
+                  </Typography>
+                  <Button
+                    variant="contained"
+                    startIcon={<HealthAndSafety />}
+                    component={RouterLink}
+                    to="/coverage"
+                  >
+                    {t("coverage.audit_button")}
+                  </Button>
+                </Box>
+              )}
               {busy && chores.length === 0 ? (
                 <Box display="flex" justifyContent="center" alignItems="center" py={4}>
                   <CircularProgress size={24} />
@@ -2509,70 +2582,15 @@ export function Chores() {
             <Typography variant="caption" color="textSecondary">
               {t("chores.time_zone")}: {Intl.DateTimeFormat().resolvedOptions().timeZone}
             </Typography>
-            <FormControlLabel
-              control={<Checkbox checked={dailyOnlyCadence} onChange={(e) => setDailyOnlyCadence(e.target.checked)} />}
-              label={<Typography variant="body2">{t("chores.only_daily_cadence")}</Typography>}
-            />
-            <Typography variant="caption" color="textSecondary">
-              {t("chores.daily_counts")} {dailyCadenceCounts.explicitDaily} | {t("chores.inferred_daily_counts")} {dailyCadenceCounts.inferredDaily}
-            </Typography>
             <Button variant="outlined" onClick={() => enterListMode({ space: null, cadence: null })}>
               {t("chores.view_all")}
             </Button>
-
-            <FormControlLabel
-              control={<Checkbox checked={includeDeleted} onChange={(e) => setIncludeDeleted(e.target.checked)} />}
-              label={<Typography variant="body2">Include deleted</Typography>}
-            />
           </Box>
 
-          <Box mt={2} display="flex" gap={1} alignItems="center" flexWrap="wrap">
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={allVisibleSelected}
-                  indeterminate={someVisibleSelected}
-                  onChange={(e) => selectAllVisible(e.target.checked)}
-                  disabled={busy || visibleChores.length === 0}
-                />
-              }
-              label={<Typography variant="body2">Select all (visible)</Typography>}
-            />
-            <Button
-              color="error"
-              variant="outlined"
-              disabled={busy || selectedVisibleIds.length === 0}
-              startIcon={<Delete />}
-              onClick={() => setBulkDeleteDialogOpen(true)}
-            >
-              Delete selected ({selectedVisibleIds.length})
-            </Button>
-            <Button variant="text" disabled={busy || Object.keys(selectedChoreIds).length === 0} onClick={clearChoreSelection}>
-              Clear selection
-            </Button>
+          {/* Helper-grouped daily view with quick-complete checkboxes */}
+          <Box mt={2}>
+            <HelperDailyView date={dailyDate} />
           </Box>
-
-          <Box mt={4} display="flex" flexDirection="column" gap={1}>
-            {busy && chores.length === 0 ? (
-              <Box display="flex" justifyContent="center" alignItems="center" py={6}>
-                <CircularProgress size={24} />
-              </Box>
-            ) : null}
-            {loadError ? (
-              <Box>
-                <Typography color="error">{loadError}</Typography>
-              </Box>
-            ) : null}
-
-            {dailyChores.map((c) => renderChoreListRow(c))}
-          </Box>
-
-          {dailyChores.length === 0 ? (
-            <Box textAlign="center" py={4}>
-              <Typography variant="h6">{t("chores.no_chores_found")}</Typography>
-              <Typography color="textSecondary">{t("chores.no_chores_due_on_date")}</Typography>
-            </Box>
-          ) : null}
         </>
       ) : (
         <>
@@ -2803,6 +2821,23 @@ export function Chores() {
           {snackMessage}
         </Alert>
       </Snackbar>
+
+      <SyncResultsDrawer
+        open={syncDrawerOpen}
+        onClose={() => setSyncDrawerOpen(false)}
+        result={scheduleSync.result}
+        onApplied={async () => {
+          const hid = householdId.trim();
+          if (!hid) return;
+          const { data } = await supabase
+            .from("chores")
+            .select(CHORE_SELECT)
+            .eq("household_id", hid)
+            .is("deleted_at", null)
+            .order("created_at", { ascending: false });
+          if (data) setChores(data as ChoreRow[]);
+        }}
+      />
     </>
   );
 }
