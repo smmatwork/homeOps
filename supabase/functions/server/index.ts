@@ -262,7 +262,17 @@ type ToolTable =
   | "household_members"
   | "profiles"
   | "agent_audit_log"
-  | "support_audit_log";
+  | "support_audit_log"
+  // Phase 1.0 helper module + assignment engine tables.
+  | "helper_invites"
+  | "helper_consents"
+  | "helper_compensation_ledger"
+  | "helper_outreach_attempts"
+  | "assignment_rules"
+  | "assignment_strategy_weights"
+  | "assignment_decisions"
+  | "assignment_overrides"
+  | "pattern_elicitation_state";
 
 type ToolCall = {
   id: string;
@@ -331,6 +341,18 @@ const TOOL_ALLOWLIST: Record<ToolTable, { select: boolean; insert: boolean; upda
   profiles: { select: true, insert: false, update: true, delete: false },
   agent_audit_log: { select: true, insert: false, update: false, delete: false },
   support_audit_log: { select: true, insert: false, update: false, delete: false },
+  // Phase 1.0 helper module + assignment engine tables.
+  // Owner capabilities only — helper-side writes to consents/ledger
+  // go through a separate magic-link flow in P1.1b.
+  helper_invites: { select: true, insert: true, update: true, delete: false },
+  helper_consents: { select: true, insert: false, update: false, delete: false },
+  helper_compensation_ledger: { select: true, insert: true, update: true, delete: false },
+  helper_outreach_attempts: { select: true, insert: false, update: false, delete: false },
+  assignment_rules: { select: true, insert: true, update: true, delete: true },
+  assignment_strategy_weights: { select: true, insert: true, update: true, delete: false },
+  assignment_decisions: { select: true, insert: false, update: false, delete: false },
+  assignment_overrides: { select: true, insert: false, update: true, delete: false },
+  pattern_elicitation_state: { select: true, insert: true, update: true, delete: false },
 };
 
 function isToolName(v: unknown): v is ToolName {

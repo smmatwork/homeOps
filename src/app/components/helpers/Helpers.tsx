@@ -18,6 +18,8 @@ import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
+import { HelperWorkloadCard } from "./HelperWorkloadCard";
+import { HelperOnboardingFlow } from "./HelperOnboardingFlow";
 
 type HelperRow = {
   id: string;
@@ -127,6 +129,7 @@ export function Helpers() {
   const { t } = useI18n();
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [createHelperError, setCreateHelperError] = useState<string>("");
   const [createHelperBusy, setCreateHelperBusy] = useState(false);
 
@@ -826,15 +829,29 @@ export function Helpers() {
             {t("helpers.subtitle")}
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={() => setDialogOpen(true)}
-          sx={{ textTransform: "none" }}
-        >
-          {t("helpers.add_helper")}
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="outlined"
+            startIcon={<Add />}
+            onClick={() => setDialogOpen(true)}
+            sx={{ textTransform: "none" }}
+          >
+            {t("helpers.add_helper")}
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<Add />}
+            onClick={() => setOnboardingOpen(true)}
+            sx={{ textTransform: "none" }}
+          >
+            Onboard helper
+          </Button>
+        </Stack>
       </Stack>
+
+      <Box mb={3}>
+        <HelperWorkloadCard />
+      </Box>
 
       <Menu
         anchorEl={helperMenuAnchor}
@@ -1292,6 +1309,31 @@ export function Helpers() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <HelperOnboardingFlow
+        open={onboardingOpen}
+        onClose={() => setOnboardingOpen(false)}
+        onSuccess={() => {
+          // Refresh the helpers list so the new helper appears.
+          // Mirrors the inline refresh pattern used by the legacy
+          // createHelper() path above.
+          void (async () => {
+            const hid = householdId.trim();
+            if (!hid) return;
+            const { data, error } = await supabase
+              .from("helpers")
+              .select("id,household_id,name,type,phone,notes,daily_capacity_minutes,metadata,created_at")
+              .eq("household_id", hid)
+              .order("created_at", { ascending: false });
+            if (error) {
+              showSnack("error", error.message);
+              return;
+            }
+            setHelpers((data ?? []) as HelperRow[]);
+            showSnack("success", t("helpers.helper_created"));
+          })();
+        }}
+      />
 
       <Dialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>{t("helpers.helper_schedule")}</DialogTitle>
