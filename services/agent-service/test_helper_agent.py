@@ -741,5 +741,358 @@ class PendingConfirmationTests(unittest.TestCase):
         self.assertIn("and 5 more", preview)
 
 
+class ChannelDispatcherTests(unittest.IsolatedAsyncioTestCase):
+    """P1.0a: ChannelDispatcher chain walking + attempt persistence."""
+
+    def _make_helper(self, chain=None):
+        return {
+            "id": "helper-test-1",
+            "household_id": "hh-test-1",
+            "name": "Test Helper",
+            "phone": "9999999999",
+            "preferred_language": "en",
+            "channel_preferences": chain or ["voice", "whatsapp_tap", "sms"],
+        }
+
+    async def _collect(self):
+        """Returns a (persist_fn, store) pair for recording attempts."""
+        store: list[dict] = []
+
+        async def persist(attempt):
+            store.append({
+                "channel": attempt.channel_used,
+                "status": attempt.status,
+                "failure_reason": attempt.failure_reason,
+            })
+
+        return persist, store
+
+    async def test_first_channel_success_short_circuits(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {
+            "voice": DevNullAdapter(),
+            "whatsapp_tap": DevNullAdapter(always_fail=True, failure_kind="permanent"),
+            "sms": DevNullAdapter(always_fail=True, failure_kind="permanent"),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_channel, "voice")
+        # Only one attempt persisted — the rest of the chain was never tried.
+        self.assertEqual(len(store), 1)
+        self.assertEqual(store[0]["channel"], "voice")
+        self.assertEqual(store[0]["status"], "completed")
+
+    async def test_walks_chain_on_permanent_failures(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {
+            "voice": DevNullAdapter(always_fail=True, failure_kind="permanent"),
+            "whatsapp_tap": DevNullAdapter(always_fail=True, failure_kind="not_configured"),
+            "sms": DevNullAdapter(),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_channel, "sms")
+        # Three attempts: voice fails, whatsapp_tap fails, sms succeeds.
+        self.assertEqual([a["channel"] for a in store], ["voice", "whatsapp_tap", "sms"])
+        self.assertEqual(store[0]["status"], "failed")
+        self.assertEqual(store[1]["status"], "failed")
+        self.assertEqual(store[2]["status"], "completed")
+
+    async def test_transient_failure_stops_chain_and_schedules_retry(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {
+            "voice": DevNullAdapter(always_fail=True, failure_kind="transient"),
+            "whatsapp_tap": DevNullAdapter(),  # would succeed if reached
+            "sms": DevNullAdapter(),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.final_channel, "voice")
+        self.assertIn("transient", result.final_reason or "")
+        # Transient failure stops the walk — whatsapp_tap is NOT attempted.
+        self.assertEqual(len(store), 1)
+        self.assertEqual(store[0]["status"], "retry_scheduled")
+
+    async def test_exhausts_all_channels_when_none_work(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {
+            "voice": DevNullAdapter(always_fail=True, failure_kind="permanent"),
+            "sms": DevNullAdapter(always_fail=True, failure_kind="helper_not_reachable"),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(chain=["voice", "sms"]),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.final_reason, "all_channels_exhausted")
+        self.assertEqual(len(store), 2)
+
+    async def test_missing_adapter_for_channel_is_skipped_gracefully(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {
+            "sms": DevNullAdapter(),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        # helper chain includes "voice" which has no adapter registered;
+        # dispatcher should skip it and fall through to sms.
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(chain=["voice", "sms"]),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_channel, "sms")
+        # Two attempts persisted — the voice "no adapter" failure + sms success.
+        self.assertEqual(len(store), 2)
+        self.assertEqual(store[0]["channel"], "voice")
+        self.assertEqual(store[0]["status"], "failed")
+        self.assertIn("no adapter registered", store[0]["failure_reason"] or "")
+
+    async def test_empty_channel_preferences_defaults_to_voice(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        persist, store = await self._collect()
+        registry = {"voice": DevNullAdapter()}
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(chain=[]),
+            intent=OutreachIntent.REMINDER,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.final_channel, "voice")
+
+    async def test_adapter_exception_is_caught_and_recorded(self):
+        from channel_dispatcher import ChannelDispatcher, OutreachIntent
+        from channel_adapters import DevNullAdapter
+
+        class ExplodingAdapter(DevNullAdapter):
+            name = "voice"
+
+            async def deliver(self, helper, intent, invite=None):
+                raise RuntimeError("boom")
+
+        persist, store = await self._collect()
+        registry = {
+            "voice": ExplodingAdapter(),
+            "sms": DevNullAdapter(),
+        }
+        dispatcher = ChannelDispatcher(adapters=registry, persist_attempt=persist)
+
+        # Exception should be treated as TRANSIENT → dispatcher stops, retry scheduled.
+        result = await dispatcher.initiate_outreach(
+            helper=self._make_helper(chain=["voice", "sms"]),
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.final_channel, "voice")
+        self.assertEqual(len(store), 1)
+        self.assertEqual(store[0]["status"], "retry_scheduled")
+        self.assertIn("boom", store[0]["failure_reason"] or "")
+
+
+class ChannelAdapterConfigTests(unittest.IsolatedAsyncioTestCase):
+    """P1.0a: adapters surface NOT_CONFIGURED when env vars are missing."""
+
+    async def test_voice_adapter_not_configured_without_sarvam_key(self):
+        from channel_adapters import VoiceAdapter
+        from channel_dispatcher import FailureKind, OutreachIntent
+
+        # Explicitly clear env so test is hermetic.
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("SARVAM_API_KEY", "TELEPHONY_PROVIDER"):
+                os.environ.pop(key, None)
+            adapter = VoiceAdapter()
+            result = await adapter.deliver(
+                helper={"id": "h", "phone": "999"},
+                intent=OutreachIntent.STAGE2_ONBOARDING,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, FailureKind.NOT_CONFIGURED)
+        self.assertIn("SARVAM_API_KEY", result.failure_reason or "")
+
+    async def test_voice_adapter_helper_without_phone(self):
+        from channel_adapters import VoiceAdapter
+        from channel_dispatcher import FailureKind, OutreachIntent
+
+        with patch.dict(os.environ, {
+            "SARVAM_API_KEY": "test",
+            "TELEPHONY_PROVIDER": "twilio",
+        }):
+            adapter = VoiceAdapter()
+            result = await adapter.deliver(
+                helper={"id": "h", "phone": ""},
+                intent=OutreachIntent.STAGE2_ONBOARDING,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, FailureKind.HELPER_NOT_REACHABLE)
+
+    async def test_whatsapp_tap_not_configured_without_creds(self):
+        from channel_adapters import WhatsAppTapAdapter
+        from channel_dispatcher import FailureKind, OutreachIntent
+
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"):
+                os.environ.pop(key, None)
+            adapter = WhatsAppTapAdapter()
+            result = await adapter.deliver(
+                helper={"id": "h", "phone": "999"},
+                intent=OutreachIntent.STAGE2_ONBOARDING,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, FailureKind.NOT_CONFIGURED)
+
+    async def test_sms_adapter_not_configured_without_provider(self):
+        from channel_adapters import SMSAdapter
+        from channel_dispatcher import FailureKind, OutreachIntent
+
+        with patch.dict(os.environ, {}, clear=False):
+            for key in ("SMS_PROVIDER", "SMS_API_KEY"):
+                os.environ.pop(key, None)
+            adapter = SMSAdapter()
+            result = await adapter.deliver(
+                helper={"id": "h", "phone": "999"},
+                intent=OutreachIntent.REMINDER,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, FailureKind.NOT_CONFIGURED)
+
+    async def test_web_adapter_succeeds_when_invite_has_token(self):
+        from channel_adapters import WebMagicLinkAdapter
+        from channel_dispatcher import OutreachIntent
+
+        adapter = WebMagicLinkAdapter()
+        result = await adapter.deliver(
+            helper={"id": "h"},
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+            invite={"id": "inv1", "token": "tok_abc123def456"},
+        )
+        self.assertTrue(result.success)
+        self.assertIn("magic_link_url", result.metadata)
+        self.assertIn("tok_abc123def456", result.metadata["magic_link_url"])
+
+    async def test_web_adapter_fails_without_invite_token(self):
+        from channel_adapters import WebMagicLinkAdapter
+        from channel_dispatcher import FailureKind, OutreachIntent
+
+        adapter = WebMagicLinkAdapter()
+        result = await adapter.deliver(
+            helper={"id": "h"},
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+            invite=None,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_kind, FailureKind.PERMANENT)
+
+
+class VoiceDialogBrainTests(unittest.IsolatedAsyncioTestCase):
+    """P1.0a: VoiceAdapter dialog manager parses Sarvam responses correctly."""
+
+    async def test_parse_clean_json_response(self):
+        from channel_adapters import VoiceAdapter
+
+        raw = '{"speak": "Hi Sunita, is this a good time?", "expects_response": true, "consents_captured": {"id_verification": null, "vision_capture": null, "multi_household_coord": null, "call_recording": null}, "preferred_language": "en", "done": false}'
+        parsed = VoiceAdapter._parse_dialog_turn(raw)
+        self.assertEqual(parsed["speak"], "Hi Sunita, is this a good time?")
+        self.assertTrue(parsed["expects_response"])
+        self.assertFalse(parsed["done"])
+        self.assertEqual(parsed["preferred_language"], "en")
+
+    async def test_parse_json_wrapped_in_markdown_fence(self):
+        from channel_adapters import VoiceAdapter
+
+        raw = '```json\n{"speak": "Got it, thanks.", "expects_response": false, "done": true}\n```'
+        parsed = VoiceAdapter._parse_dialog_turn(raw)
+        self.assertEqual(parsed["speak"], "Got it, thanks.")
+        self.assertFalse(parsed["expects_response"])
+        self.assertTrue(parsed["done"])
+
+    async def test_parse_json_with_preamble(self):
+        from channel_adapters import VoiceAdapter
+
+        raw = 'Here is the turn:\n{"speak": "Okay.", "done": true}'
+        parsed = VoiceAdapter._parse_dialog_turn(raw)
+        self.assertEqual(parsed["speak"], "Okay.")
+        self.assertTrue(parsed["done"])
+
+    async def test_parse_fallback_on_unparseable_response(self):
+        from channel_adapters import VoiceAdapter
+
+        raw = "This is not JSON at all, sorry."
+        parsed = VoiceAdapter._parse_dialog_turn(raw)
+        self.assertIn("didn't catch that", parsed["speak"])
+        self.assertTrue(parsed["expects_response"])
+        self.assertFalse(parsed["done"])
+
+    async def test_run_dialog_turn_reuses_sarvam_chat(self):
+        from channel_adapters import VoiceAdapter
+        from channel_dispatcher import OutreachIntent
+
+        call_log = []
+
+        async def fake_sarvam_chat(*, messages, model, temperature, max_tokens):
+            call_log.append({"messages": messages, "model": model})
+            return '{"speak": "Hi there, may I ask a few questions?", "expects_response": true, "done": false}'
+
+        adapter = VoiceAdapter(sarvam_chat_fn=fake_sarvam_chat)
+        parsed = await adapter.run_dialog_turn(
+            helper={"name": "Sunita", "preferred_language": "kn"},
+            intent=OutreachIntent.STAGE2_ONBOARDING,
+            transcript_so_far=[],
+            latest_helper_utterance=None,
+        )
+        self.assertEqual(len(call_log), 1)
+        self.assertEqual(parsed["speak"], "Hi there, may I ask a few questions?")
+        # System prompt must mention voice-agent instructions.
+        sys_msg = call_log[0]["messages"][0]
+        self.assertEqual(sys_msg["role"], "system")
+        self.assertIn("voice agent", sys_msg["content"].lower())
+
+    async def test_run_dialog_turn_raises_without_sarvam_fn(self):
+        from channel_adapters import VoiceAdapter
+        from channel_dispatcher import OutreachIntent
+
+        adapter = VoiceAdapter()  # no sarvam_chat_fn injected
+        with self.assertRaises(RuntimeError):
+            await adapter.run_dialog_turn(
+                helper={"name": "x"},
+                intent=OutreachIntent.STAGE2_ONBOARDING,
+                transcript_so_far=[],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
