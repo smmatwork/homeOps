@@ -349,7 +349,11 @@ type RpcName =
   | "group_chores_by_status"
   | "group_chores_by_assignee"
   | "list_chores_enriched"
-  | "find_chores_matching_keywords";
+  | "find_chores_matching_keywords"
+  | "apply_assignment_decision"
+  | "record_assignment_override"
+  | "find_chores_needing_reassignment"
+  | "compensation_ledger_summary";
 
 function isRpcName(v: unknown): v is RpcName {
   return (
@@ -364,7 +368,11 @@ function isRpcName(v: unknown): v is RpcName {
     v === "group_chores_by_status" ||
     v === "group_chores_by_assignee" ||
     v === "list_chores_enriched" ||
-    v === "find_chores_matching_keywords"
+    v === "find_chores_matching_keywords" ||
+    v === "apply_assignment_decision" ||
+    v === "record_assignment_override" ||
+    v === "find_chores_needing_reassignment" ||
+    v === "compensation_ledger_summary"
   );
 }
 
