@@ -2266,26 +2266,37 @@ export function Chores() {
         </Stack>
       </Stack>
 
-      {/* ── View mode tabs ──────────────────────────────────────────── */}
-      <ToggleButtonGroup
-        value={mode}
-        exclusive
-        size="small"
-        sx={{ mb: 3 }}
-        onChange={(_, next) => {
-          if (next === "daily") enterDailyMode();
-          else if (next === "list") enterListMode({ space: null, cadence: null });
-          else if (next === "coverage") {
-            setMode("coverage");
-            setSpaceFilter(null);
-            setCadenceFilter(null);
-          }
-        }}
-      >
-        <ToggleButton value="daily">{t("chores.daily_chores")}</ToggleButton>
-        <ToggleButton value="list">{t("chores.view_all")}</ToggleButton>
-        <ToggleButton value="coverage">{t("chores.coverage")}</ToggleButton>
-      </ToggleButtonGroup>
+      {/* ── View mode toggle ─────────────────────────────────────────── */}
+      <Stack direction="row" spacing={1} alignItems="center" mb={3}>
+        {mode !== "coverage" ? (
+          <ToggleButtonGroup
+            value={mode}
+            exclusive
+            size="small"
+            onChange={(_, next) => {
+              if (next === "daily") enterDailyMode();
+              else if (next === "list") enterListMode({ space: null, cadence: null });
+            }}
+          >
+            <ToggleButton value="daily">Helper view</ToggleButton>
+            <ToggleButton value="list">Task view</ToggleButton>
+          </ToggleButtonGroup>
+        ) : null}
+
+        {mode === "coverage" ? (
+          <Button variant="outlined" size="small" onClick={enterDailyMode}>
+            Helper view
+          </Button>
+        ) : (
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={() => { setMode("coverage"); setSpaceFilter(null); setCadenceFilter(null); }}
+          >
+            {t("chores.coverage")}
+          </Button>
+        )}
+      </Stack>
 
       {loadError && <Alert severity="error" sx={{ mb: 2 }}>{loadError}</Alert>}
 
