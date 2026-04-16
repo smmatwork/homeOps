@@ -114,6 +114,10 @@ export function OnboardingPanel({
     totalSteps,
   } = useOnboardingSteps(householdId, userId);
 
+  // All hooks must be called before any early returns
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   if (loading) {
     return (
       <Box display="flex" justifyContent="center" py={2}>
@@ -127,7 +131,6 @@ export function OnboardingPanel({
   }
 
   if (currentStep === "complete") {
-    // Mark onboarding complete and notify
     void (async () => {
       await markOnboardingComplete(userId);
       onComplete();
@@ -148,8 +151,6 @@ export function OnboardingPanel({
   }
 
   const progressPct = Math.round((completedSteps.length / totalSteps) * 100);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
   /** Helper: run a Supabase call and throw on error */
   const dbCall = async (op: PromiseLike<{ error: { message: string } | null }>): Promise<void> => {
