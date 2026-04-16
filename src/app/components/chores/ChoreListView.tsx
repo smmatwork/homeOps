@@ -121,13 +121,29 @@ export function ChoreListView(props: ChoreListViewProps) {
 
   const hasFilters = !!(spaceFilter || cadenceFilter);
 
-  const renderGroup = (label: string, rows: ChoreRow[]) =>
-    rows.length > 0 && (
+  const renderGroup = (label: string, rows: ChoreRow[]) => {
+    if (rows.length === 0) return null;
+    const completedCount = rows.filter((c) => c.status === "completed" || c.status === "done").length;
+    const progressPct = rows.length > 0 ? Math.round((completedCount / rows.length) * 100) : 0;
+
+    return (
       <Box key={label}>
-        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-          {label}
-        </Typography>
-        <Stack spacing={1.5}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5, px: 0.5 }}>
+          <Stack direction="row" spacing={1} alignItems="baseline">
+            <Typography variant="subtitle1" fontWeight={700}>
+              {label}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {completedCount}/{rows.length}
+            </Typography>
+          </Stack>
+          <Chip
+            label={`${progressPct}%`}
+            size="small"
+            color={progressPct === 100 ? "success" : progressPct > 50 ? "primary" : "default"}
+          />
+        </Stack>
+        <Stack spacing={1}>
           {rows.map((chore) => {
             const helper = helpers.find((h) => h.id === chore.helper_id);
             return (
@@ -149,6 +165,7 @@ export function ChoreListView(props: ChoreListViewProps) {
         </Stack>
       </Box>
     );
+  };
 
   /* ---------- main render ---------- */
 
