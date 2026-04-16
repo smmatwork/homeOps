@@ -5073,6 +5073,10 @@ def _sarvam_adapt_messages(messages: list[dict[str, Any]]) -> list[dict[str, str
             continue
         non_sys.append(item)
 
+    # Safety: if no user messages survived, inject a minimal one.
+    if not non_sys or non_sys[0]["role"] != "user":
+        non_sys.insert(0, {"role": "user", "content": "Hello"})
+
     out: list[dict[str, str]] = []
     if sys_parts:
         out.append({"role": "system", "content": "\n\n".join(sys_parts)})
