@@ -44,6 +44,8 @@ import {
   Science,
   GridView,
   Event as EventIcon,
+  Handyman,
+  CalendarMonth,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
@@ -70,6 +72,8 @@ const NAV_ITEMS = [
   { key: "nav.coverage", path: "/coverage", icon: GridView, roles: ["household", "admin"] },
   { key: "nav.events", path: "/events", icon: EventIcon, roles: ["household", "admin"] },
   { key: "nav.recipes", path: "/recipes", icon: MenuBook, roles: ["household", "admin"] },
+  { key: "nav.services", path: "/services", icon: Handyman, roles: ["household", "admin"] },
+  { key: "nav.maintenance", path: "/maintenance", icon: CalendarMonth, roles: ["household", "admin"] },
   { key: "nav.helpers", path: "/helpers", icon: People, roles: ["household", "admin"] },
   { key: "nav.alerts", path: "/alerts", icon: NotificationsNone, roles: ["household", "admin", "support"] },
   { key: "nav.automations", path: "/automations", icon: BuildCircle, roles: ["household", "admin"] },

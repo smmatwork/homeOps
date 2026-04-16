@@ -23,6 +23,8 @@ const CoveragePage = lazy(() => import("./components/coverage/CoveragePage").the
 const EventsPage = lazy(() => import("./components/events/EventsPage").then(m => ({ default: m.EventsPage })));
 const HomeProfilePage = lazy(() => import("./components/home-profile/HomeProfilePage").then(m => ({ default: m.HomeProfilePage })));
 const HelperMagicLinkPage = lazy(() => import("./components/helpers/HelperMagicLinkPage").then(m => ({ default: m.HelperMagicLinkPage })));
+const ServicesPage = lazy(() => import("./components/services/ServicesPage").then(m => ({ default: m.ServicesPage })));
+const MaintenancePage = lazy(() => import("./components/maintenance/MaintenancePage").then(m => ({ default: m.MaintenancePage })));
 
 // Auth components - keep these eagerly loaded as they're needed immediately
 import { Login } from "./components/auth/Login";
@@ -104,6 +106,22 @@ export const router = createBrowserRouter([
         Component: () => (
           <LazyWrapper>
             <EventsPage />
+          </LazyWrapper>
+        )
+      },
+      {
+        path: "services",
+        Component: () => (
+          <LazyWrapper>
+            <ServicesPage />
+          </LazyWrapper>
+        )
+      },
+      {
+        path: "maintenance",
+        Component: () => (
+          <LazyWrapper>
+            <MaintenancePage />
           </LazyWrapper>
         )
       },
