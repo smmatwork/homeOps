@@ -832,11 +832,8 @@ export function Helpers() {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button variant="outlined" startIcon={<Add />} onClick={() => setDialogOpen(true)}>
-            {t("helpers.add_helper")}
-          </Button>
           <Button variant="contained" startIcon={<Add />} onClick={() => setOnboardingOpen(true)}>
-            {t("helpers.onboard_helper")}
+            {t("helpers.add_helper")}
           </Button>
         </Stack>
       </Stack>
@@ -1064,7 +1061,7 @@ export function Helpers() {
               {t("helpers.empty_subtitle")}
             </Typography>
             <Button variant="contained" startIcon={<Add />} onClick={() => setOnboardingOpen(true)}>
-              {t("helpers.onboard_helper")}
+              {t("helpers.add_helper")}
             </Button>
           </CardContent>
         </Card>
@@ -1085,44 +1082,6 @@ export function Helpers() {
           ))}
         </Box>
       )}
-
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{t("helpers.add_new_helper")}</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} mt={1}>
-            {createHelperError ? <Alert severity="error">{createHelperError}</Alert> : null}
-            <TextField label={t("helpers.name_business")} fullWidth size="small" value={newName} onChange={(e) => setNewName(e.target.value)} />
-            <TextField label={t("helpers.role_service_type")} fullWidth size="small" value={newType} onChange={(e) => setNewType(e.target.value)} />
-            <TextField label={t("helpers.phone")} fullWidth size="small" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} />
-            <TextField label={t("helpers.notes")} fullWidth size="small" multiline rows={2} value={newNotes} onChange={(e) => setNewNotes(e.target.value)} />
-            <FormControl fullWidth size="small">
-              <InputLabel>{t("helpers.language")}</InputLabel>
-              <Select
-                label={t("helpers.language")}
-                value={newPreferredLanguage}
-                onChange={(e) => setNewPreferredLanguage(String(e.target.value) as HelperPreferredLanguage)}
-              >
-                <MenuItem value="en">{t("helpers.lang.en")}</MenuItem>
-                <MenuItem value="hi">{t("helpers.lang.hi")}</MenuItem>
-                <MenuItem value="kn">{t("helpers.lang.kn")}</MenuItem>
-              </Select>
-            </FormControl>
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => {
-              setDialogOpen(false);
-              setCreateHelperError("");
-            }}
-          >
-            {t("common.cancel")}
-          </Button>
-          <Button variant="contained" disabled={createHelperBusy} onClick={() => void createHelper()}>
-            {createHelperBusy ? t("helpers.adding") : t("helpers.add_helper")}
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       <HelperOnboardingFlow
         open={onboardingOpen}
