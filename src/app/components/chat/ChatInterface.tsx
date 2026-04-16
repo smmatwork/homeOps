@@ -4368,8 +4368,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
           />
         </Paper>
 
-        {/* Quick commands panel (desktop / non-embedded) */}
-        {!props.embedded ? (
+        {/* Quick commands panel (desktop / non-embedded, hidden during onboarding) */}
+        {!props.embedded && !isOnboarding ? (
           <Paper
             variant="outlined"
             sx={{

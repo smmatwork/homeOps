@@ -77,7 +77,11 @@ function sanitizeForSarvam(messages: ChatMessage[]): ChatMessage[] {
     .filter(Boolean)
     .join("\n\n");
 
-  // Sarvam requires the system message to appear only once, at the beginning.
+  // Sarvam requires the system message first, then user message.
+  // If no user messages survived, add a minimal one to satisfy the API.
+  if (out.length === 0 || out[0].role !== "user") {
+    out.unshift({ role: "user", content: "Hello" });
+  }
   return [{ role: "system", content: mergedSystemContent }, ...out];
 }
 
