@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Autocomplete,
   Box,
@@ -375,27 +376,36 @@ function RoomEditor({
   const rooms = normalizeSpacesToRooms(rec.spaces);
   const squareFeet = asNumberOrNull(rec.square_feet);
   const floors = asNumberOrNull(rec.floors);
+  const numFloors = typeof floors === "number" && floors > 0 ? floors : 1;
+  const grouped = groupRoomsByFloor(rooms);
 
   const setRooms = (next: RoomEntry[]) => {
     const hasBalcony = next.some((rm) => rm.display_name.toLowerCase().includes("balcony") || rm.template_name.toLowerCase().includes("balcony"));
     updateRecord({ spaces: next, has_balcony: hasBalcony });
   };
 
-  const updateRoom = (idx: number, patch: Partial<RoomEntry>) => {
-    const next = rooms.map((rm, i) => i === idx ? { ...rm, ...patch } : rm);
-    setRooms(next);
+  const removeRoom = (id: string) => setRooms(rooms.filter((rm) => rm.id !== id));
+
+  const renameRoom = (id: string, newName: string) => {
+    setRooms(rooms.map((rm) => rm.id === id ? { ...rm, display_name: newName } : rm));
   };
 
-  const removeRoom = (idx: number) => setRooms(rooms.filter((_, i) => i !== idx));
+  const [addFloor, setAddFloor] = useState<number>(0);
 
-  const addRoom = (name: string) => {
-    if (!name.trim()) return;
+  const addRoom = () => {
+    const name = newSpace.trim();
+    if (!name) return;
     const id = `custom_${Date.now()}`;
-    setRooms([...rooms, { id, template_name: name.trim(), display_name: name.trim(), floor: null }]);
+    setRooms([...rooms, { id, template_name: name, display_name: name, floor: addFloor }]);
+    setNewSpace("");
   };
+
+  // Build floor options for the dropdown
+  const floorOptions = Array.from({ length: numFloors }, (_, i) => i);
 
   return (
-    <Stack spacing={2}>
+    <Stack spacing={2.5}>
+      {/* Area & floors */}
       <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
         <TextField
           label={t("home_profile.field_area")}
@@ -417,80 +427,101 @@ function RoomEditor({
         />
       </Stack>
 
+      {/* Rooms grouped by floor */}
       <Typography variant="body2" color="text.secondary">
         {t("home_profile.rooms_hint")}
       </Typography>
 
-      <Stack spacing={0.75}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ width: 80, flexShrink: 0 }}>{t("home_profile.field_floor")}</Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>{t("home_profile.field_display_name")}</Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>{t("home_profile.field_template_name")}</Typography>
-          <Box sx={{ width: 32 }} />
-        </Stack>
-        {rooms.map((rm, idx) => (
-          <Stack key={rm.id} direction="row" spacing={1} alignItems="center">
-            <TextField
-              size="small"
-              type="number"
-              placeholder="Floor"
-              value={typeof rm.floor === "number" ? rm.floor : ""}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                updateRoom(idx, { floor: v === "" ? null : (Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : null) });
-              }}
-              inputProps={{ min: 0, max: 50, style: { textAlign: "center" } }}
-              sx={{ width: 80, flexShrink: 0 }}
-            />
-            <TextField
-              size="small"
-              fullWidth
-              value={rm.display_name}
-              onChange={(e) => updateRoom(idx, { display_name: e.target.value })}
-              placeholder="Display name"
-            />
-            <Typography
-              variant="caption"
-              color="text.disabled"
-              sx={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-              title={rm.template_name}
-            >
-              {rm.display_name !== rm.template_name ? rm.template_name : ""}
-            </Typography>
-            <IconButton size="small" onClick={() => removeRoom(idx)} sx={{ width: 32, flexShrink: 0 }}>
-              <Delete fontSize="inherit" />
-            </IconButton>
-          </Stack>
-        ))}
-      </Stack>
+      {grouped.length === 0 && rooms.length === 0 && (
+        <Paper variant="outlined" sx={{ p: 3, textAlign: "center", borderStyle: "dashed" }}>
+          <Typography variant="body2" color="text.secondary">
+            {t("home_profile.no_rooms_yet")}
+          </Typography>
+        </Paper>
+      )}
 
-      <Autocomplete
-        freeSolo
-        options={getRoomSuggestions(uiLang as any).filter((s) => !rooms.some((rm) => rm.display_name.toLowerCase() === s.toLowerCase()))}
-        value={newSpace}
-        onInputChange={(_, v) => setNewSpace(v)}
-        onChange={(_, v) => {
-          if (typeof v === "string" && v.trim()) {
-            addRoom(v.trim());
-            setNewSpace("");
-          }
-        }}
-        renderInput={(params) => (
-          <TextField
-            {...params}
-            size="small"
-            label={t("home_profile.add_room")}
-            placeholder={t("home_profile.add_room_placeholder")}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && newSpace.trim()) {
-                addRoom(newSpace.trim());
-                setNewSpace("");
-                e.preventDefault();
-              }
+      {grouped.map(({ floor, rooms: floorRooms }) => (
+        <Box key={String(floor)}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, display: "block", mb: 0.75 }}
+          >
+            {floorLabel(floor, uiLang as any)}
+          </Typography>
+          <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+            {floorRooms.map((rm) => (
+              <Chip
+                key={rm.id}
+                label={rm.display_name}
+                variant="outlined"
+                onDelete={() => removeRoom(rm.id)}
+                deleteIcon={<Delete />}
+                onClick={() => {
+                  const newName = prompt(t("home_profile.rename_room"), rm.display_name);
+                  if (newName !== null && newName.trim()) renameRoom(rm.id, newName.trim());
+                }}
+                sx={{ cursor: "pointer" }}
+              />
+            ))}
+          </Stack>
+        </Box>
+      ))}
+
+      {/* Add room section */}
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: "action.hover" }}>
+        <Typography variant="subtitle2" fontWeight={600} mb={1.5}>
+          {t("home_profile.add_room")}
+        </Typography>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "flex-start" }}>
+          <Autocomplete
+            freeSolo
+            options={getRoomSuggestions(uiLang as any).filter((s) => !rooms.some((rm) => rm.display_name.toLowerCase() === s.toLowerCase()))}
+            value={newSpace}
+            onInputChange={(_, v) => setNewSpace(v)}
+            onChange={(_, v) => {
+              if (typeof v === "string" && v.trim()) setNewSpace(v.trim());
             }}
+            sx={{ flex: 1 }}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                size="small"
+                label={t("home_profile.room_name")}
+                placeholder={t("home_profile.add_room_placeholder")}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newSpace.trim()) {
+                    addRoom();
+                    e.preventDefault();
+                  }
+                }}
+              />
+            )}
           />
-        )}
-      />
+          <TextField
+            select
+            size="small"
+            label={t("home_profile.field_floor")}
+            value={addFloor}
+            onChange={(e) => setAddFloor(Number(e.target.value))}
+            sx={{ minWidth: 140 }}
+            SelectProps={{ native: true }}
+          >
+            {floorOptions.map((f) => (
+              <option key={f} value={f}>{floorLabel(f, uiLang as any)}</option>
+            ))}
+          </TextField>
+          <Button
+            variant="contained"
+            size="small"
+            disabled={!newSpace.trim()}
+            onClick={addRoom}
+            sx={{ minWidth: 80, height: 40 }}
+          >
+            {t("home_profile.add")}
+          </Button>
+        </Stack>
+      </Paper>
     </Stack>
   );
 }
