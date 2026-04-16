@@ -3537,7 +3537,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
                 </Box>
                 <Button size="small" variant="contained" onClick={() => {
                   setAssignmentNudgeDismissed(true);
-                  void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.");
+                  void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.", { silent: true });
                 }}>
                   Assign now
                 </Button>
