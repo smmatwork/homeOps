@@ -2278,14 +2278,14 @@ export function Chores() {
               else if (next === "list") enterListMode({ space: null, cadence: null });
             }}
           >
-            <ToggleButton value="daily">Helper view</ToggleButton>
-            <ToggleButton value="list">Task view</ToggleButton>
+            <ToggleButton value="daily">{t("chores.helper_view")}</ToggleButton>
+            <ToggleButton value="list">{t("chores.task_view")}</ToggleButton>
           </ToggleButtonGroup>
         ) : null}
 
         {mode === "coverage" ? (
           <Button variant="outlined" size="small" onClick={enterDailyMode}>
-            Helper view
+            {t("chores.helper_view")}
           </Button>
         ) : (
           <Button
@@ -2472,7 +2472,7 @@ export function Chores() {
         <DialogTitle>{t("common.delete")}</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            {`Delete "${deleteTarget?.title ?? ""}"? This cannot be undone.`}
+            {t("chores.confirm_delete").replace("{title}", deleteTarget?.title ?? "")}
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -2483,9 +2483,9 @@ export function Chores() {
 
       {/* Bulk delete confirmation */}
       <Dialog open={bulkDeleteDialogOpen} onClose={() => setBulkDeleteDialogOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Delete {selectedVisibleIds.length} chore{selectedVisibleIds.length === 1 ? "" : "s"}?</DialogTitle>
+        <DialogTitle>{t("chores.confirm_bulk_delete_title").replace("{count}", String(selectedVisibleIds.length))}</DialogTitle>
         <DialogContent>
-          <Typography variant="body2">This will permanently delete the selected chores.</Typography>
+          <Typography variant="body2">{t("chores.confirm_bulk_delete_message")}</Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setBulkDeleteDialogOpen(false)}>{t("common.cancel")}</Button>
@@ -2495,7 +2495,7 @@ export function Chores() {
 
       {/* Space clarify */}
       <Dialog open={spaceClarifyOpen} onClose={() => { setSpaceClarifyOpen(false); setSpaceClarifyPending(null); }} maxWidth="xs" fullWidth>
-        <DialogTitle>{spaceClarifyTitle || "Choose a space"}</DialogTitle>
+        <DialogTitle>{spaceClarifyTitle || t("chores.choose_space")}</DialogTitle>
         <DialogContent>
           <Stack spacing={1.5} mt={1}>
             {spaceClarifyError && <Alert severity="error">{spaceClarifyError}</Alert>}
@@ -2503,7 +2503,7 @@ export function Chores() {
               options={spaceClarifyOptions}
               value={spaceClarifySelection || null}
               onChange={(_, v) => setSpaceClarifySelection(typeof v === "string" ? v : "")}
-              renderInput={(params) => <TextField {...params} label="Space" size="small" />}
+              renderInput={(params) => <TextField {...params} label={t("chores.space")} size="small" />}
             />
           </Stack>
         </DialogContent>
@@ -2511,10 +2511,10 @@ export function Chores() {
           <Button onClick={() => { setSpaceClarifyOpen(false); setSpaceClarifyPending(null); }}>{t("common.cancel")}</Button>
           <Button variant="contained" onClick={async () => {
             const sel = spaceClarifySelection.trim();
-            if (!sel) { setSpaceClarifyError("Please choose a space."); return; }
+            if (!sel) { setSpaceClarifyError(t("chores.choose_space_error")); return; }
             if (!spaceClarifyPending) { setSpaceClarifyOpen(false); return; }
             try { await spaceClarifyPending(sel); } catch (e) { setSpaceClarifyError(e instanceof Error ? e.message : "Error"); }
-          }}>Apply</Button>
+          }}>{t("chores.apply")}</Button>
         </DialogActions>
       </Dialog>
 

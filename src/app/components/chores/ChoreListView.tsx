@@ -174,7 +174,7 @@ export function ChoreListView(props: ChoreListViewProps) {
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
         <Checkbox checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={toggleAll} />
         <Typography variant="body2" color="text.secondary">
-          {selected.size > 0 ? `${selected.size} selected` : t("chores.select_all")}
+          {selected.size > 0 ? t("chores.n_selected").replace("{count}", String(selected.size)) : t("chores.select_all")}
         </Typography>
         {selected.size > 0 && (
           <Button

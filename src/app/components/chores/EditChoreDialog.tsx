@@ -116,13 +116,13 @@ export function EditChoreDialog({
           />
           <TextField size="small" select label={t("chores.status")} value={form.status} onChange={set("status")}>
             {STATUS_OPTIONS.map((s) => (
-              <MenuItem key={s} value={s}>{s}</MenuItem>
+              <MenuItem key={s} value={s}>{t(`chores.status_${s.replace("-", "_")}`)}</MenuItem>
             ))}
           </TextField>
           <TextField size="small" select label={t("chores.priority")} value={form.priority} onChange={set("priority")}>
-            {PRIORITY_OPTIONS.map((p) => (
-              <MenuItem key={p} value={p}>{p}</MenuItem>
-            ))}
+            <MenuItem value="1">{t("chores.priority_low")}</MenuItem>
+            <MenuItem value="2">{t("chores.priority_medium")}</MenuItem>
+            <MenuItem value="3">{t("chores.priority_high")}</MenuItem>
           </TextField>
           <TextField
             size="small"

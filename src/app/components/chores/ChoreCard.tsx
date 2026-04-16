@@ -173,7 +173,7 @@ export function ChoreCard({
                   </IconButton>
                 </Tooltip>
                 {chore.status === "completed" && (
-                  <Tooltip title="Report not done">
+                  <Tooltip title={t("chores.report_not_done")}>
                     <IconButton size="small" color="warning" onClick={onReportNotDone}>
                       <ReportProblem fontSize="small" />
                     </IconButton>
