@@ -312,8 +312,8 @@ export function Dashboard() {
         </Card>
       )}
 
-      {/* Assignment nudge — show when helpers + chores exist but many chores are unassigned */}
-      {setupState.loaded && setupState.remaining.length === 0 && helpers.length > 0 && chores.filter((c) => !c.helper_id && c.status !== "completed").length > 0 && (
+      {/* Assignment nudge — show when >5 chores are unassigned */}
+      {chores.filter((c) => !c.helper_id && c.status !== "completed").length > 5 && (
         <Card variant="outlined" sx={{ mb: 3, bgcolor: "info.50", borderColor: "info.200" }}>
           <CardContent sx={{ py: 2 }}>
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">

@@ -3532,8 +3532,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
               },
             }}
           >
-            {/* Assignment nudge — only in non-onboarding mode when unassigned chores exist */}
-            {onboardingResolved === false && unassignedChoreCount > 0 && !assignmentNudgeDismissed && (
+            {/* Assignment nudge — show when >5 unassigned chores exist */}
+            {unassignedChoreCount > 5 && !assignmentNudgeDismissed && (
               <Paper variant="outlined" sx={{ p: 1.5, mx: 1, mb: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
                 <Stack direction="row" spacing={1.5} alignItems="center">
                   <Box flex={1}>
