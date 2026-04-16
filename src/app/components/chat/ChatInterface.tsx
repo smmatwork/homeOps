@@ -844,8 +844,10 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
       const state = await detectOnboardingState(hid, uid);
       if (cancelled) return;
       // If home profile exists but no chores → needs onboarding
-      const needsOnboarding = state.isComplete && (state.choreCount === 0 || !state.homeProfileExists);
-      setAutoDetectedOnboarding(needsOnboarding);
+      // Match the onboarding state machine's completion criteria
+      const setupComplete = state.homeProfileExists && state.roomCount > 0
+        && state.hasFeatures && state.choreCount > 0 && state.helperCount > 0;
+      setAutoDetectedOnboarding(!setupComplete);
     })();
     return () => { cancelled = true; };
   }, [props.onboarding, authedHouseholdId, authedUser?.id]);

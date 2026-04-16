@@ -59,11 +59,14 @@ export function useOnboardingGate() {
         if (!state.isComplete) {
           // Never completed onboarding at all → full welcome flow
           navigate("/onboarding", { replace: true });
-        } else if (!state.homeProfileExists || state.choreCount === 0) {
-          // Completed onboarding flag but critical setup is missing → resume via agent
-          navigate("/chat?onboarding=true", { replace: true });
+        } else {
+          // Check if all setup steps are actually complete
+          const setupComplete = state.homeProfileExists && state.roomCount > 0
+            && state.hasFeatures && state.choreCount > 0 && state.helperCount > 0;
+          if (!setupComplete) {
+            navigate("/chat?onboarding=true", { replace: true });
+          }
         }
-        // Otherwise: setup is sufficient, let the user through
       } catch {
         // If queries fail, don't block
       } finally {

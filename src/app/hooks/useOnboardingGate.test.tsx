@@ -67,6 +67,8 @@ describe("useOnboardingGate", () => {
     detectOnboardingStateMock.mockResolvedValue({
       isComplete: true,
       homeProfileExists: true,
+      roomCount: 8,
+      hasFeatures: true,
       choreCount: 5,
       helperCount: 2,
     });
