@@ -25,6 +25,7 @@ import { executeToolCall } from "../../services/agentApi";
 import { cadenceLabel, type Cadence } from "../../services/choreRecommendationEngine";
 import { templateOccursOnDate } from "../../services/choreScheduler";
 import { ChoreCard, type ChoreRow } from "./ChoreCard";
+import { EditChoreDialog } from "./EditChoreDialog";
 
 interface HelperDailyViewProps {
   date: string;
@@ -219,6 +220,55 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     [householdId, accessToken],
   );
 
+  // ── Edit / Delete ─────────────────────────────────────────────
+  const [editChore, setEditChore] = useState<ChoreRow | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+
+  const handleEditSave = useCallback(async (data: {
+    choreId: string; title: string; description: string; status: string;
+    priority: number; dueAt: string; helperId: string; space: string; cadence: string;
+  }) => {
+    if (!householdId || !accessToken) return;
+    setEditBusy(true);
+    const res = await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `edit_${data.choreId}_${Date.now()}`,
+        tool: "db.update",
+        args: {
+          table: "chores", id: data.choreId,
+          patch: {
+            title: data.title, description: data.description || null,
+            status: data.status, priority: data.priority,
+            due_at: data.dueAt ? new Date(data.dueAt).toISOString() : null,
+            helper_id: data.helperId || null,
+            metadata: { space: data.space || null, cadence: data.cadence || null },
+          },
+        },
+        reason: "Edit chore from helper view",
+      },
+    });
+    setEditBusy(false);
+    if (res.ok) {
+      setEditChore(null);
+      void load(); // refresh
+    }
+  }, [householdId, accessToken, load]);
+
+  const handleDelete = useCallback(async (chore: ChoreRow) => {
+    if (!householdId || !accessToken) return;
+    await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `delete_${chore.id}_${Date.now()}`,
+        tool: "db.delete",
+        args: { table: "chores", id: chore.id },
+        reason: `Delete chore: ${chore.title}`,
+      },
+    });
+    void load();
+  }, [householdId, accessToken, load]);
+
   if (loading) {
     return (
       <Box display="flex" justifyContent="center" py={4}>
@@ -294,8 +344,11 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
                     <ChoreCard
                       key={chore.id}
                       chore={chore}
+                      helperName={group.helperName}
                       onToggleComplete={() => void toggleComplete(chore)}
                       completeBusy={busyChoreId === chore.id}
+                      onEdit={() => setEditChore(chore)}
+                      onDelete={() => void handleDelete(chore)}
                       showEstimate
                       showTimeOnly
                     />
@@ -306,6 +359,15 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
           </Box>
         );
       })}
+
+      <EditChoreDialog
+        open={!!editChore}
+        chore={editChore}
+        onClose={() => setEditChore(null)}
+        helpers={helpers.map((h) => ({ id: h.id, name: h.name }))}
+        busy={editBusy}
+        onSave={handleEditSave}
+      />
     </Stack>
   );
 }
