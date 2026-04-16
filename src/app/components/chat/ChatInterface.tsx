@@ -3201,6 +3201,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const confirmClearChat = useCallback(() => {
     setClearChatConfirmOpen(false);
     clearHistory();
+    setAssignmentNudgeDismissed(false);
   }, [clearHistory]);
 
   return (
