@@ -1,16 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useLocation } from "react-router";
 import { useAuth } from "../auth/AuthProvider";
-import { fetchUserProfile } from "../services/profileService";
+import { detectOnboardingState } from "../services/onboardingState";
 
 /**
- * Checks if the current user has completed onboarding.
- * If not, redirects to /onboarding.
- * Returns `{ loading: true }` while checking, `{ loading: false }` when done.
+ * Checks if the current user's household setup is complete.
+ *
+ * If `onboarding_completed_at` is NOT set → redirect to /onboarding (welcome flow).
+ * If `onboarding_completed_at` IS set but critical steps are missing
+ * (no home profile, no chores) → redirect to /chat?onboarding=true (resume).
+ *
+ * Skips redirect if already on /onboarding, /chat, /login, /signup, or /h/ pages.
  */
 export function useOnboardingGate() {
-  const { user } = useAuth();
+  const { user, householdId } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [loading, setLoading] = useState(true);
   const checkedRef = useRef(false);
 
@@ -20,9 +25,21 @@ export function useOnboardingGate() {
       return;
     }
 
+    // Don't redirect if already on exempt pages
+    const path = location.pathname;
+    if (
+      path.startsWith("/onboarding") ||
+      path.startsWith("/chat") ||
+      path.startsWith("/login") ||
+      path.startsWith("/signup") ||
+      path.startsWith("/h/")
+    ) {
+      setLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
-    // Safety timeout: never block the app for more than 5 seconds.
     const timeout = setTimeout(() => {
       if (!cancelled) {
         checkedRef.current = true;
@@ -32,16 +49,22 @@ export function useOnboardingGate() {
 
     (async () => {
       try {
-        const { data } = await fetchUserProfile(user.id);
+        const hid = typeof householdId === "string" ? householdId.trim() : "";
+        const state = await detectOnboardingState(hid, user.id);
         if (cancelled) return;
 
         checkedRef.current = true;
 
-        if (!data?.onboarding_completed_at) {
+        if (!state.isComplete) {
+          // Never completed onboarding at all → full welcome flow
           navigate("/onboarding", { replace: true });
+        } else if (!state.homeProfileExists || state.choreCount === 0) {
+          // Completed onboarding flag but critical setup is missing → resume via agent
+          navigate("/chat?onboarding=true", { replace: true });
         }
+        // Otherwise: setup is sufficient, let the user through
       } catch {
-        // If the profile query fails, don't block — let the user through.
+        // If queries fail, don't block
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -54,7 +77,7 @@ export function useOnboardingGate() {
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [user?.id, navigate]);
+  }, [user?.id, householdId, navigate, location.pathname]);
 
   return { loading };
 }

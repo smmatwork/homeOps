@@ -5,16 +5,17 @@ const navigateMock = vi.fn();
 
 vi.mock("react-router", () => ({
   useNavigate: () => navigateMock,
+  useLocation: () => ({ pathname: "/" }),
 }));
 
-const fetchUserProfileMock = vi.fn();
+const detectOnboardingStateMock = vi.fn();
 
-vi.mock("../services/profileService", () => ({
-  fetchUserProfile: (...args: any[]) => fetchUserProfileMock(...args),
+vi.mock("../services/onboardingState", () => ({
+  detectOnboardingState: (...args: unknown[]) => detectOnboardingStateMock(...args),
 }));
 
 vi.mock("../auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "user-1" } }),
+  useAuth: () => ({ user: { id: "user-1" }, householdId: "hh-1" }),
 }));
 
 import { useOnboardingGate } from "./useOnboardingGate";
@@ -25,14 +26,14 @@ describe("useOnboardingGate", () => {
   });
 
   it("redirects to /onboarding when onboarding not completed", async () => {
-    fetchUserProfileMock.mockResolvedValue({
-      data: { onboarding_completed_at: null },
-      error: null,
+    detectOnboardingStateMock.mockResolvedValue({
+      isComplete: false,
+      homeProfileExists: false,
+      choreCount: 0,
+      helperCount: 0,
     });
 
     const { result } = renderHook(() => useOnboardingGate());
-
-    // Initially loading
     expect(result.current.loading).toBe(true);
 
     await act(async () => {
@@ -44,10 +45,30 @@ describe("useOnboardingGate", () => {
     expect(result.current.loading).toBe(false);
   });
 
-  it("does not redirect when onboarding is completed", async () => {
-    fetchUserProfileMock.mockResolvedValue({
-      data: { onboarding_completed_at: "2026-04-10T00:00:00Z" },
-      error: null,
+  it("redirects to chat onboarding when complete flag set but no chores", async () => {
+    detectOnboardingStateMock.mockResolvedValue({
+      isComplete: true,
+      homeProfileExists: true,
+      choreCount: 0,
+      helperCount: 0,
+    });
+
+    renderHook(() => useOnboardingGate());
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(navigateMock).toHaveBeenCalledWith("/chat?onboarding=true", { replace: true });
+  });
+
+  it("does not redirect when setup is complete", async () => {
+    detectOnboardingStateMock.mockResolvedValue({
+      isComplete: true,
+      homeProfileExists: true,
+      choreCount: 5,
+      helperCount: 2,
     });
 
     const { result } = renderHook(() => useOnboardingGate());
@@ -58,24 +79,6 @@ describe("useOnboardingGate", () => {
     });
 
     expect(navigateMock).not.toHaveBeenCalled();
-    expect(result.current.loading).toBe(false);
-  });
-
-  it("does not redirect when profile fetch fails (no data)", async () => {
-    fetchUserProfileMock.mockResolvedValue({
-      data: null,
-      error: "connection failed",
-    });
-
-    const { result } = renderHook(() => useOnboardingGate());
-
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    // Should redirect since data is null (no onboarding_completed_at)
-    expect(navigateMock).toHaveBeenCalledWith("/onboarding", { replace: true });
     expect(result.current.loading).toBe(false);
   });
 });
