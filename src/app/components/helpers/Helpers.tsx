@@ -20,6 +20,7 @@ import { executeToolCall } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
 import { HelperWorkloadCard } from "./HelperWorkloadCard";
 import { HelperOnboardingFlow } from "./HelperOnboardingFlow";
+import { HelperCard } from "./HelperCard";
 
 type HelperRow = {
   id: string;
@@ -819,10 +820,11 @@ export function Helpers() {
   };
 
   return (
-    <Box sx={{ overflowY: "auto", height: "100%" }}>
+    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1200, mx: "auto" }}>
+      {/* ── Page header ─────────────────────────────────────────────── */}
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start" mb={3}>
         <Box>
-          <Typography variant="h5" fontWeight={700}>
+          <Typography variant="h4" fontWeight={700}>
             {t("helpers.title")}
           </Typography>
           <Typography variant="body2" color="text.secondary">
@@ -830,29 +832,21 @@ export function Helpers() {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button
-            variant="outlined"
-            startIcon={<Add />}
-            onClick={() => setDialogOpen(true)}
-            sx={{ textTransform: "none" }}
-          >
+          <Button variant="outlined" startIcon={<Add />} onClick={() => setDialogOpen(true)}>
             {t("helpers.add_helper")}
           </Button>
-          <Button
-            variant="contained"
-            startIcon={<Add />}
-            onClick={() => setOnboardingOpen(true)}
-            sx={{ textTransform: "none" }}
-          >
-            Onboard helper
+          <Button variant="contained" startIcon={<Add />} onClick={() => setOnboardingOpen(true)}>
+            {t("helpers.onboard_helper")}
           </Button>
         </Stack>
       </Stack>
 
+      {/* ── Workload summary ────────────────────────────────────────── */}
       <Box mb={3}>
         <HelperWorkloadCard />
       </Box>
 
+      {/* ── Helper menu ─────────────────────────────────────────────── */}
       <Menu
         anchorEl={helperMenuAnchor}
         open={Boolean(helperMenuAnchor)}
@@ -860,23 +854,16 @@ export function Helpers() {
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
       >
-        <MenuItem
-          onClick={() => {
-            if (helperMenuHelper) openLanguageDialog(helperMenuHelper);
-          }}
-        >
+        <MenuItem onClick={() => { if (helperMenuHelper) openLanguageDialog(helperMenuHelper); }}>
           {t("helpers.set_language")}
         </MenuItem>
-        <MenuItem
-          onClick={() => {
-            if (helperMenuHelper) openDeleteHelper(helperMenuHelper);
-          }}
-        >
+        <MenuItem onClick={() => { if (helperMenuHelper) openDeleteHelper(helperMenuHelper); }}>
           <Delete fontSize="small" style={{ marginRight: 8 }} />
           {t("helpers.delete_helper")}
         </MenuItem>
       </Menu>
 
+      {/* ── Language dialog ──────────────────────────────────────────── */}
       <Dialog open={languageOpen} onClose={() => (languageBusy ? null : setLanguageOpen(false))} maxWidth="xs" fullWidth>
         <DialogTitle>{t("helpers.set_language_title")}</DialogTitle>
         <DialogContent>
@@ -884,11 +871,7 @@ export function Helpers() {
             <Typography variant="subtitle2">{languageHelper?.name ?? ""}</Typography>
             <FormControl fullWidth size="small">
               <InputLabel>{t("helpers.language")}</InputLabel>
-              <Select
-                label={t("helpers.language")}
-                value={languageValue}
-                onChange={(e) => setLanguageValue(String(e.target.value) as HelperPreferredLanguage)}
-              >
+              <Select label={t("helpers.language")} value={languageValue} onChange={(e) => setLanguageValue(String(e.target.value) as HelperPreferredLanguage)}>
                 <MenuItem value="en">{t("helpers.lang.en")}</MenuItem>
                 <MenuItem value="hi">{t("helpers.lang.hi")}</MenuItem>
                 <MenuItem value="kn">{t("helpers.lang.kn")}</MenuItem>
@@ -897,12 +880,8 @@ export function Helpers() {
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setLanguageOpen(false)} disabled={languageBusy}>
-            {t("common.cancel")}
-          </Button>
-          <Button variant="contained" onClick={() => void savePreferredLanguage()} disabled={languageBusy || !languageHelper}>
-            {t("common.save")}
-          </Button>
+          <Button onClick={() => setLanguageOpen(false)} disabled={languageBusy}>{t("common.cancel")}</Button>
+          <Button variant="contained" onClick={() => void savePreferredLanguage()} disabled={languageBusy || !languageHelper}>{t("common.save")}</Button>
         </DialogActions>
       </Dialog>
 
@@ -1068,209 +1047,44 @@ export function Helpers() {
         </DialogActions>
       </Dialog>
 
-      <Tabs
-        value={category}
-        onChange={(_, v) => setCategory(v)}
-        variant="scrollable"
-        scrollButtons="auto"
-        sx={{ mb: 3, borderBottom: "1px solid", borderColor: "divider" }}
-      >
-        {CATEGORIES.map((c) => (
-          <Tab key={c} label={t(`helpers.category.${c}`)} value={c} sx={{ textTransform: "none", minWidth: "unset" }} />
-        ))}
-      </Tabs>
+      {/* ── Helper grid ──────────────────────────────────────────────── */}
+      {loadError && <Alert severity="error" sx={{ mb: 2 }}>{loadError}</Alert>}
 
-      <Card variant="outlined" sx={{ mb: 3 }}>
-        <CardContent>
-          <Stack spacing={1.5}>
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="subtitle1" fontWeight={700}>
-                {t("helpers.today_workload")}
-              </Typography>
-              {todayBusy ? <CircularProgress size={18} /> : null}
-            </Stack>
-
-            <Typography variant="body2" color="text.secondary">
-              {t("helpers.today_total_chores")} {todayChores.length}
+      {busy && helpers.length === 0 ? (
+        <Box display="flex" justifyContent="center" py={6}>
+          <CircularProgress />
+        </Box>
+      ) : helpers.length === 0 ? (
+        <Card variant="outlined">
+          <CardContent sx={{ textAlign: "center", py: 6 }}>
+            <Typography variant="h6" color="text.secondary" gutterBottom>
+              {t("helpers.empty_title")}
             </Typography>
-
-            <Divider />
-
-            <Typography variant="subtitle2">{t("helpers.unassigned")}</Typography>
-            {unassignedToday.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">{t("helpers.no_unassigned_today")}</Typography>
-            ) : (
-              <Stack spacing={0.5}>
-                {unassignedToday.map((c) => (
-                  <Typography key={c.id} variant="body2">
-                    {c.title}{c.due_at ? ` · ${localDateTimeLabel(c.due_at)}` : ""}
-                  </Typography>
-                ))}
-              </Stack>
-            )}
-
-            <Divider />
-
-            <Typography variant="subtitle2">{t("helpers.by_helper")}</Typography>
-            <Stack spacing={1}>
-              {filtered.map((h) => {
-                const rows = todayChores.filter((c) => c.helper_id === h.id);
-                if (rows.length === 0) return null;
-                return (
-                  <Box key={h.id}>
-                    <Typography variant="body2" fontWeight={600}>
-                      {h.name} ({rows.length})
-                    </Typography>
-                    <Stack spacing={0.5} mt={0.5}>
-                      {rows.map((c) => (
-                        <Typography key={c.id} variant="body2" color="text.secondary">
-                          {c.title}{c.due_at ? ` · ${localDateTimeLabel(c.due_at)}` : ""}
-                        </Typography>
-                      ))}
-                    </Stack>
-                  </Box>
-                );
-              })}
-              {!todayBusy && todayChores.length > 0 && todayChores.every((c) => !c.helper_id) ? (
-                <Typography variant="body2" color="text.secondary">{t("helpers.no_assigned_today")}</Typography>
-              ) : null}
-            </Stack>
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(280px, 1fr))" gap={2}>
-        {busy && helpers.length === 0 ? (
-          <Box display="flex" justifyContent="center" alignItems="center" py={6} gridColumn="1 / -1">
-            <CircularProgress size={24} />
-          </Box>
-        ) : null}
-        {loadError ? (
-          <Box gridColumn="1 / -1">
-            <Typography color="error">{loadError}</Typography>
-          </Box>
-        ) : null}
-
-        {filtered.map((helper) => (
-          <Card key={helper.id} variant="outlined">
-            <CardHeader
-              avatar={
-                <Avatar sx={{ bgcolor: "primary.main", width: 44, height: 44 }}>
-                  {initials(helper.name)}
-                </Avatar>
-              }
-              title={
-                <Typography variant="subtitle1" fontWeight={600}>
-                  {helper.name}
-                </Typography>
-              }
-              subheader={helper.type ?? ""}
-              action={
-                <IconButton onClick={(e) => openHelperMenu(e, helper)} size="small" aria-label={t("helpers.more_actions")}>
-                  <MoreVert fontSize="small" />
-                </IconButton>
-              }
-              sx={{ pb: 1 }}
+            <Typography variant="body2" color="text.secondary" mb={2}>
+              {t("helpers.empty_subtitle")}
+            </Typography>
+            <Button variant="contained" startIcon={<Add />} onClick={() => setOnboardingOpen(true)}>
+              {t("helpers.onboard_helper")}
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(320px, 1fr))" gap={2}>
+          {helpers.map((helper) => (
+            <HelperCard
+              key={helper.id}
+              helper={helper}
+              scheduleSummary={scheduleSummary(helper)}
+              onMenuOpen={(e) => openHelperMenu(e, helper)}
+              onCapacity={() => openCapacity(helper)}
+              onSchedule={() => openSchedule(helper)}
+              onTimeOff={() => void openTimeOff(helper)}
+              onFeedback={() => void openFeedback(helper)}
+              onRewards={() => void openRewards(helper)}
             />
-            <Divider />
-            <CardContent sx={{ pt: 1.5 }}>
-              <Stack spacing={0.75} mb={1.5}>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Phone fontSize="small" color="action" />
-                  <Typography variant="body2" color="text.secondary">{helper.phone ?? ""}</Typography>
-                </Stack>
-                {helper.notes ? (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Schedule fontSize="small" color="action" />
-                    <Typography variant="body2" color="text.secondary">{helper.notes}</Typography>
-                  </Stack>
-                ) : null}
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Schedule fontSize="small" color="action" />
-                  <Typography variant="body2" color="text.secondary">
-                    {(typeof helper.daily_capacity_minutes === "number" && Number.isFinite(helper.daily_capacity_minutes)
-                      ? helper.daily_capacity_minutes
-                      : 120) / 60}
-                    {t("helpers.hours_per_day_suffix")}
-                  </Typography>
-                </Stack>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Schedule fontSize="small" color="action" />
-                  <Typography variant="body2" color="text.secondary">{scheduleSummary(helper)}</Typography>
-                </Stack>
-              </Stack>
-
-              <Stack direction="row" spacing={1} mb={2}>
-                <Chip label={helper.type ?? t("helpers.helper_default_type")} size="small" variant="outlined" />
-                <Chip label={`${t("helpers.language_short")}: ${t(`helpers.lang.${getPreferredLanguage(helper)}`)}`} size="small" variant="outlined" />
-              </Stack>
-
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
-                  gap: 1,
-                }}
-              >
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  startIcon={<Phone fontSize="small" />}
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                >
-                  {t("helpers.call")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                  onClick={() => openCapacity(helper)}
-                >
-                  {t("helpers.capacity")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                  onClick={() => openSchedule(helper)}
-                >
-                  {t("helpers.schedule")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                  onClick={() => void openTimeOff(helper)}
-                >
-                  {t("helpers.time_off")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                  onClick={() => void openFeedback(helper)}
-                >
-                  {t("helpers.feedback")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  fullWidth
-                  sx={{ textTransform: "none", minWidth: 0, px: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                  onClick={() => void openRewards(helper)}
-                >
-                  {t("helpers.rewards")}
-                </Button>
-              </Box>
-            </CardContent>
-          </Card>
-        ))}
-      </Box>
+          ))}
+        </Box>
+      )}
 
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{t("helpers.add_new_helper")}</DialogTitle>
