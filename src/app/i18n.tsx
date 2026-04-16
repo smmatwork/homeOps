@@ -555,6 +555,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "coverage.first_time_title": "Set up your initial chores",
     "coverage.first_time_subtitle": "We found {count} space(s) in your home profile. Use the planner to create your initial chore list — you can fine-tune later.",
     "coverage.audit_button": "Audit Coverage",
+    "coverage.audit_view": "Coverage Audit",
+    "coverage.matrix_view": "Full Matrix",
     "coverage.bulk_add_button": "Bulk Add",
 
     "coverage_audit.title": "Coverage Audit",
@@ -961,6 +963,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "coverage.first_time_title": "अपने प्रारंभिक काम सेट करें",
     "coverage.first_time_subtitle": "हमने आपके होम प्रोफ़ाइल में {count} स्थान पाए। प्रारंभिक काम सूची बनाने के लिए प्लानर का उपयोग करें — आप बाद में बदल सकते हैं।",
     "coverage.audit_button": "कवरेज ऑडिट",
+    "coverage.audit_view": "कवरेज ऑडिट",
+    "coverage.matrix_view": "पूर्ण मैट्रिक्स",
     "coverage.bulk_add_button": "थोक में जोड़ें",
 
     "coverage_audit.title": "कवरेज ऑडिट",
@@ -1691,6 +1695,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "coverage.first_time_title": "ನಿಮ್ಮ ಆರಂಭಿಕ ಕೆಲಸಗಳನ್ನು ಸೆಟ್ ಮಾಡಿ",
     "coverage.first_time_subtitle": "ನಿಮ್ಮ ಮನೆ ಪ್ರೊಫೈಲ್‌ನಲ್ಲಿ {count} ಸ್ಥಳಗಳನ್ನು ಕಂಡುಕೊಂಡಿದ್ದೇವೆ. ಆರಂಭಿಕ ಕೆಲಸ ಪಟ್ಟಿ ರಚಿಸಲು ಪ್ಲಾನರ್ ಬಳಸಿ.",
     "coverage.audit_button": "ಕವರೇಜ್ ಆಡಿಟ್",
+    "coverage.audit_view": "ಕವರೇಜ್ ಆಡಿಟ್",
+    "coverage.matrix_view": "ಪೂರ್ಣ ಮ್ಯಾಟ್ರಿಕ್ಸ್",
     "coverage.bulk_add_button": "ಸಾಮೂಹಿಕವಾಗಿ ಸೇರಿಸಿ",
 
     "coverage_audit.title": "ಕವರೇಜ್ ಆಡಿಟ್",

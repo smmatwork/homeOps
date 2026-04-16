@@ -55,6 +55,7 @@ import { HelperDailyView } from "./HelperDailyView";
 import { CreateChoreDialog } from "./CreateChoreDialog";
 import { EditChoreDialog } from "./EditChoreDialog";
 import { ChoreListView } from "./ChoreListView";
+import { CoverageDashboard } from "../coverage/CoverageDashboard";
 
 type ChoreRow = {
   id: string;
@@ -194,6 +195,8 @@ export function Chores() {
   const [syncDrawerOpen, setSyncDrawerOpen] = useState(false);
   const [view, setView] = useState<"all" | "pending" | "in-progress" | "completed">("all");
   const [mode, setMode] = useState<"coverage" | "list" | "daily">("daily");
+  const [coverageSubMode, setCoverageSubMode] = useState<"audit" | "matrix">("audit");
+  const [coverageRefreshKey, setCoverageRefreshKey] = useState(0);
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
   const [cadenceFilter, setCadenceFilter] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
@@ -2347,86 +2350,98 @@ export function Chores() {
             />
           )}
 
-          {/* ── Coverage matrix view ──────────────────────────────────── */}
+          {/* ── Coverage view ────────────────────────────────────────── */}
           {mode === "coverage" && (
-            <Card variant="outlined">
-              <CardHeader
-                title={<Typography variant="h6">{t("chores.coverage")}</Typography>}
-                subheader={t("chores.planned_frequency")}
-                action={
-                  <Stack direction="row" spacing={1}>
-                    <Button size="small" variant="contained" startIcon={<HealthAndSafety />} component={RouterLink} to="/coverage">
-                      {t("coverage.audit_button")}
-                    </Button>
-                    <Button size="small" variant="outlined" onClick={() => buildAutoFillRecommendations()} disabled={busy || coverage.spaces.length === 0}>
-                      {t("chores.autofill_missing")}
-                    </Button>
-                  </Stack>
-                }
-              />
-              <CardContent>
-                {coverage.spaces.length === 0 ? (
-                  <Box textAlign="center" py={4}>
-                    <Typography variant="body2" color="text.secondary" mb={2}>{t("planner.empty_coverage")}</Typography>
-                    <Button variant="contained" startIcon={<HealthAndSafety />} component={RouterLink} to="/coverage">
-                      {t("coverage.audit_button")}
-                    </Button>
-                  </Box>
-                ) : (
-                  <Box sx={{ maxHeight: "min(70vh, 560px)", overflow: "auto", border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
-                    <Box display="grid" gridTemplateColumns={`minmax(200px, 1fr) repeat(${cadenceBuckets.length}, minmax(120px, 1fr))`} gap={1} alignItems="stretch" sx={{ p: 1 }}>
-                      <Box sx={{ position: "sticky", top: 0, left: 0, zIndex: 3, bgcolor: "background.paper" }} />
-                      {cadenceBuckets.map((c) => (
-                        <Box key={c} px={0.5} py={0.25} sx={{ position: "sticky", top: 0, zIndex: 2, bgcolor: "background.paper" }}>
-                          <Typography variant="caption" color="text.secondary" fontWeight={700}>
-                            {t(`chores.${c}`)}
-                          </Typography>
-                        </Box>
-                      ))}
+            <Stack spacing={2}>
+              {/* Sub-mode toggle */}
+              <Stack direction="row" spacing={1} alignItems="center">
+                <ToggleButtonGroup
+                  value={coverageSubMode}
+                  exclusive
+                  size="small"
+                  onChange={(_, v) => { if (v) setCoverageSubMode(v); }}
+                >
+                  <ToggleButton value="audit">{t("coverage.audit_view")}</ToggleButton>
+                  <ToggleButton value="matrix">{t("coverage.matrix_view")}</ToggleButton>
+                </ToggleButtonGroup>
+                <Button size="small" variant="outlined" onClick={() => buildAutoFillRecommendations()} disabled={busy || coverage.spaces.length === 0}>
+                  {t("chores.autofill_missing")}
+                </Button>
+              </Stack>
 
-                      {coverage.spaces.map((space) => (
-                        <>
-                          <Box key={`${space}_label`} px={0.75} py={0.5} sx={{ cursor: "pointer", position: "sticky", left: 0, zIndex: 1, bgcolor: "background.paper" }} onClick={() => enterListMode({ space, cadence: null })}>
-                            <Typography variant="body2" fontWeight={700} noWrap title={space}>{space}</Typography>
-                          </Box>
-                          {cadenceBuckets.map((cadence) => {
-                            const n = coverage.counts[space]?.[cadence] ?? 0;
-                            const targets = cadenceTargetsForSpace(space);
-                            const isTarget = targets.includes(cadence as CoverageCadence);
-                            const isGap = isTarget && (baseCoverage.counts[space]?.[cadence] ?? 0) === 0;
-                            const intensity = n === 0 ? 0 : Math.min(1, n / coverage.max);
-                            return (
-                              <Box
-                                key={`${space}_${cadence}`}
-                                px={0.5} py={0.5}
-                                sx={{
-                                  borderRadius: 1,
-                                  border: "1px solid",
-                                  borderColor: isGap ? "error.main" : "divider",
-                                  bgcolor: n === 0
-                                    ? isTarget ? "rgba(244, 67, 54, 0.06)" : "transparent"
-                                    : `rgba(25, 118, 210, ${0.10 + intensity * 0.35})`,
-                                  cursor: n > 0 || isGap ? "pointer" : "default",
-                                }}
-                                onClick={() => {
-                                  if (n > 0) { enterListMode({ space, cadence }); return; }
-                                  if (isGap) buildAutoFillRecommendations({ only: { space, cadence: cadence as CoverageCadence } });
-                                }}
-                              >
-                                <Box display="flex" alignItems="center" justifyContent="space-between">
-                                  <Typography variant="caption" fontWeight={700}>{n === 0 ? "" : n}</Typography>
-                                  {isTarget && <Typography variant="caption" color={isGap ? "error.main" : "text.secondary"}>{isGap ? "!" : "•"}</Typography>}
-                                </Box>
+              {coverageSubMode === "audit" ? (
+                <CoverageDashboard
+                  refreshKey={coverageRefreshKey}
+                  onApplied={() => setCoverageRefreshKey((k) => k + 1)}
+                />
+              ) : (
+                <Card variant="outlined">
+                  <CardHeader
+                    title={<Typography variant="h6">{t("chores.coverage")}</Typography>}
+                    subheader={t("chores.planned_frequency")}
+                  />
+                  <CardContent>
+                    {coverage.spaces.length === 0 ? (
+                      <Box textAlign="center" py={4}>
+                        <Typography variant="body2" color="text.secondary" mb={2}>{t("planner.empty_coverage")}</Typography>
+                      </Box>
+                    ) : (
+                      <Box sx={{ maxHeight: "min(70vh, 560px)", overflow: "auto", border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                        <Box display="grid" gridTemplateColumns={`minmax(200px, 1fr) repeat(${cadenceBuckets.length}, minmax(120px, 1fr))`} gap={1} alignItems="stretch" sx={{ p: 1 }}>
+                          <Box sx={{ position: "sticky", top: 0, left: 0, zIndex: 3, bgcolor: "background.paper" }} />
+                          {cadenceBuckets.map((c) => (
+                            <Box key={c} px={0.5} py={0.25} sx={{ position: "sticky", top: 0, zIndex: 2, bgcolor: "background.paper" }}>
+                              <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                                {t(`chores.${c}`)}
+                              </Typography>
+                            </Box>
+                          ))}
+
+                          {coverage.spaces.map((space) => (
+                            <>
+                              <Box key={`${space}_label`} px={0.75} py={0.5} sx={{ cursor: "pointer", position: "sticky", left: 0, zIndex: 1, bgcolor: "background.paper" }} onClick={() => enterListMode({ space, cadence: null })}>
+                                <Typography variant="body2" fontWeight={700} noWrap title={space}>{space}</Typography>
                               </Box>
-                            );
-                          })}
-                        </>
-                      ))}
-                    </Box>
-                  </Box>
-                )}
-              </CardContent>
-            </Card>
+                              {cadenceBuckets.map((cadence) => {
+                                const n = coverage.counts[space]?.[cadence] ?? 0;
+                                const targets = cadenceTargetsForSpace(space);
+                                const isTarget = targets.includes(cadence as CoverageCadence);
+                                const isGap = isTarget && (baseCoverage.counts[space]?.[cadence] ?? 0) === 0;
+                                const intensity = n === 0 ? 0 : Math.min(1, n / coverage.max);
+                                return (
+                                  <Box
+                                    key={`${space}_${cadence}`}
+                                    px={0.5} py={0.5}
+                                    sx={{
+                                      borderRadius: 1,
+                                      border: "1px solid",
+                                      borderColor: isGap ? "error.main" : "divider",
+                                      bgcolor: n === 0
+                                        ? isTarget ? "rgba(244, 67, 54, 0.06)" : "transparent"
+                                        : `rgba(25, 118, 210, ${0.10 + intensity * 0.35})`,
+                                      cursor: n > 0 || isGap ? "pointer" : "default",
+                                    }}
+                                    onClick={() => {
+                                      if (n > 0) { enterListMode({ space, cadence }); return; }
+                                      if (isGap) buildAutoFillRecommendations({ only: { space, cadence: cadence as CoverageCadence } });
+                                    }}
+                                  >
+                                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                                      <Typography variant="caption" fontWeight={700}>{n === 0 ? "" : n}</Typography>
+                                      {isTarget && <Typography variant="caption" color={isGap ? "error.main" : "text.secondary"}>{isGap ? "!" : "•"}</Typography>}
+                                    </Box>
+                                  </Box>
+                                );
+                              })}
+                            </>
+                          ))}
+                        </Box>
+                      </Box>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+            </Stack>
           )}
         </>
       )}
