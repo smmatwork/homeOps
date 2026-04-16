@@ -36,6 +36,19 @@ interface EditChoreDialogProps {
 
 const STATUS_OPTIONS = ["pending", "in-progress", "completed"] as const;
 const PRIORITY_OPTIONS = [1, 2, 3] as const;
+const CATEGORY_OPTIONS = [
+  { value: "cleaning", label: "Cleaning (sweep, mop, dust)" },
+  { value: "kitchen", label: "Kitchen & cooking" },
+  { value: "bathroom", label: "Bathroom cleaning" },
+  { value: "laundry", label: "Laundry & ironing" },
+  { value: "outdoor", label: "Outdoor & garden" },
+  { value: "organizing", label: "Organizing & declutter" },
+  { value: "maintenance", label: "Maintenance & repairs" },
+  { value: "childcare", label: "Childcare" },
+  { value: "pet_care", label: "Pet care" },
+  { value: "errands", label: "Errands & shopping" },
+  { value: "other", label: "Other" },
+] as const;
 const CADENCE_OPTIONS = [
   "daily", "alternate_days", "every_3_days", "every_4_days",
   "weekly_mon", "weekly_tue", "weekly_wed", "weekly_thu", "weekly_fri", "weekly_sat", "weekly_sun",
@@ -150,7 +163,12 @@ export function EditChoreDialog({
               <MenuItem key={c} value={c}>{cadenceLabel(c)}</MenuItem>
             ))}
           </TextField>
-          <TextField size="small" label={t("chores.category")} value={form.category} onChange={set("category")} />
+          <TextField size="small" select label={t("chores.category")} value={form.category} onChange={set("category")}>
+            <MenuItem value=""><em>—</em></MenuItem>
+            {CATEGORY_OPTIONS.map((c) => (
+              <MenuItem key={c.value} value={c.value}>{c.label}</MenuItem>
+            ))}
+          </TextField>
         </Stack>
       </DialogContent>
       <DialogActions>
