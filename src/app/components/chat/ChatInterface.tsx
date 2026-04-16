@@ -854,18 +854,28 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
 
   // Count unassigned chores for the assignment nudge
   useEffect(() => {
-    const hid = authedHouseholdId?.trim();
+    const hid = (authedHouseholdId || "").trim();
     if (!hid) return;
     let cancelled = false;
     void (async () => {
-      const { count, error } = await supabase
-        .from("chores")
-        .select("id", { count: "exact", head: true })
-        .eq("household_id", hid)
-        .is("helper_id", null)
-        .is("deleted_at", null)
-        .neq("status", "completed");
-      if (!cancelled && !error) setUnassignedChoreCount(count ?? 0);
+      try {
+        const { count, error } = await supabase
+          .from("chores")
+          .select("id", { count: "exact", head: true })
+          .eq("household_id", hid)
+          .is("helper_id", null)
+          .is("deleted_at", null)
+          .neq("status", "completed");
+        if (!cancelled) {
+          if (error) {
+            console.warn("[assignment-nudge] count error:", error.message);
+          } else {
+            setUnassignedChoreCount(count ?? 0);
+          }
+        }
+      } catch (e) {
+        console.warn("[assignment-nudge] exception:", e);
+      }
     })();
     return () => { cancelled = true; };
   }, [authedHouseholdId]);
@@ -3515,6 +3525,28 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             </DialogActions>
           </Dialog>
 
+          {/* Assignment nudge — fixed above messages, show when >5 unassigned chores */}
+          {unassignedChoreCount > 5 && !assignmentNudgeDismissed && (
+            <Paper variant="outlined" sx={{ px: 2, py: 1, mx: 2, mt: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
+              <Stack direction="row" spacing={1.5} alignItems="center">
+                <Box flex={1}>
+                  <Typography variant="body2" fontWeight={600}>
+                    {unassignedChoreCount} chore{unassignedChoreCount === 1 ? "" : "s"} not yet assigned to helpers
+                  </Typography>
+                </Box>
+                <Button size="small" variant="contained" onClick={() => {
+                  setAssignmentNudgeDismissed(true);
+                  void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.");
+                }}>
+                  Assign now
+                </Button>
+                <Button size="small" onClick={() => setAssignmentNudgeDismissed(true)} sx={{ minWidth: 0, color: "text.secondary" }}>
+                  ✕
+                </Button>
+              </Stack>
+            </Paper>
+          )}
+
           {/* Messages area */}
           <Box
             ref={messagesScrollRef}
@@ -3532,28 +3564,6 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
               },
             }}
           >
-            {/* Assignment nudge — show when >5 unassigned chores exist */}
-            {unassignedChoreCount > 5 && !assignmentNudgeDismissed && (
-              <Paper variant="outlined" sx={{ p: 1.5, mx: 1, mb: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
-                <Stack direction="row" spacing={1.5} alignItems="center">
-                  <Box flex={1}>
-                    <Typography variant="body2" fontWeight={600}>
-                      {unassignedChoreCount} chore{unassignedChoreCount === 1 ? "" : "s"} not yet assigned to helpers
-                    </Typography>
-                  </Box>
-                  <Button size="small" variant="contained" onClick={() => {
-                    setAssignmentNudgeDismissed(true);
-                    void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.");
-                  }}>
-                    Assign now
-                  </Button>
-                  <Button size="small" onClick={() => setAssignmentNudgeDismissed(true)} sx={{ minWidth: 0, color: "text.secondary" }}>
-                    ✕
-                  </Button>
-                </Stack>
-              </Paper>
-            )}
-
             {messages.map((msg) => (
               <MessageBubble key={msg.id} {...msg} />
             ))}
