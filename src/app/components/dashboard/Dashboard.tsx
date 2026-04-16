@@ -312,6 +312,42 @@ export function Dashboard() {
         </Card>
       )}
 
+      {/* Assignment nudge — show when helpers + chores exist but many chores are unassigned */}
+      {setupState.loaded && setupState.remaining.length === 0 && helpers.length > 0 && chores.filter((c) => !c.helper_id && c.status !== "completed").length > 0 && (
+        <Card variant="outlined" sx={{ mb: 3, bgcolor: "info.50", borderColor: "info.200" }}>
+          <CardContent sx={{ py: 2 }}>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  {t("dashboard.assign_chores_title")}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {t("dashboard.assign_chores_hint").replace("{count}", String(chores.filter((c) => !c.helper_id && c.status !== "completed").length))}
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                size="small"
+                href="/chat"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.location.href = "/chat";
+                  // The agent will be prompted via the chat
+                  setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent("homeops:chat-send", {
+                      detail: { message: "Help me assign my unassigned chores to helpers based on their roles and schedules." }
+                    }));
+                  }, 1000);
+                }}
+                sx={{ whiteSpace: "nowrap" }}
+              >
+                {t("dashboard.assign_chores_button")}
+              </Button>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Stats */}
       <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))" gap={2} mb={3}>
         {stats.map((stat) => {

@@ -852,11 +852,31 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
     return () => { cancelled = true; };
   }, [props.onboarding, authedHouseholdId, authedUser?.id]);
 
+  // Count unassigned chores for the assignment nudge
+  useEffect(() => {
+    const hid = authedHouseholdId?.trim();
+    if (!hid) return;
+    let cancelled = false;
+    void (async () => {
+      const { count, error } = await supabase
+        .from("chores")
+        .select("id", { count: "exact", head: true })
+        .eq("household_id", hid)
+        .is("helper_id", null)
+        .is("deleted_at", null)
+        .neq("status", "completed");
+      if (!cancelled && !error) setUnassignedChoreCount(count ?? 0);
+    })();
+    return () => { cancelled = true; };
+  }, [authedHouseholdId]);
+
   const [agentAccessToken, setAgentAccessToken] = useState("");
   const [agentHouseholdId, setAgentHouseholdId] = useState("");
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [coverageExperimentOpen, setCoverageExperimentOpen] = useState(false);
   const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState(true);
+  const [assignmentNudgeDismissed, setAssignmentNudgeDismissed] = useState(false);
+  const [unassignedChoreCount, setUnassignedChoreCount] = useState(0);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [agentSuccess, setAgentSuccess] = useState<string | null>(null);
@@ -3512,6 +3532,28 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
               },
             }}
           >
+            {/* Assignment nudge — only in non-onboarding mode when unassigned chores exist */}
+            {onboardingResolved === false && unassignedChoreCount > 0 && !assignmentNudgeDismissed && (
+              <Paper variant="outlined" sx={{ p: 1.5, mx: 1, mb: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <Box flex={1}>
+                    <Typography variant="body2" fontWeight={600}>
+                      {unassignedChoreCount} chore{unassignedChoreCount === 1 ? "" : "s"} not yet assigned to helpers
+                    </Typography>
+                  </Box>
+                  <Button size="small" variant="contained" onClick={() => {
+                    setAssignmentNudgeDismissed(true);
+                    void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.");
+                  }}>
+                    Assign now
+                  </Button>
+                  <Button size="small" onClick={() => setAssignmentNudgeDismissed(true)} sx={{ minWidth: 0, color: "text.secondary" }}>
+                    ✕
+                  </Button>
+                </Stack>
+              </Paper>
+            )}
+
             {messages.map((msg) => (
               <MessageBubble key={msg.id} {...msg} />
             ))}
