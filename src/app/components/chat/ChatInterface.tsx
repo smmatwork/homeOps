@@ -1868,32 +1868,34 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const proposedAutomationSuggestions = parseAutomationSuggestionsFromAssistantText(latestAssistantText);
   const proposedToolCalls = parseToolCallsFromAssistantText(latestAssistantText);
   const proposedClarification = parseClarificationFromAssistantText(latestAssistantText);
-  // Parse explicit inline_form marker from agent, or infer from keywords as fallback
+  const [inlineFormsDismissed, setInlineFormsDismissed] = useState<Set<string>>(new Set());
+
+  // Parse explicit inline_form marker from agent, or infer from keywords as fallback.
+  // Never propose a form that was already submitted (dismissed).
   const proposedInlineForm = useMemo((): InlineFormPayload | null => {
     if (!isOnboarding) return null;
-    // 1. Explicit JSON marker
+
+    const propose = (form: InlineFormPayload): InlineFormPayload | null =>
+      inlineFormsDismissed.has(form.inline_form) ? null : form;
+
+    // 1. Explicit JSON marker (always takes priority, even if dismissed — agent explicitly asked for it)
     const explicit = parseInlineFormFromAssistantText(latestAssistantText);
-    if (explicit) return explicit;
+    if (explicit) return propose(explicit);
+
     // 2. Keyword fallback — detect what the agent is asking about
     const lower = latestAssistantText.toLowerCase();
-    if (/what (type|kind) of (home|house)|apartment or villa|home type/i.test(lower)) {
-      return { inline_form: "home_type_picker" };
-    }
-    if (/rooms|spaces|bedrooms|which rooms|add.*room|set up.*room/i.test(lower) && !/chore|clean|sweep/i.test(lower)) {
-      return { inline_form: "room_editor" };
-    }
-    if (/features|appliances|ac|solar|water purifier|geyser|chimney|what.*does your home have/i.test(lower) && !/service|vendor|maintain/i.test(lower)) {
-      return { inline_form: "feature_selector" };
-    }
-    if (/pets|kids|children|bathrooms|flooring|household details/i.test(lower) && !/chore|room/i.test(lower)) {
-      return { inline_form: "household_details" };
-    }
-    if (/helper|maid|cook|servant|cleaner|do you have.*help/i.test(lower) && !/assign|chore/i.test(lower)) {
-      return { inline_form: "helper_form" };
-    }
+    if (/what (type|kind) of (home|house)|apartment or villa|home type/i.test(lower))
+      return propose({ inline_form: "home_type_picker" });
+    if (/rooms|spaces|bedrooms|which rooms|add.*room|set up.*room/i.test(lower) && !/chore|clean|sweep/i.test(lower))
+      return propose({ inline_form: "room_editor" });
+    if (/features|appliances|what.*does your home have/i.test(lower) && !/saved|service|vendor|maintain/i.test(lower))
+      return propose({ inline_form: "feature_selector" });
+    if (/pets|kids|children|bathrooms|flooring|household details/i.test(lower) && !/chore|room/i.test(lower))
+      return propose({ inline_form: "household_details" });
+    if (/helper|maid|cook|servant|cleaner|do you have.*help/i.test(lower) && !/assign|chore|saved/i.test(lower))
+      return propose({ inline_form: "helper_form" });
     return null;
-  }, [isOnboarding, latestAssistantText]);
-  const [inlineFormsDismissed, setInlineFormsDismissed] = useState<Set<string>>(new Set());
+  }, [isOnboarding, latestAssistantText, inlineFormsDismissed]);
 
   const proposedClarificationKey = useMemo(() => {
     if (!proposedClarification) return "";
