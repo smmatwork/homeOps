@@ -52,6 +52,9 @@ import { HealthAndSafety, Sync } from "@mui/icons-material";
 import { useSyncSchedule } from "../../hooks/useSyncSchedule";
 import { SyncResultsDrawer } from "./SyncResultsDrawer";
 import { HelperDailyView } from "./HelperDailyView";
+import { CreateChoreDialog } from "./CreateChoreDialog";
+import { EditChoreDialog } from "./EditChoreDialog";
+import { ChoreListView } from "./ChoreListView";
 
 type ChoreRow = {
   id: string;
@@ -2236,128 +2239,14 @@ export function Chores() {
   };
 
   return (
-    <>
-      <Dialog
-        open={spaceClarifyOpen}
-        onClose={() => {
-          setSpaceClarifyOpen(false);
-          setSpaceClarifyPending(null);
-          setSpaceClarifyError(null);
-          setSpaceClarifySelection("");
-        }}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>{spaceClarifyTitle || "Choose a space"}</DialogTitle>
-        <DialogContent>
-          <Stack spacing={1.5} mt={1}>
-            {spaceClarifyError ? <Alert severity="error">{spaceClarifyError}</Alert> : null}
-            <Autocomplete
-              options={spaceClarifyOptions}
-              value={spaceClarifySelection || null}
-              onChange={(_, v) => setSpaceClarifySelection(typeof v === "string" ? v : "")}
-              renderInput={(params) => <TextField {...params} label="Space" size="small" />}
-            />
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => {
-              setSpaceClarifyOpen(false);
-              setSpaceClarifyPending(null);
-              setSpaceClarifyError(null);
-              setSpaceClarifySelection("");
-            }}
-          >
-            {t("common.cancel")}
-          </Button>
-          <Button
-            variant="contained"
-            onClick={async () => {
-              const sel = spaceClarifySelection.trim();
-              if (!sel) {
-                setSpaceClarifyError("Please choose a space.");
-                return;
-              }
-              if (!spaceClarifyPending) {
-                setSpaceClarifyOpen(false);
-                return;
-              }
-              try {
-                await spaceClarifyPending(sel);
-              } catch (e) {
-                setSpaceClarifyError(e instanceof Error ? e.message : "Couldn't apply the selection");
-              }
-            }}
-          >
-            Apply
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={bulkDeleteDialogOpen} onClose={() => setBulkDeleteDialogOpen(false)}>
-        <DialogTitle>Delete {selectedVisibleIds.length} chore{selectedVisibleIds.length === 1 ? "" : "s"}?</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2">
-            This will permanently delete the selected chores. This cannot be undone.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBulkDeleteDialogOpen(false)}>{t("common.cancel")}</Button>
-          <Button color="error" variant="contained" disabled={busy || selectedVisibleIds.length === 0} onClick={() => void runBulkDelete()}>
-            {t("common.delete")}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Box display="flex" justifyContent="space-between" alignItems="flex-end" flexWrap="wrap" gap={2}>
+    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1200, mx: "auto" }}>
+      {/* ── Page header ─────────────────────────────────────────────── */}
+      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" mb={3}>
         <Box>
-          <Typography variant="h4">{t("chores.title")}</Typography>
-          <Typography color="textSecondary">{t("chores.subtitle")}</Typography>
+          <Typography variant="h4" fontWeight={700}>{t("chores.title")}</Typography>
+          <Typography variant="body2" color="text.secondary">{t("chores.subtitle")}</Typography>
         </Box>
-        <Box display="flex" gap={1} alignItems="center">
-          {mode !== "coverage" ? (
-            <ToggleButtonGroup
-              value={mode}
-              exclusive
-              size="small"
-              onChange={(_, next) => {
-                if (next === "daily") enterDailyMode();
-                else if (next === "list") enterListMode({ space: null, cadence: null });
-              }}
-            >
-              <ToggleButton value="daily">Helper view</ToggleButton>
-              <ToggleButton value="list">Task view</ToggleButton>
-            </ToggleButtonGroup>
-          ) : null}
-
-          {mode === "coverage" ? (
-            <Button
-              variant="outlined"
-              onClick={() => {
-                enterDailyMode();
-              }}
-            >
-              {t("chores.daily_chores")}
-            </Button>
-          ) : (
-            <Button
-              variant="outlined"
-              onClick={() => {
-                setMode("coverage");
-                setSpaceFilter(null);
-                setCadenceFilter(null);
-              }}
-            >
-              {t("chores.coverage")}
-            </Button>
-          )}
-
-          {mode === "coverage" ? (
-            <Button variant="outlined" onClick={() => enterListMode({ space: null, cadence: null })}>
-              {t("chores.view_all")}
-            </Button>
-          ) : null}
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Button
             variant="outlined"
             startIcon={<Sync />}
@@ -2371,452 +2260,254 @@ export function Chores() {
           >
             {scheduleSync.busy ? t("engine.syncing") : t("engine.sync_schedule")}
           </Button>
-          <Button
-            variant="contained"
-            startIcon={<Add />}
-            onClick={() => setDialogOpen(true)}
-          >
+          <Button variant="contained" startIcon={<Add />} onClick={() => setDialogOpen(true)}>
             {t("chores.add_chore")}
           </Button>
-          <Button variant="outlined" onClick={openDedupeDialog} disabled={busy || chores.length === 0}>
-            {t("chores.remove_duplicates")}
-          </Button>
+        </Stack>
+      </Stack>
+
+      {/* ── View mode tabs ──────────────────────────────────────────── */}
+      <ToggleButtonGroup
+        value={mode}
+        exclusive
+        size="small"
+        sx={{ mb: 3 }}
+        onChange={(_, next) => {
+          if (next === "daily") enterDailyMode();
+          else if (next === "list") enterListMode({ space: null, cadence: null });
+          else if (next === "coverage") {
+            setMode("coverage");
+            setSpaceFilter(null);
+            setCadenceFilter(null);
+          }
+        }}
+      >
+        <ToggleButton value="daily">{t("chores.daily_chores")}</ToggleButton>
+        <ToggleButton value="list">{t("chores.view_all")}</ToggleButton>
+        <ToggleButton value="coverage">{t("chores.coverage")}</ToggleButton>
+      </ToggleButtonGroup>
+
+      {loadError && <Alert severity="error" sx={{ mb: 2 }}>{loadError}</Alert>}
+
+      {busy && chores.length === 0 ? (
+        <Box display="flex" justifyContent="center" py={6}>
+          <CircularProgress />
         </Box>
-      </Box>
-
-      {mode === "coverage" ? (
-        <Box mt={2}>
-          <Card>
-            <CardHeader
-              title={<Typography variant="h6">{t("chores.coverage")}</Typography>}
-              subheader={t("chores.planned_frequency")}
-            />
-            <CardContent>
-              <Box display="flex" justifyContent="flex-end" gap={1} mb={2} flexWrap="wrap">
-                <Button
-                  variant="contained"
-                  startIcon={<HealthAndSafety />}
-                  component={RouterLink}
-                  to="/coverage"
-                >
-                  {t("coverage.audit_button")}
-                </Button>
-                <Button variant="outlined" onClick={openBaselineEditor} disabled={busy}>
-                  {t("chores.edit_baseline")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  onClick={() => buildAutoFillRecommendations()}
-                  disabled={busy || coverage.spaces.length === 0}
-                >
-                  {t("chores.autofill_missing")}
-                </Button>
-              </Box>
-
-              {!busy && coverage.spaces.length === 0 && (
-                <Box sx={{ textAlign: "center", py: 4 }}>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    {t("planner.empty_coverage")}
-                  </Typography>
-                  <Button
-                    variant="contained"
-                    startIcon={<HealthAndSafety />}
-                    component={RouterLink}
-                    to="/coverage"
-                  >
-                    {t("coverage.audit_button")}
-                  </Button>
-                </Box>
-              )}
-              {busy && chores.length === 0 ? (
-                <Box display="flex" justifyContent="center" alignItems="center" py={4}>
-                  <CircularProgress size={24} />
-                </Box>
-              ) : null}
-              {loadError ? (
-                <Box>
-                  <Typography color="error">{loadError}</Typography>
-                </Box>
-              ) : null}
-
-              <Box
-                sx={{
-                  maxHeight: "min(70vh, 560px)",
-                  overflow: "auto",
-                  border: "1px solid",
-                  borderColor: "divider",
-                  borderRadius: 1,
-                }}
-              >
-                <Box
-                  display="grid"
-                  gridTemplateColumns={`minmax(200px, 1fr) repeat(${cadenceBuckets.length}, minmax(120px, 1fr))`}
-                  gap={1}
-                  alignItems="stretch"
-                  sx={{ p: 1 }}
-                >
-                  <Box
-                    sx={{
-                      position: "sticky",
-                      top: 0,
-                      left: 0,
-                      zIndex: 3,
-                      bgcolor: "background.paper",
-                    }}
-                  />
-                  {cadenceBuckets.map((c) => (
-                    <Box
-                      key={c}
-                      px={0.5}
-                      py={0.25}
-                      sx={{
-                        position: "sticky",
-                        top: 0,
-                        zIndex: 2,
-                        bgcolor: "background.paper",
-                      }}
-                    >
-                      <Typography variant="caption" color="textSecondary" sx={{ fontWeight: 700 }}>
-                        {c === "daily"
-                          ? t("chores.daily")
-                          : c === "weekly"
-                            ? t("chores.weekly")
-                            : c === "biweekly"
-                              ? t("chores.biweekly")
-                              : t("chores.monthly")}
-                      </Typography>
-                    </Box>
-                  ))}
-
-                  {coverage.spaces.length === 0 ? (
-                    <Box gridColumn={`1 / span ${cadenceBuckets.length + 1}`} py={2}>
-                      <Typography color="textSecondary">{t("chores.no_chores_yet")}</Typography>
-                    </Box>
-                  ) : null}
-
-                  {coverage.spaces.map((space) => {
-                    return (
-                      <>
-                        <Box
-                          key={`${space}_label`}
-                          px={0.75}
-                          py={0.5}
-                          sx={{
-                            cursor: "pointer",
-                            position: "sticky",
-                            left: 0,
-                            zIndex: 1,
-                            bgcolor: "background.paper",
-                          }}
-                          onClick={() => enterListMode({ space, cadence: null })}
-                        >
-                          <Typography variant="body2" fontWeight={700} noWrap title={space}>
-                            {space}
-                          </Typography>
-                        </Box>
-                        {cadenceBuckets.map((cadence) => {
-                          const n = coverage.counts[space]?.[cadence] ?? 0;
-                          const targets = cadenceTargetsForSpace(space);
-                          const isTarget = targets.includes(cadence as CoverageCadence);
-                          const isGap = isTarget && (baseCoverage.counts[space]?.[cadence] ?? 0) === 0;
-                          const intensity = n === 0 ? 0 : Math.min(1, n / coverage.max);
-                          return (
-                            <Box
-                              key={`${space}_${cadence}`}
-                              px={0.5}
-                              py={0.5}
-                              sx={{
-                                borderRadius: 1,
-                                border: "1px solid",
-                                borderColor: isGap ? "error.main" : "divider",
-                                bgcolor:
-                                  n === 0
-                                    ? isTarget
-                                      ? "rgba(244, 67, 54, 0.06)"
-                                      : "transparent"
-                                    : `rgba(25, 118, 210, ${0.10 + intensity * 0.35})`,
-                                cursor: n > 0 || isGap ? "pointer" : "default",
-                              }}
-                              onClick={() => {
-                                if (n > 0) {
-                                  enterListMode({ space, cadence });
-                                  return;
-                                }
-                                if (isGap) {
-                                  buildAutoFillRecommendations({ only: { space, cadence: cadence as CoverageCadence } });
-                                }
-                              }}
-                            >
-                              <Box display="flex" alignItems="center" justifyContent="space-between">
-                                <Typography variant="caption" fontWeight={700}>
-                                  {n === 0 ? "" : n}
-                                </Typography>
-                                {isTarget ? (
-                                  <Typography variant="caption" color={isGap ? "error.main" : "textSecondary"}>
-                                    {isGap ? "!" : "•"}
-                                  </Typography>
-                                ) : null}
-                              </Box>
-                            </Box>
-                          );
-                        })}
-                      </>
-                    );
-                  })}
-                </Box>
-              </Box>
-            </CardContent>
-          </Card>
-        </Box>
-      ) : mode === "daily" ? (
-        <>
-          <Box mt={1} display="flex" gap={2} alignItems="center" flexWrap="wrap">
-            <TextField
-              label={t("chores.date")}
-              type="date"
-              size="small"
-              value={dailyDate}
-              onChange={(e) => setDailyDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-            />
-            <Typography variant="caption" color="textSecondary">
-              {t("chores.time_zone")}: {Intl.DateTimeFormat().resolvedOptions().timeZone}
-            </Typography>
-            <Button variant="outlined" onClick={() => enterListMode({ space: null, cadence: null })}>
-              {t("chores.view_all")}
-            </Button>
-          </Box>
-
-          {/* Helper-grouped daily view with quick-complete checkboxes */}
-          <Box mt={2}>
-            <HelperDailyView date={dailyDate} />
-          </Box>
-        </>
       ) : (
         <>
-          <Tabs value={view} onChange={(e, newValue) => setView(newValue)} variant="scrollable">
-            <Tab label={`All (${chores.length})`} value="all" />
-            <Tab label={`Pending (${chores.filter((c) => c.status === "pending").length})`} value="pending" />
-            <Tab label={`In Progress (${chores.filter((c) => c.status === "in-progress").length})`} value="in-progress" />
-            <Tab label={`Completed (${chores.filter((c) => c.status === "completed").length})`} value="completed" />
-          </Tabs>
-
-          {(spaceFilter || cadenceFilter) && (
-            <Box mt={2} display="flex" alignItems="center" gap={1} flexWrap="wrap">
-              <Typography variant="body2" color="textSecondary">
-                {t("chores.filters")}:
-              </Typography>
-              {spaceFilter ? <Chip label={`space: ${spaceFilter}`} /> : null}
-              {cadenceFilter ? <Chip label={`cadence: ${cadenceFilter}`} /> : null}
-              {categoryFilter ? <Chip label={`category: ${categoryFilter}`} /> : null}
-              <Button
-                variant="text"
-                onClick={() => {
-                  setSpaceFilter(null);
-                  setCadenceFilter(null);
-                  setCategoryFilter(null);
-                }}
-              >
-                {t("common.clear")}
-              </Button>
-            </Box>
+          {/* ── Daily (helper) view ───────────────────────────────────── */}
+          {mode === "daily" && (
+            <Stack spacing={2}>
+              <Stack direction="row" spacing={2} alignItems="center">
+                <TextField
+                  label={t("chores.date")}
+                  type="date"
+                  size="small"
+                  value={dailyDate}
+                  onChange={(e) => setDailyDate(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                />
+                <Typography variant="caption" color="text.secondary">
+                  {Intl.DateTimeFormat().resolvedOptions().timeZone}
+                </Typography>
+              </Stack>
+              <HelperDailyView date={dailyDate} />
+            </Stack>
           )}
 
-          <Box mt={1} display="flex" gap={2} alignItems="center" flexWrap="wrap">
-            <FormControlLabel
-              control={<Checkbox checked={includeDeleted} onChange={(e) => setIncludeDeleted(e.target.checked)} />}
-              label={<Typography variant="body2">Include deleted</Typography>}
+          {/* ── Task list view ────────────────────────────────────────── */}
+          {mode === "list" && (
+            <ChoreListView
+              chores={chores}
+              helpers={helpers}
+              busy={busy}
+              spaceFilter={spaceFilter}
+              cadenceFilter={cadenceFilter}
+              onClearFilters={() => { setSpaceFilter(null); setCadenceFilter(null); setCategoryFilter(null); }}
+              onEdit={openEdit}
+              onDelete={confirmDeleteChore}
+              onRestore={(c) => void restoreChore(c)}
+              onReportNotDone={(c) => void reportNotDone(c)}
+              onBulkDelete={(ids) => {
+                setSelectedChoreIds(Object.fromEntries(ids.map((id) => [id, true])));
+                setBulkDeleteDialogOpen(true);
+              }}
+              helperOnLeave={helperOnLeaveAt}
             />
-          </Box>
+          )}
 
-          <Box mt={2} display="flex" gap={1} alignItems="center" flexWrap="wrap">
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={allVisibleSelected}
-                  indeterminate={someVisibleSelected}
-                  onChange={(e) => selectAllVisible(e.target.checked)}
-                  disabled={busy || visibleChores.length === 0}
-                />
-              }
-              label={<Typography variant="body2">Select all (visible)</Typography>}
-            />
-            <Button
-              color="error"
-              variant="outlined"
-              disabled={busy || selectedVisibleIds.length === 0}
-              startIcon={<Delete />}
-              onClick={() => setBulkDeleteDialogOpen(true)}
-            >
-              Delete selected ({selectedVisibleIds.length})
-            </Button>
-            <Button variant="text" disabled={busy || Object.keys(selectedChoreIds).length === 0} onClick={clearChoreSelection}>
-              Clear selection
-            </Button>
-          </Box>
-
-          {(() => {
-            const grouped = groupChoresByHelper(filteredChores);
-            return (
-              <Box mt={4} display="flex" flexDirection="column" gap={3}>
-                {busy && chores.length === 0 ? (
-                  <Box display="flex" justifyContent="center" alignItems="center" py={6}>
-                    <CircularProgress size={24} />
+          {/* ── Coverage matrix view ──────────────────────────────────── */}
+          {mode === "coverage" && (
+            <Card variant="outlined">
+              <CardHeader
+                title={<Typography variant="h6">{t("chores.coverage")}</Typography>}
+                subheader={t("chores.planned_frequency")}
+                action={
+                  <Stack direction="row" spacing={1}>
+                    <Button size="small" variant="contained" startIcon={<HealthAndSafety />} component={RouterLink} to="/coverage">
+                      {t("coverage.audit_button")}
+                    </Button>
+                    <Button size="small" variant="outlined" onClick={() => buildAutoFillRecommendations()} disabled={busy || coverage.spaces.length === 0}>
+                      {t("chores.autofill_missing")}
+                    </Button>
+                  </Stack>
+                }
+              />
+              <CardContent>
+                {coverage.spaces.length === 0 ? (
+                  <Box textAlign="center" py={4}>
+                    <Typography variant="body2" color="text.secondary" mb={2}>{t("planner.empty_coverage")}</Typography>
+                    <Button variant="contained" startIcon={<HealthAndSafety />} component={RouterLink} to="/coverage">
+                      {t("coverage.audit_button")}
+                    </Button>
                   </Box>
-                ) : null}
-                {loadError ? (
-                  <Box>
-                    <Typography color="error">{loadError}</Typography>
-                  </Box>
-                ) : null}
+                ) : (
+                  <Box sx={{ maxHeight: "min(70vh, 560px)", overflow: "auto", border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <Box display="grid" gridTemplateColumns={`minmax(200px, 1fr) repeat(${cadenceBuckets.length}, minmax(120px, 1fr))`} gap={1} alignItems="stretch" sx={{ p: 1 }}>
+                      <Box sx={{ position: "sticky", top: 0, left: 0, zIndex: 3, bgcolor: "background.paper" }} />
+                      {cadenceBuckets.map((c) => (
+                        <Box key={c} px={0.5} py={0.25} sx={{ position: "sticky", top: 0, zIndex: 2, bgcolor: "background.paper" }}>
+                          <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                            {t(`chores.${c}`)}
+                          </Typography>
+                        </Box>
+                      ))}
 
-                <Box>
-                  <Typography variant="h6" mb={1}>
-                    {t("chores.unassigned")} ({grouped.unassigned.length})
-                  </Typography>
-                  <Box display="flex" flexDirection="column" gap={1}>
-                    {grouped.unassigned.map((c) => renderChoreListRow(c))}
-                  </Box>
-                </Box>
-
-                {grouped.byHelper.map(({ helper, chores: hs }) => (
-                  <Box key={helper.id}>
-                    <Typography variant="h6" mb={1}>
-                      {helper.name} ({hs.length})
-                    </Typography>
-                    <Box display="flex" flexDirection="column" gap={1}>
-                      {hs.map((c) => renderChoreListRow(c))}
+                      {coverage.spaces.map((space) => (
+                        <>
+                          <Box key={`${space}_label`} px={0.75} py={0.5} sx={{ cursor: "pointer", position: "sticky", left: 0, zIndex: 1, bgcolor: "background.paper" }} onClick={() => enterListMode({ space, cadence: null })}>
+                            <Typography variant="body2" fontWeight={700} noWrap title={space}>{space}</Typography>
+                          </Box>
+                          {cadenceBuckets.map((cadence) => {
+                            const n = coverage.counts[space]?.[cadence] ?? 0;
+                            const targets = cadenceTargetsForSpace(space);
+                            const isTarget = targets.includes(cadence as CoverageCadence);
+                            const isGap = isTarget && (baseCoverage.counts[space]?.[cadence] ?? 0) === 0;
+                            const intensity = n === 0 ? 0 : Math.min(1, n / coverage.max);
+                            return (
+                              <Box
+                                key={`${space}_${cadence}`}
+                                px={0.5} py={0.5}
+                                sx={{
+                                  borderRadius: 1,
+                                  border: "1px solid",
+                                  borderColor: isGap ? "error.main" : "divider",
+                                  bgcolor: n === 0
+                                    ? isTarget ? "rgba(244, 67, 54, 0.06)" : "transparent"
+                                    : `rgba(25, 118, 210, ${0.10 + intensity * 0.35})`,
+                                  cursor: n > 0 || isGap ? "pointer" : "default",
+                                }}
+                                onClick={() => {
+                                  if (n > 0) { enterListMode({ space, cadence }); return; }
+                                  if (isGap) buildAutoFillRecommendations({ only: { space, cadence: cadence as CoverageCadence } });
+                                }}
+                              >
+                                <Box display="flex" alignItems="center" justifyContent="space-between">
+                                  <Typography variant="caption" fontWeight={700}>{n === 0 ? "" : n}</Typography>
+                                  {isTarget && <Typography variant="caption" color={isGap ? "error.main" : "text.secondary"}>{isGap ? "!" : "•"}</Typography>}
+                                </Box>
+                              </Box>
+                            );
+                          })}
+                        </>
+                      ))}
                     </Box>
                   </Box>
-                ))}
-              </Box>
-            );
-          })()}
-
-          {filteredChores.length === 0 && (
-            <Box textAlign="center" py={4}>
-              <Typography variant="h6">{t("chores.no_chores_found")}</Typography>
-              <Typography color="textSecondary">{t("chores.caught_up")}</Typography>
-            </Box>
+                )}
+              </CardContent>
+            </Card>
           )}
         </>
       )}
 
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)}>
-        <DialogTitle>{t("chores.edit_chore")}</DialogTitle>
-        <DialogContent>
-          <Box display="flex" flexDirection="column" gap={2} mt={1}>
-            <TextField label={t("chores.title_label")} fullWidth value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
-            <TextField label={t("chores.description")} fullWidth multiline rows={3} value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
-            <FormControl fullWidth size="small">
-              <InputLabel>{t("chores.status")}</InputLabel>
-              <Select value={editStatus} label={t("chores.status")} onChange={(e) => setEditStatus(String(e.target.value))}>
-                <MenuItem value="pending">{t("chores.status_pending")}</MenuItem>
-                <MenuItem value="in-progress">{t("chores.status_in_progress")}</MenuItem>
-                <MenuItem value="completed">{t("chores.status_completed")}</MenuItem>
-              </Select>
-            </FormControl>
-            <TextField label={t("chores.priority")} fullWidth value={editPriority} onChange={(e) => setEditPriority(e.target.value)} />
+      {/* ── Dialogs ─────────────────────────────────────────────────── */}
+      <CreateChoreDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        helpers={helpers}
+        busy={busy}
+        onSave={(data) => {
+          setNewTitle(data.title);
+          setNewDescription(data.description);
+          setNewHelperId(data.helperId);
+          setNewCadence(data.cadence);
+          setNewDueAt(data.dueAt);
+          void createManualChore();
+        }}
+      />
 
-            <TextField label={t("chores.due_date")} type="datetime-local" fullWidth value={editDueAt} onChange={(e) => setEditDueAt(e.target.value)} InputLabelProps={{ shrink: true }} />
+      <EditChoreDialog
+        open={editOpen}
+        chore={editChore}
+        onClose={() => setEditOpen(false)}
+        helpers={helpers}
+        busy={editBusy}
+        helperOnLeave={(hid, dueAt) => helperOnLeaveAt(hid, dueAt)}
+        onSave={async (data) => {
+          setEditTitle(data.title);
+          setEditDescription(data.description);
+          setEditStatus(data.status);
+          setEditPriority(String(data.priority));
+          setEditDueAt(data.dueAt);
+          setEditHelperId(data.helperId);
+          setEditSpace(data.space);
+          setEditCadence(data.cadence);
+          await saveEdit();
+        }}
+      />
 
-            <FormControl fullWidth size="small">
-              <InputLabel>{t("chores.assign_to")}</InputLabel>
-              <Select
-                value={editHelperId}
-                label={t("chores.assign_to")}
-                onChange={(e) => setEditHelperId(String(e.target.value))}
-              >
-                <MenuItem value="">
-                  <em>{t("chores.unassigned")}</em>
-                </MenuItem>
-                {helpers
-                  .slice()
-                  .sort((a, b) => a.name.localeCompare(b.name))
-                  .map((h) => (
-                    <MenuItem key={h.id} value={h.id} disabled={helperOnLeaveAt(h.id, isoFromDatetimeLocal(editDueAt))}>
-                      {h.name}
-                    </MenuItem>
-                  ))}
-              </Select>
-            </FormControl>
-            {editHelperId.trim() && helperOnLeaveAt(editHelperId.trim(), isoFromDatetimeLocal(editDueAt)) ? (
-              <Chip size="small" color="warning" label={t("helpers.on_leave")} sx={{ alignSelf: "flex-start" }} />
-            ) : null}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditOpen(false)}>{t("common.cancel")}</Button>
-          <Button variant="contained" onClick={() => void saveEdit()} disabled={editBusy}>
-            {t("common.save")}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Add Chore Dialog */}
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>{t("chores.create_new")}</DialogTitle>
-        <DialogContent>
-          <Box display="flex" flexDirection="column" gap={2}>
-            <TextField label={t("chores.chore_title")} fullWidth value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
-            <TextField label={t("chores.description")} fullWidth multiline rows={3} value={newDescription} onChange={(e) => setNewDescription(e.target.value)} />
-            <FormControl fullWidth>
-              <InputLabel>{t("chores.assign_to")}</InputLabel>
-              <Select value={newHelperId} label={t("chores.assign_to")} onChange={(e) => setNewHelperId(String(e.target.value))}>
-                <MenuItem value="">
-                  <em>{t("chores.unassigned")}</em>
-                </MenuItem>
-                {helpers.map((h) => (
-                  <MenuItem key={h.id} value={h.id} disabled={helperOnLeaveAt(h.id, isoFromDatetimeLocal(newDueAt))}>
-                    {h.name}{h.type ? ` (${h.type})` : ""}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <FormControl fullWidth>
-              <InputLabel>{t("chores.category")}</InputLabel>
-              <Select value={newCadence} label={t("chores.category")} onChange={(e) => setNewCadence(String(e.target.value))}>
-                <MenuItem value="">
-                  <em>{t("chat.frequency_not_set")}</em>
-                </MenuItem>
-                <MenuItem value="daily">{t("chat.frequency_daily")}</MenuItem>
-                <MenuItem value="weekly">{t("chat.frequency_weekly")}</MenuItem>
-                <MenuItem value="biweekly">{t("chat.frequency_biweekly")}</MenuItem>
-                <MenuItem value="monthly">{t("chat.frequency_monthly")}</MenuItem>
-              </Select>
-            </FormControl>
-            <TextField label={t("chores.due_date")} type="datetime-local" fullWidth value={newDueAt} onChange={(e) => setNewDueAt(e.target.value)} InputLabelProps={{ shrink: true }} />
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
-          <Button variant="contained" onClick={() => void createManualChore()} disabled={busy}>
-            {t("chores.create_chore")}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)}>
+      {/* Delete confirmation */}
+      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>{t("common.delete")}</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            {`Delete this chore${deleteTarget?.title ? `: "${deleteTarget.title}"` : ""}? This cannot be undone.`}
+            {`Delete "${deleteTarget?.title ?? ""}"? This cannot be undone.`}
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDeleteDialogOpen(false)}>{t("common.cancel")}</Button>
-          <Button color="error" variant="contained" disabled={busy} onClick={() => void runDeleteChore()}>
-            {t("common.delete")}
-          </Button>
+          <Button color="error" variant="contained" disabled={busy} onClick={() => void runDeleteChore()}>{t("common.delete")}</Button>
         </DialogActions>
       </Dialog>
 
-      <Snackbar
-        open={snackOpen}
-        autoHideDuration={4000}
-        onClose={() => setSnackOpen(false)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
+      {/* Bulk delete confirmation */}
+      <Dialog open={bulkDeleteDialogOpen} onClose={() => setBulkDeleteDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Delete {selectedVisibleIds.length} chore{selectedVisibleIds.length === 1 ? "" : "s"}?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">This will permanently delete the selected chores.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkDeleteDialogOpen(false)}>{t("common.cancel")}</Button>
+          <Button color="error" variant="contained" disabled={busy || selectedVisibleIds.length === 0} onClick={() => void runBulkDelete()}>{t("common.delete")}</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Space clarify */}
+      <Dialog open={spaceClarifyOpen} onClose={() => { setSpaceClarifyOpen(false); setSpaceClarifyPending(null); }} maxWidth="xs" fullWidth>
+        <DialogTitle>{spaceClarifyTitle || "Choose a space"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} mt={1}>
+            {spaceClarifyError && <Alert severity="error">{spaceClarifyError}</Alert>}
+            <Autocomplete
+              options={spaceClarifyOptions}
+              value={spaceClarifySelection || null}
+              onChange={(_, v) => setSpaceClarifySelection(typeof v === "string" ? v : "")}
+              renderInput={(params) => <TextField {...params} label="Space" size="small" />}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setSpaceClarifyOpen(false); setSpaceClarifyPending(null); }}>{t("common.cancel")}</Button>
+          <Button variant="contained" onClick={async () => {
+            const sel = spaceClarifySelection.trim();
+            if (!sel) { setSpaceClarifyError("Please choose a space."); return; }
+            if (!spaceClarifyPending) { setSpaceClarifyOpen(false); return; }
+            try { await spaceClarifyPending(sel); } catch (e) { setSpaceClarifyError(e instanceof Error ? e.message : "Error"); }
+          }}>Apply</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar open={snackOpen} autoHideDuration={4000} onClose={() => setSnackOpen(false)}>
         <Alert onClose={() => setSnackOpen(false)} severity={snackSeverity} sx={{ width: "100%" }}>
           {snackMessage}
         </Alert>
@@ -2838,6 +2529,6 @@ export function Chores() {
           if (data) setChores(data as ChoreRow[]);
         }}
       />
-    </>
+    </Box>
   );
 }
