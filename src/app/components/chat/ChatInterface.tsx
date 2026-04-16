@@ -1868,7 +1868,31 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const proposedAutomationSuggestions = parseAutomationSuggestionsFromAssistantText(latestAssistantText);
   const proposedToolCalls = parseToolCallsFromAssistantText(latestAssistantText);
   const proposedClarification = parseClarificationFromAssistantText(latestAssistantText);
-  const proposedInlineForm = isOnboarding ? parseInlineFormFromAssistantText(latestAssistantText) : null;
+  // Parse explicit inline_form marker from agent, or infer from keywords as fallback
+  const proposedInlineForm = useMemo((): InlineFormPayload | null => {
+    if (!isOnboarding) return null;
+    // 1. Explicit JSON marker
+    const explicit = parseInlineFormFromAssistantText(latestAssistantText);
+    if (explicit) return explicit;
+    // 2. Keyword fallback — detect what the agent is asking about
+    const lower = latestAssistantText.toLowerCase();
+    if (/what (type|kind) of (home|house)|apartment or villa|home type/i.test(lower)) {
+      return { inline_form: "home_type_picker" };
+    }
+    if (/rooms|spaces|bedrooms|which rooms|add.*room|set up.*room/i.test(lower) && !/chore|clean|sweep/i.test(lower)) {
+      return { inline_form: "room_editor" };
+    }
+    if (/features|appliances|ac|solar|water purifier|geyser|chimney|what.*does your home have/i.test(lower) && !/service|vendor|maintain/i.test(lower)) {
+      return { inline_form: "feature_selector" };
+    }
+    if (/pets|kids|children|bathrooms|flooring|household details/i.test(lower) && !/chore|room/i.test(lower)) {
+      return { inline_form: "household_details" };
+    }
+    if (/helper|maid|cook|servant|cleaner|do you have.*help/i.test(lower) && !/assign|chore/i.test(lower)) {
+      return { inline_form: "helper_form" };
+    }
+    return null;
+  }, [isOnboarding, latestAssistantText]);
   const [inlineFormDismissed, setInlineFormDismissed] = useState<string | null>(null);
 
   const proposedClarificationKey = useMemo(() => {
