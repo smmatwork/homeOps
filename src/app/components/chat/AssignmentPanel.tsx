@@ -270,7 +270,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
   // ── Render ──────────────────────────────────────────────────────
 
   if (loading) {
-    return <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+    return <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
       <Box display="flex" justifyContent="center" py={2}><CircularProgress size={24} /></Box>
     </Paper>;
   }
@@ -289,7 +289,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   if (step === "applying") {
     return (
-      <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+      <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
         <Stack spacing={2} alignItems="center">
           <CircularProgress size={28} />
           <Typography variant="body2">Assigning... {applyProgress}/{applyTotal}</Typography>
@@ -303,7 +303,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   if (step === "pick_pattern") {
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
         <Stack spacing={2}>
           <Box>
             <Typography variant="subtitle1" fontWeight={700}>How should chores be assigned?</Typography>
@@ -368,7 +368,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   if (step === "by_specialty") {
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         <Stack spacing={2}>
           <Box>
@@ -421,7 +421,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   if (step === "by_floor") {
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
         <Stack spacing={2}>
           <Box>
             <Typography variant="subtitle1" fontWeight={700}>Assign a helper to each floor</Typography>
@@ -474,7 +474,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
   // ── Step 3: Editable assignment list ────────────────────────────
 
   return (
-    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto" }}>
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
       <Stack spacing={2}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap>
