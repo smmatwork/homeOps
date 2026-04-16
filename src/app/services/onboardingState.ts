@@ -55,7 +55,7 @@ export async function detectOnboardingState(
   const [profileRes, homeRes, featuresRes, choresRes, helpersRes] = await Promise.all([
     supabase
       .from("profiles")
-      .select("full_name, onboarding_complete")
+      .select("full_name, onboarding_completed_at")
       .eq("id", userId)
       .maybeSingle(),
     supabase
@@ -81,7 +81,7 @@ export async function detectOnboardingState(
   // Profile
   if (profileRes.data) {
     state.userName = typeof profileRes.data.full_name === "string" ? profileRes.data.full_name : null;
-    state.isComplete = profileRes.data.onboarding_complete === true;
+    state.isComplete = !!profileRes.data.onboarding_completed_at;
   }
 
   // Home profile

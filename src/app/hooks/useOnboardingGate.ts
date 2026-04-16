@@ -27,9 +27,10 @@ export function useOnboardingGate() {
 
     // Don't redirect if already on exempt pages
     const path = location.pathname;
+    const search = location.search ?? "";
     if (
       path.startsWith("/onboarding") ||
-      path.startsWith("/chat") ||
+      (path.startsWith("/chat") && search.includes("onboarding=true")) ||
       path.startsWith("/login") ||
       path.startsWith("/signup") ||
       path.startsWith("/h/")
