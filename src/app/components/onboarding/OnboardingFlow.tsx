@@ -210,7 +210,10 @@ export function OnboardingFlow() {
             <HomeProfileWizard
               embedded
               open
-              onClose={() => {}}
+              onClose={() => {
+                // When wizard is "closed" in embedded mode, advance to next onboarding step
+                setActiveStep(3);
+              }}
               draft={homeProfileHook.homeProfileDraft}
               setDraft={homeProfileHook.setHomeProfileDraft}
               mode={homeProfileHook.homeProfileMode}
@@ -224,8 +227,19 @@ export function OnboardingFlow() {
               toolBusy={toolBusy}
               updateRecord={homeProfileHook.updateHomeProfileRecord}
               goNext={homeProfileHook.goNextHomeProfileStep}
-              goBack={homeProfileHook.goBackHomeProfileStep}
-              onSave={homeProfileHook.saveHomeProfileDraft}
+              goBack={() => {
+                // If we're on the first wizard step, go back to onboarding step 1
+                if (homeProfileHook.homeProfileWizardStep === 0) {
+                  setActiveStep(1);
+                } else {
+                  homeProfileHook.goBackHomeProfileStep();
+                }
+              }}
+              onSave={async () => {
+                const ok = await homeProfileHook.saveHomeProfileDraft();
+                if (ok) setActiveStep(3);
+                return ok;
+              }}
             />
           </Stack>
         )}
@@ -264,8 +278,8 @@ export function OnboardingFlow() {
           </Stack>
         )}
 
-        {/* Bottom navigation (for steps 1-2) */}
-        {activeStep > 0 && activeStep < 3 && (
+        {/* Bottom navigation (step 1 only — step 2 has its own via HomeProfileWizard) */}
+        {activeStep === 1 && (
           <Stack direction="row" justifyContent="space-between" mt={3}>
             <Button variant="text" onClick={handleBack} disabled={busy}>
               {t("home_profile.back")}

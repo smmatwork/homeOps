@@ -131,9 +131,9 @@ describe("OnboardingFlow", () => {
     // Step 2: Home profile should appear (text appears in both stepper and heading)
     expect(screen.getAllByText("onboarding.step_home").length).toBeGreaterThanOrEqual(2);
 
-    // Click the outer/bottom Next to go to agent step (last "next" button)
-    const nextButtons2 = screen.getAllByText("home_profile.next");
-    await user.click(nextButtons2[nextButtons2.length - 1]);
+    // Click the wizard's Discard button to advance to agent step
+    // (HomeProfileWizard's onClose is wired to advance to step 3)
+    await user.click(screen.getByText("home_profile.discard"));
 
     // Step 3: Agent intro
     expect(screen.getByText("onboarding.agent_title")).toBeInTheDocument();
@@ -165,8 +165,7 @@ describe("OnboardingFlow", () => {
     await user.click(await screen.findByText("onboarding.get_started"));
     const nextButtons1 = screen.getAllByText("home_profile.next");
     await user.click(nextButtons1[nextButtons1.length - 1]);
-    const nextButtons2 = screen.getAllByText("home_profile.next");
-    await user.click(nextButtons2[nextButtons2.length - 1]);
+    await user.click(screen.getByText("home_profile.discard"));
 
     // Click finish
     await user.click(screen.getByText("onboarding.finish"));
@@ -183,8 +182,7 @@ describe("OnboardingFlow", () => {
     await user.click(await screen.findByText("onboarding.get_started"));
     const nextButtons1 = screen.getAllByText("home_profile.next");
     await user.click(nextButtons1[nextButtons1.length - 1]);
-    const nextButtons2 = screen.getAllByText("home_profile.next");
-    await user.click(nextButtons2[nextButtons2.length - 1]);
+    await user.click(screen.getByText("home_profile.discard"));
 
     expect(screen.getByText("onboarding.agent_example_1")).toBeInTheDocument();
     expect(screen.getByText("onboarding.agent_example_2")).toBeInTheDocument();
