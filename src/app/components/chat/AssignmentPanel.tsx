@@ -45,7 +45,32 @@ interface RoomInfo { displayName: string; floor: number | null; }
 
 type Step = "pick_pattern" | "by_specialty" | "by_floor" | "assignments" | "applying" | "done";
 
-const CADENCE_OPTIONS = ["daily", "every_2_days", "weekly", "biweekly", "monthly"] as const;
+const CADENCE_OPTIONS = [
+  { value: "daily", label: "Daily" },
+  { value: "alternate_days", label: "Alternate days" },
+  { value: "every_3_days", label: "Every 3 days" },
+  { value: "every_4_days", label: "Every 4 days" },
+  { value: "weekly_mon", label: "Weekly — Mon" },
+  { value: "weekly_tue", label: "Weekly — Tue" },
+  { value: "weekly_wed", label: "Weekly — Wed" },
+  { value: "weekly_thu", label: "Weekly — Thu" },
+  { value: "weekly_fri", label: "Weekly — Fri" },
+  { value: "weekly_sat", label: "Weekly — Sat" },
+  { value: "weekly_sun", label: "Weekly — Sun" },
+  { value: "biweekly_mon", label: "Alternate week — Mon" },
+  { value: "biweekly_sat", label: "Alternate week — Sat" },
+  { value: "monthly", label: "Monthly" },
+] as const;
+
+/** Map legacy cadence values to the new day-specific format */
+function normalizeCadence(raw: string): string {
+  switch (raw) {
+    case "weekly": return "weekly_sat";
+    case "biweekly": return "biweekly_sat";
+    case "every_2_days": return "alternate_days";
+    default: return CADENCE_OPTIONS.some((o) => o.value === raw) ? raw : "weekly_sat";
+  }
+}
 
 const SPECIALTY_AREAS = [
   { key: "all_cleaning", label: "All cleaning (sweep, mop, dust)", tags: ["cleaning", "sweeping", "mopping", "dusting", "bathroom", "bedroom", "living", "general"] },
@@ -205,7 +230,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     for (const chore of rawChores) {
       const spaceLower = chore.space.toLowerCase();
       const helperId = roomToHelper[spaceLower] ?? null;
-      map[chore.id] = { helperId, cadence: chore.cadence };
+      map[chore.id] = { helperId, cadence: normalizeCadence(chore.cadence) };
     }
     setAssignments(map);
     setStep("assignments");
@@ -215,7 +240,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     const map: Record<string, { helperId: string | null; cadence: string }> = {};
     for (const a of result.assignments) {
       const chore = rawChores.find((c) => c.id === a.choreId);
-      map[a.choreId] = { helperId: a.helperId, cadence: chore?.cadence ?? "weekly" };
+      map[a.choreId] = { helperId: a.helperId, cadence: normalizeCadence(chore?.cadence ?? "weekly") };
     }
     setAssignments(map);
   };
@@ -504,8 +529,8 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
                   </Box>
                   <TextField select size="small" value={cadence}
                     onChange={(e) => setAssignments((prev) => ({ ...prev, [choreId]: { ...prev[choreId], cadence: e.target.value } }))}
-                    sx={{ minWidth: 95 }} SelectProps={{ native: true, sx: { fontSize: 12 } }}>
-                    {CADENCE_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                    sx={{ minWidth: 140 }} SelectProps={{ native: true, sx: { fontSize: 11 } }}>
+                    {CADENCE_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                   </TextField>
                   <TextField select size="small" value={helperId ?? ""}
                     onChange={(e) => setAssignments((prev) => ({ ...prev, [choreId]: { ...prev[choreId], helperId: e.target.value || null } }))}

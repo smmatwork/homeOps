@@ -268,7 +268,22 @@ function HouseholdDetailsForm({ onSubmit, disabled }: { onSubmit: (d: Record<str
 
 // ── Chore Recommendations ────────────────────────────────────────
 
-const CADENCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
+const CADENCE_OPTIONS = [
+  { value: "daily", label: "Daily" },
+  { value: "alternate_days", label: "Alternate days" },
+  { value: "every_3_days", label: "Every 3 days" },
+  { value: "every_4_days", label: "Every 4 days" },
+  { value: "weekly_mon", label: "Weekly — Mon" },
+  { value: "weekly_tue", label: "Weekly — Tue" },
+  { value: "weekly_wed", label: "Weekly — Wed" },
+  { value: "weekly_thu", label: "Weekly — Thu" },
+  { value: "weekly_fri", label: "Weekly — Fri" },
+  { value: "weekly_sat", label: "Weekly — Sat" },
+  { value: "weekly_sun", label: "Weekly — Sun" },
+  { value: "biweekly_mon", label: "Alternate week — Mon" },
+  { value: "biweekly_sat", label: "Alternate week — Sat" },
+  { value: "monthly", label: "Monthly" },
+] as const;
 
 function ChoreRecommendationsForm({ context, onSubmit, disabled }: { context?: Record<string, unknown>; onSubmit: (d: Record<string, unknown>) => void; disabled?: boolean }) {
   const { t } = useI18n();
@@ -308,13 +323,13 @@ function ChoreRecommendationsForm({ context, onSubmit, disabled }: { context?: R
             <TextField
               select
               size="small"
-              value={c.cadence ?? "weekly"}
+              value={c.cadence ?? "weekly_mon"}
               onChange={(e) => updateCadence(c.id, e.target.value)}
               disabled={!c.selected}
-              sx={{ minWidth: 90 }}
-              SelectProps={{ native: true, sx: { fontSize: 12 } }}
+              sx={{ minWidth: 140 }}
+              SelectProps={{ native: true, sx: { fontSize: 11 } }}
             >
-              {CADENCE_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              {CADENCE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </TextField>
           </Stack>
         ))}
