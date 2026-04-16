@@ -18,6 +18,7 @@ import {
 import { CheckCircle, SkipNext, Close } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
 import { useOnboardingSteps, type OnboardingStep } from "../../hooks/useOnboardingSteps";
+import type { OnboardingState } from "../../services/onboardingState";
 import { OnboardingInlineForm } from "./OnboardingInlineForms";
 import { supabase } from "../../services/supabaseClient";
 import { markOnboardingComplete } from "../../services/profileService";
@@ -29,6 +30,60 @@ interface OnboardingPanelProps {
   onFormSubmitted: (message: string) => void;
   /** Called when onboarding is complete or dismissed. */
   onComplete: () => void;
+}
+
+/** Build step-specific context for the inline form. */
+function buildFormContext(step: OnboardingStep, state: OnboardingState): Record<string, unknown> {
+  const base = {
+    rooms: state.roomNames.map((n, i) => ({ id: `r_${i}`, template_name: n, display_name: n, floor: 0 })),
+    floors: 1,
+    home_type: state.homeType ?? "apartment",
+  };
+
+  if (step === "chore_recommendations") {
+    // Generate chore recommendations from room names
+    const chores: Array<{ title: string; space: string; cadence: string }> = [];
+    const rooms = state.roomNames;
+
+    for (const room of rooms) {
+      const lower = room.toLowerCase();
+      if (/kitchen/.test(lower)) {
+        chores.push({ title: `${room} daily wipe-down`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} deep clean`, space: room, cadence: "weekly" });
+      } else if (/bath|toilet|washroom|powder/.test(lower)) {
+        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+      } else if (/bedroom|master/.test(lower)) {
+        chores.push({ title: `Sweep and mop ${room}`, space: room, cadence: "daily" });
+        chores.push({ title: `Dust ${room}`, space: room, cadence: "weekly" });
+      } else if (/living|hall|drawing/.test(lower)) {
+        chores.push({ title: `Sweep and mop ${room}`, space: room, cadence: "daily" });
+        chores.push({ title: `Dust and vacuum ${room}`, space: room, cadence: "weekly" });
+      } else if (/balcony|terrace|deck/.test(lower)) {
+        chores.push({ title: `Sweep ${room}`, space: room, cadence: "weekly" });
+      } else if (/garden|lawn/.test(lower)) {
+        chores.push({ title: `Water plants in ${room}`, space: room, cadence: "daily" });
+        chores.push({ title: `Garden maintenance`, space: room, cadence: "monthly" });
+      } else if (/utility|laundry/.test(lower)) {
+        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+      } else if (/dining/.test(lower)) {
+        chores.push({ title: `Wipe ${room} table`, space: room, cadence: "daily" });
+      } else if (/pooja|prayer/.test(lower)) {
+        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+      } else if (/garage|parking|car/.test(lower)) {
+        chores.push({ title: `Sweep ${room}`, space: room, cadence: "monthly" });
+      } else {
+        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+      }
+    }
+
+    // Add general chores
+    chores.push({ title: "Trash disposal", space: "General", cadence: "daily" });
+    chores.push({ title: "Laundry", space: "General", cadence: "daily" });
+
+    return { ...base, chores };
+  }
+
+  return base;
 }
 
 const STEP_LABELS: Record<string, string> = {
@@ -205,14 +260,10 @@ export function OnboardingPanel({
           </Stack>
         </Stack>
 
-        {/* Current form */}
+        {/* Current form with step-specific context */}
         <OnboardingInlineForm
           formType={currentStep as any}
-          context={state ? {
-            rooms: state.roomNames.map((n, i) => ({ id: `r_${i}`, template_name: n, display_name: n, floor: 0 })),
-            floors: 1,
-            home_type: state.homeType ?? "apartment",
-          } : undefined}
+          context={state ? buildFormContext(currentStep, state) : undefined}
           onSubmit={handleSubmit}
         />
 
