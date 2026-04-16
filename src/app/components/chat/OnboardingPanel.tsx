@@ -135,13 +135,11 @@ export function OnboardingPanel({
   }
 
   if (currentStep === "complete") {
-    void (async () => {
-      await markOnboardingComplete(userId);
-      onComplete();
-    })();
+    // Mark onboarding complete (non-blocking)
+    void markOnboardingComplete(userId);
     return (
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: "success.50", borderColor: "success.200" }}>
-        <Stack spacing={1} alignItems="center" textAlign="center">
+        <Stack spacing={2} alignItems="center" textAlign="center">
           <CheckCircle color="success" sx={{ fontSize: 40 }} />
           <Typography variant="subtitle1" fontWeight={700}>
             {t("onboarding.setup_complete")}
@@ -149,6 +147,22 @@ export function OnboardingPanel({
           <Typography variant="body2" color="text.secondary">
             {t("onboarding.setup_complete_hint")}
           </Typography>
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="contained"
+              size="small"
+              onClick={() => {
+                // Trigger the agent to start the assignment conversation
+                onFormSubmitted("My onboarding is complete. I have helpers and chores set up. Help me assign chores to the right helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.");
+                onComplete();
+              }}
+            >
+              {t("onboarding.assign_chores_now")}
+            </Button>
+            <Button variant="outlined" size="small" onClick={onComplete}>
+              {t("onboarding.assign_later")}
+            </Button>
+          </Stack>
         </Stack>
       </Paper>
     );

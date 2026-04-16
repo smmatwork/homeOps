@@ -577,6 +577,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.finish_later": "Finish later",
     "onboarding.setup_complete": "Setup complete!",
     "onboarding.setup_complete_hint": "Your home is set up. You can always adjust things from the sidebar.",
+    "onboarding.assign_chores_now": "Assign chores to helpers",
+    "onboarding.assign_later": "I'll do this later",
 
     "coverage.title": "Coverage",
     "coverage.subtitle": "See what's covered by helpers, devices, and where the gaps are",
@@ -994,6 +996,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.finish_later": "बाद में पूरा करें",
     "onboarding.setup_complete": "सेटअप पूर्ण!",
     "onboarding.setup_complete_hint": "आपका घर सेट अप हो गया है। आप साइडबार से कभी भी बदलाव कर सकते हैं।",
+    "onboarding.assign_chores_now": "हेल्परों को कार्य सौंपें",
+    "onboarding.assign_later": "बाद में करूंगा",
 
     "nav.dashboard": "डैशबोर्ड",
     "nav.home_profile": "घर की प्रोफ़ाइल",
@@ -1760,6 +1764,8 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.finish_later": "ನಂತರ ಮುಗಿಸಿ",
     "onboarding.setup_complete": "ಸೆಟಪ್ ಪೂರ್ಣ!",
     "onboarding.setup_complete_hint": "ನಿಮ್ಮ ಮನೆ ಸೆಟಪ್ ಆಗಿದೆ. ಸೈಡ್‌ಬಾರ್‌ನಿಂದ ಯಾವಾಗ ಬೇಕಾದರೂ ಬದಲಾಯಿಸಬಹುದು.",
+    "onboarding.assign_chores_now": "ಸಹಾಯಕರಿಗೆ ಕೆಲಸ ನಿಯೋಜಿಸಿ",
+    "onboarding.assign_later": "ನಂತರ ಮಾಡುತ್ತೇನೆ",
 
     "nav.dashboard": "ಡ್ಯಾಶ್‌ಬೋರ್ಡ್",
     "nav.home_profile": "ಮನೆ ಪ್ರೊಫೈಲ್",
