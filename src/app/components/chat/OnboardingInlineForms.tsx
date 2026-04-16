@@ -336,31 +336,103 @@ function ChoreRecommendationsForm({ context, onSubmit, disabled }: { context?: R
 
 // ── Helper Form ──────────────────────────────────────────────────
 
+const HELPER_TYPE_SUGGESTIONS = ["Maid", "Cook", "Driver", "Gardener", "Nanny", "Watchman", "Cleaner", "Washer"];
+
+interface HelperDraft {
+  id: number;
+  name: string;
+  type: string | null;
+  phone: string | null;
+}
+
 function HelperFormInline({ onSubmit, disabled }: { onSubmit: (d: Record<string, unknown>) => void; disabled?: boolean }) {
   const { t } = useI18n();
+  const [helpers, setHelpers] = useState<HelperDraft[]>([]);
   const [name, setName] = useState("");
   const [type, setType] = useState("");
   const [phone, setPhone] = useState("");
 
+  const addHelper = () => {
+    if (!name.trim()) return;
+    setHelpers((prev) => [...prev, { id: Date.now(), name: name.trim(), type: type.trim() || null, phone: phone.trim() || null }]);
+    setName("");
+    setType("");
+    setPhone("");
+  };
+
+  const removeHelper = (id: number) => setHelpers((prev) => prev.filter((h) => h.id !== id));
+
   return (
     <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: "background.paper" }}>
-      <Typography variant="subtitle2" fontWeight={600} mb={1.5}>
+      <Typography variant="subtitle2" fontWeight={600} mb={0.5}>
         {t("onboarding.add_helper")}
       </Typography>
-      <Stack spacing={1.5}>
-        <TextField size="small" label={t("helpers.name_business")} value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
-        <Stack direction="row" spacing={1.5}>
-          <TextField size="small" label={t("helpers.role_service_type")} value={type} onChange={(e) => setType(e.target.value)} sx={{ flex: 1 }} placeholder="e.g. Maid, Cook" />
+      <Typography variant="caption" color="text.secondary" mb={1.5} display="block">
+        {t("onboarding.add_helpers_hint")}
+      </Typography>
+
+      {/* Added helpers list */}
+      {helpers.length > 0 && (
+        <Stack spacing={0.75} mb={2}>
+          {helpers.map((h) => (
+            <Chip
+              key={h.id}
+              label={`${h.name}${h.type ? ` (${h.type})` : ""}${h.phone ? ` · ${h.phone}` : ""}`}
+              onDelete={() => removeHelper(h.id)}
+              variant="outlined"
+            />
+          ))}
+        </Stack>
+      )}
+
+      {/* Add helper input row */}
+      <Stack spacing={1.5} mb={2}>
+        <TextField
+          size="small"
+          label={t("helpers.name_business")}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+          onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) { addHelper(); e.preventDefault(); } }}
+        />
+        <Stack direction="row" spacing={1}>
+          <Autocomplete
+            freeSolo
+            options={HELPER_TYPE_SUGGESTIONS}
+            value={type}
+            onInputChange={(_, v) => setType(v)}
+            sx={{ flex: 1 }}
+            renderInput={(params) => (
+              <TextField {...params} size="small" label={t("helpers.role_service_type")} placeholder="e.g. Maid, Cook" />
+            )}
+          />
           <TextField size="small" label={t("helpers.phone")} value={phone} onChange={(e) => setPhone(e.target.value)} sx={{ flex: 1 }} />
         </Stack>
-        <Stack direction="row" spacing={1}>
-          <Button variant="contained" size="small" disabled={!name.trim() || disabled} onClick={() => { onSubmit({ form_type: "helper_form", name: name.trim(), type: type.trim() || null, phone: phone.trim() || null }); setName(""); setType(""); setPhone(""); }}>
-            {t("helpers.add_helper")}
-          </Button>
-          <Button variant="text" size="small" disabled={disabled} onClick={() => onSubmit({ form_type: "helper_form", skipped: true })}>
-            {t("onboarding.skip_helpers")}
-          </Button>
-        </Stack>
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<Add />}
+          disabled={!name.trim()}
+          onClick={addHelper}
+          sx={{ alignSelf: "flex-start" }}
+        >
+          {t("onboarding.add_to_list")}
+        </Button>
+      </Stack>
+
+      {/* Save / Skip */}
+      <Stack direction="row" spacing={1}>
+        <Button
+          variant="contained"
+          size="small"
+          disabled={disabled || helpers.length === 0}
+          onClick={() => onSubmit({ form_type: "helper_form", helpers })}
+        >
+          {t("onboarding.save_helpers")} ({helpers.length})
+        </Button>
+        <Button variant="text" size="small" disabled={disabled} onClick={() => onSubmit({ form_type: "helper_form", skipped: true })}>
+          {t("onboarding.skip_helpers")}
+        </Button>
       </Stack>
     </Paper>
   );

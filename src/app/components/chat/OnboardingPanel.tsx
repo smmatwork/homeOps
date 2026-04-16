@@ -226,13 +226,18 @@ export function OnboardingPanel({
         if (data.skipped) {
           savedMsg = "Helper setup skipped.";
         } else if (householdId) {
-          await dbCall(supabase.from("helpers").insert({
-            household_id: householdId,
-            name: data.name,
-            type: data.type ?? null,
-            phone: data.phone ?? null,
-          }));
-          savedMsg = `Helper "${data.name}" added.`;
+          const helpers = Array.isArray(data.helpers) ? data.helpers : [];
+          if (helpers.length > 0) {
+            await dbCall(supabase.from("helpers").insert(
+              helpers.map((h: Record<string, unknown>) => ({
+                household_id: householdId,
+                name: h.name,
+                type: h.type ?? null,
+                phone: h.phone ?? null,
+              }))
+            ));
+          }
+          savedMsg = `${helpers.length} helper${helpers.length === 1 ? "" : "s"} added.`;
         }
       }
     } catch (e) {
