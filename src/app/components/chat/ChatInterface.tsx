@@ -780,7 +780,10 @@ function TypingIndicator() {
 // ─── Main Component ────────────────────────────────────────────────────────────
 export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean } = {}) {
   const navigate = useNavigate();
-  const isOnboarding = props.onboarding ?? false;
+  const [autoDetectedOnboarding, setAutoDetectedOnboarding] = useState<boolean | null>(null);
+  // null = still detecting, true = onboarding, false = normal
+  const onboardingResolved = props.onboarding ?? autoDetectedOnboarding;
+  const isOnboarding = onboardingResolved === true;
   const { t, lang: uiLang, setLang: setUiLang } = useI18n();
   const [input, setInput] = useState("");
   const [lang, setLang] = useState<SpeechLang>("en-IN");
@@ -828,6 +831,24 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
     refreshHouseholdId,
     bootstrapHousehold,
   } = useAuth();
+
+  // Auto-detect onboarding mode if prop isn't explicitly set
+  useEffect(() => {
+    if (props.onboarding !== undefined) return; // explicit prop takes priority
+    const hid = authedHouseholdId?.trim();
+    const uid = authedUser?.id;
+    if (!hid || !uid) return;
+    let cancelled = false;
+    void (async () => {
+      const { detectOnboardingState } = await import("../../services/onboardingState");
+      const state = await detectOnboardingState(hid, uid);
+      if (cancelled) return;
+      // If home profile exists but no chores → needs onboarding
+      const needsOnboarding = state.isComplete && (state.choreCount === 0 || !state.homeProfileExists);
+      setAutoDetectedOnboarding(needsOnboarding);
+    })();
+    return () => { cancelled = true; };
+  }, [props.onboarding, authedHouseholdId, authedUser?.id]);
 
   const [agentAccessToken, setAgentAccessToken] = useState("");
   const [agentHouseholdId, setAgentHouseholdId] = useState("");
@@ -4318,8 +4339,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             <div ref={messagesEndRef} />
           </Box>
 
-          {/* Quick commands — collapsible */}
-          {!isOnboarding && (
+          {/* Quick commands — collapsible, hidden during onboarding */}
+          {onboardingResolved === false && (
             <Box px={1} pb={0.5}>
               <Button
                 size="small"
@@ -4368,8 +4389,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
           />
         </Paper>
 
-        {/* Quick commands panel (desktop / non-embedded, hidden during onboarding) */}
-        {!props.embedded && !isOnboarding ? (
+        {/* Quick commands panel (desktop / non-embedded, hidden during onboarding or while detecting) */}
+        {!props.embedded && onboardingResolved === false ? (
           <Paper
             variant="outlined"
             sx={{
