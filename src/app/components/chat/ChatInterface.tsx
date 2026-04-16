@@ -57,7 +57,8 @@ import { buildThreadKey, useClarificationStore } from "../../stores/clarificatio
 import { useSarvamChat } from "../../hooks/useSarvamChat";
 import { ONBOARDING_SYSTEM_PROMPT } from "../../services/sarvamApi";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
-import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type ToolCall } from "../../services/agentActions";
+import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseInlineFormFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type InlineFormPayload, type ToolCall } from "../../services/agentActions";
+import { OnboardingInlineForm } from "./OnboardingInlineForms";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
 import { agentCreate, agentListHelpers, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
 import { useAuth } from "../../auth/AuthProvider";
@@ -1867,6 +1868,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const proposedAutomationSuggestions = parseAutomationSuggestionsFromAssistantText(latestAssistantText);
   const proposedToolCalls = parseToolCallsFromAssistantText(latestAssistantText);
   const proposedClarification = parseClarificationFromAssistantText(latestAssistantText);
+  const proposedInlineForm = isOnboarding ? parseInlineFormFromAssistantText(latestAssistantText) : null;
+  const [inlineFormDismissed, setInlineFormDismissed] = useState<string | null>(null);
 
   const proposedClarificationKey = useMemo(() => {
     if (!proposedClarification) return "";
@@ -4293,6 +4296,21 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             )}
 
             {showTypingDots && <TypingIndicator />}
+
+            {/* Inline onboarding form rendered inside chat */}
+            {proposedInlineForm && inlineFormDismissed !== proposedInlineForm.inline_form && (
+              <Box sx={{ maxWidth: 520, mx: "auto", my: 1 }}>
+                <OnboardingInlineForm
+                  formType={proposedInlineForm.inline_form}
+                  context={proposedInlineForm.context}
+                  disabled={isStreaming}
+                  onSubmit={(data) => {
+                    setInlineFormDismissed(proposedInlineForm.inline_form);
+                    void sendMessage(JSON.stringify({ form_response: data }), { silent: true });
+                  }}
+                />
+              </Box>
+            )}
 
             <div ref={messagesEndRef} />
           </Box>

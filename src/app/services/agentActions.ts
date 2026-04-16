@@ -312,3 +312,46 @@ export function parseAutomationSuggestionsFromAssistantText(text: string): Autom
   }
   return [];
 }
+
+// ── Inline forms (agent-driven onboarding) ────────────────────
+
+export type InlineFormType =
+  | "home_type_picker"
+  | "room_editor"
+  | "feature_selector"
+  | "household_details"
+  | "chore_recommendations"
+  | "helper_form";
+
+export interface InlineFormPayload {
+  inline_form: InlineFormType;
+  context?: Record<string, unknown>;
+}
+
+function isInlineFormPayload(v: unknown): v is InlineFormPayload {
+  return (
+    typeof v === "object" && v !== null &&
+    "inline_form" in v &&
+    typeof (v as Record<string, unknown>).inline_form === "string"
+  );
+}
+
+export function parseInlineFormFromAssistantText(text: string): InlineFormPayload | null {
+  const blocks = [...extractJsonCodeBlocks(text), ...extractFencedCodeBlocks(text)];
+  for (const block of blocks) {
+    const parsed = tryParseJsonObject(block);
+    if (isInlineFormPayload(parsed)) return parsed;
+  }
+
+  if (looksLikeJsonObject(text)) {
+    const parsed = tryParseJsonObject(text);
+    if (isInlineFormPayload(parsed)) return parsed;
+  }
+
+  const embedded = extractEmbeddedJsonObject(text);
+  if (embedded) {
+    const parsed = tryParseJsonObject(embedded);
+    if (isInlineFormPayload(parsed)) return parsed;
+  }
+  return null;
+}
