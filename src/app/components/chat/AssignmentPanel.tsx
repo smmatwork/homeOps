@@ -1,13 +1,12 @@
 /**
  * Assignment panel — reads helpers + unassigned chores from DB,
- * lets user review/edit helper roles and schedules, then shows
- * a one-click assignment preview based on the auto-assignment engine.
+ * auto-generates assignments, and shows an editable preview
+ * where the user can reassign chores between helpers.
  */
 
 import { useState, useEffect, useCallback } from "react";
 import {
   Alert,
-  Autocomplete,
   Box,
   Button,
   Card,
@@ -21,9 +20,8 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { Assignment, CheckCircle } from "@mui/icons-material";
+import { CheckCircle } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
-import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
 import {
@@ -39,39 +37,28 @@ interface AssignmentPanelProps {
   onComplete: (count: number) => void;
 }
 
-const HELPER_ROLES = ["Maid", "Cook", "Driver", "Gardener", "Nanny", "Watchman", "Cleaner", "Washer"];
-
-type Step = "review_helpers" | "preview_assignments" | "applying" | "done";
+interface HelperInfo {
+  id: string;
+  name: string;
+  type: string;
+}
 
 export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps) {
   const { householdId, accessToken } = useAuth();
-  const { t } = useI18n();
-  const [step, setStep] = useState<Step>("review_helpers");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Helper data (editable)
-  const [helpers, setHelpers] = useState<Array<{
-    id: string;
-    name: string;
-    type: string;
-    dailyCapacityMinutes: number;
-    hasSchedule: boolean;
-    scheduleSummary: string;
-  }>>([]);
-
-  // Chores data
-  const [chores, setChores] = useState<AssignableChore[]>([]);
-
-  // Assignment plan
+  const [helpers, setHelpers] = useState<HelperInfo[]>([]);
   const [plan, setPlan] = useState<AssignmentPlan | null>(null);
 
-  // Applying state
+  // Editable assignment map: choreId → helperId
+  const [assignments, setAssignments] = useState<Record<string, string | null>>({});
+
+  const [applying, setApplying] = useState(false);
   const [applyProgress, setApplyProgress] = useState(0);
   const [applyTotal, setApplyTotal] = useState(0);
+  const [done, setDone] = useState(false);
 
-  // Load helpers and chores from DB
-  const loadData = useCallback(async () => {
+  const loadAndPlan = useCallback(async () => {
     if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
@@ -85,31 +72,27 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         .neq("status", "completed"),
     ]);
 
-    setLoading(false);
+    if (helpersRes.error || choresRes.error) {
+      setError(helpersRes.error?.message ?? choresRes.error?.message ?? "Failed to load data");
+      setLoading(false);
+      return;
+    }
 
-    if (helpersRes.error) { setError(helpersRes.error.message); return; }
-    if (choresRes.error) { setError(choresRes.error.message); return; }
+    const helperList: HelperInfo[] = (helpersRes.data ?? []).map((r: Record<string, unknown>) => ({
+      id: String(r.id),
+      name: String(r.name),
+      type: String(r.type ?? "General"),
+    }));
 
-    const h = (helpersRes.data ?? []).map((r: Record<string, unknown>) => {
-      const meta = (r.metadata ?? {}) as Record<string, unknown>;
-      const schedule = meta.schedule as Record<string, unknown> | undefined;
-      const days = schedule?.days as Record<string, boolean> | undefined;
-      const hasSched = days ? Object.values(days).some(Boolean) : false;
-      const start = typeof schedule?.start === "string" ? schedule.start : "";
-      const end = typeof schedule?.end === "string" ? schedule.end : "";
-      const dayNames = days ? Object.entries(days).filter(([, v]) => v).map(([k]) => k.slice(0, 3)).join(", ") : "";
+    const assignableHelpers: AssignableHelper[] = (helpersRes.data ?? []).map((r: Record<string, unknown>) => ({
+      id: String(r.id),
+      name: String(r.name),
+      type: String(r.type ?? "") || null,
+      dailyCapacityMinutes: Number(r.daily_capacity_minutes ?? 120),
+      roleTags: inferRoleTags(String(r.type ?? "") || null),
+    }));
 
-      return {
-        id: String(r.id),
-        name: String(r.name),
-        type: String(r.type ?? ""),
-        dailyCapacityMinutes: Number(r.daily_capacity_minutes ?? 120),
-        hasSchedule: hasSched,
-        scheduleSummary: hasSched ? `${dayNames} ${start}-${end}` : "",
-      };
-    });
-
-    const c: AssignableChore[] = (choresRes.data ?? []).map((r: Record<string, unknown>) => {
+    const choreList: AssignableChore[] = (choresRes.data ?? []).map((r: Record<string, unknown>) => {
       const meta = (r.metadata ?? {}) as Record<string, unknown>;
       return {
         id: String(r.id),
@@ -121,238 +104,180 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
       };
     });
 
-    setHelpers(h);
-    setChores(c);
+    const result = buildAssignmentPlan(choreList, assignableHelpers);
+
+    // Build editable assignment map from the plan
+    const map: Record<string, string | null> = {};
+    for (const a of result.assignments) {
+      map[a.choreId] = a.helperId;
+    }
+
+    setHelpers(helperList);
+    setPlan(result);
+    setAssignments(map);
+    setLoading(false);
   }, [householdId]);
 
-  useEffect(() => { void loadData(); }, [loadData]);
+  useEffect(() => { void loadAndPlan(); }, [loadAndPlan]);
 
-  const updateHelperType = (id: string, type: string) => {
-    setHelpers((prev) => prev.map((h) => h.id === id ? { ...h, type } : h));
+  const reassignChore = (choreId: string, helperId: string | null) => {
+    setAssignments((prev) => ({ ...prev, [choreId]: helperId || null }));
   };
 
-  const updateHelperCapacity = (id: string, minutes: number) => {
-    setHelpers((prev) => prev.map((h) => h.id === id ? { ...h, dailyCapacityMinutes: minutes } : h));
-  };
-
-  const generatePlan = () => {
-    const assignableHelpers: AssignableHelper[] = helpers.map((h) => ({
-      id: h.id,
-      name: h.name,
-      type: h.type || null,
-      dailyCapacityMinutes: h.dailyCapacityMinutes,
-      roleTags: inferRoleTags(h.type || null),
-    }));
-    const result = buildAssignmentPlan(chores, assignableHelpers);
-    setPlan(result);
-    setStep("preview_assignments");
+  // Compute stats from current (possibly edited) assignments
+  const statsByHelper = (helpers: HelperInfo[], plan: AssignmentPlan) => {
+    const counts: Record<string, number> = {};
+    for (const [, hid] of Object.entries(assignments)) {
+      if (hid) counts[hid] = (counts[hid] ?? 0) + 1;
+    }
+    const unassignedCount = Object.values(assignments).filter((v) => !v).length;
+    return { counts, unassignedCount };
   };
 
   const applyAssignments = async () => {
-    if (!plan || !householdId || !accessToken) return;
-    const assigned = plan.assignments.filter((a) => a.helperId);
-    setStep("applying");
-    setApplyTotal(assigned.length);
+    if (!householdId || !accessToken) return;
+    const toAssign = Object.entries(assignments).filter(([, hid]) => hid);
+    setApplying(true);
+    setApplyTotal(toAssign.length);
     setApplyProgress(0);
     setError(null);
 
-    for (let i = 0; i < assigned.length; i++) {
-      const a = assigned[i];
+    for (let i = 0; i < toAssign.length; i++) {
+      const [choreId, helperId] = toAssign[i];
+      const chore = plan?.assignments.find((a) => a.choreId === choreId);
       const res = await executeToolCall({
         accessToken,
         householdId,
         scope: "household",
         toolCall: {
-          id: `assign_${a.choreId}_${Date.now()}`,
+          id: `assign_${choreId}_${Date.now()}`,
           tool: "db.update",
-          args: { table: "chores", id: a.choreId, patch: { helper_id: a.helperId } },
-          reason: `Assign "${a.choreTitle}" to ${a.helperName}`,
+          args: { table: "chores", id: choreId, patch: { helper_id: helperId } },
+          reason: `Assign "${chore?.choreTitle ?? choreId}" to helper`,
         },
       });
       if (!res.ok) {
-        setError(`Failed to assign "${a.choreTitle}": ${"error" in res ? res.error : "unknown"}`);
-        setStep("preview_assignments");
+        setError(`Failed: ${"error" in res ? res.error : "unknown"}`);
+        setApplying(false);
         return;
       }
       setApplyProgress(i + 1);
     }
 
-    setStep("done");
-    onComplete(assigned.length);
+    setApplying(false);
+    setDone(true);
+    onComplete(toAssign.length);
   };
 
   if (loading) {
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 560, mx: "auto" }}>
-        <Box display="flex" justifyContent="center" py={3}><CircularProgress size={24} /></Box>
+      <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 580, mx: "auto" }}>
+        <Box display="flex" justifyContent="center" py={2}><CircularProgress size={24} /></Box>
       </Paper>
     );
   }
 
+  if (done) {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 580, mx: "auto", bgcolor: "success.50", borderColor: "success.200" }}>
+        <Stack spacing={1} alignItems="center" py={1}>
+          <CheckCircle color="success" sx={{ fontSize: 36 }} />
+          <Typography variant="subtitle1" fontWeight={700}>{applyProgress} chore{applyProgress === 1 ? "" : "s"} assigned!</Typography>
+          <Button size="small" variant="contained" onClick={onDismiss}>Done</Button>
+        </Stack>
+      </Paper>
+    );
+  }
+
+  if (applying) {
+    return (
+      <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 580, mx: "auto" }}>
+        <Stack spacing={2} alignItems="center">
+          <CircularProgress size={28} />
+          <Typography variant="body2">Assigning... {applyProgress}/{applyTotal}</Typography>
+          <LinearProgress variant="determinate" value={applyTotal > 0 ? (applyProgress / applyTotal) * 100 : 0} sx={{ width: "100%", height: 5, borderRadius: 1 }} />
+        </Stack>
+      </Paper>
+    );
+  }
+
+  if (!plan) return null;
+
+  const stats = statsByHelper(helpers, plan);
+  const assignedCount = Object.values(assignments).filter(Boolean).length;
+
   return (
-    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 560, mx: "auto" }}>
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 580, mx: "auto" }}>
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
 
-      {/* Step 1: Review helper roles and capacity */}
-      {step === "review_helpers" && (
-        <Stack spacing={2}>
+      <Stack spacing={2}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Typography variant="subtitle1" fontWeight={700}>
-            Review helper roles
+            Assign chores to helpers
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Confirm each helper's role and daily capacity. This determines which chores get assigned to whom.
-          </Typography>
-
-          {helpers.map((h) => (
-            <Card key={h.id} variant="outlined">
-              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Stack spacing={1}>
-                  <Typography variant="subtitle2" fontWeight={700}>{h.name}</Typography>
-                  <Stack direction="row" spacing={1.5}>
-                    <Autocomplete
-                      freeSolo
-                      options={HELPER_ROLES}
-                      value={h.type}
-                      onInputChange={(_, v) => updateHelperType(h.id, v)}
-                      sx={{ flex: 1 }}
-                      renderInput={(params) => <TextField {...params} size="small" label="Role" />}
-                    />
-                    <TextField
-                      size="small"
-                      type="number"
-                      label="Daily capacity (min)"
-                      value={h.dailyCapacityMinutes}
-                      onChange={(e) => updateHelperCapacity(h.id, Number(e.target.value) || 120)}
-                      sx={{ width: 160 }}
-                      inputProps={{ min: 30, max: 600 }}
-                    />
-                  </Stack>
-                  {h.hasSchedule ? (
-                    <Typography variant="caption" color="success.main">Schedule: {h.scheduleSummary}</Typography>
-                  ) : (
-                    <Typography variant="caption" color="warning.main">No schedule set — you can configure this later in Helpers</Typography>
-                  )}
-                </Stack>
-              </CardContent>
-            </Card>
-          ))}
-
-          <Typography variant="body2" color="text.secondary">
-            {chores.length} unassigned chore{chores.length === 1 ? "" : "s"} to distribute
-          </Typography>
-
-          <Stack direction="row" spacing={1}>
-            <Button variant="contained" size="small" onClick={generatePlan} disabled={helpers.length === 0}>
-              Generate assignments
-            </Button>
-            <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>
-              Not now
-            </Button>
+          <Stack direction="row" spacing={0.5}>
+            {helpers.map((h) => (
+              <Chip key={h.id} size="small" label={`${h.name}: ${stats.counts[h.id] ?? 0}`} variant="outlined" />
+            ))}
+            {stats.unassignedCount > 0 && (
+              <Chip size="small" label={`Unassigned: ${stats.unassignedCount}`} color="warning" variant="outlined" />
+            )}
           </Stack>
         </Stack>
-      )}
 
-      {/* Step 2: Preview assignments */}
-      {step === "preview_assignments" && plan && (
-        <Stack spacing={2}>
-          <Typography variant="subtitle1" fontWeight={700}>
-            Assignment preview
-          </Typography>
-
-          {plan.byHelper.map(({ helper, chores: hChores, totalMinutes, capacityUsedPct }) => (
-            <Card key={helper.id} variant="outlined">
-              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Stack spacing={1}>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      {helper.name} ({helper.type || "General"})
-                    </Typography>
-                    <Chip
-                      size="small"
-                      label={`${capacityUsedPct}% capacity`}
-                      color={capacityUsedPct > 100 ? "error" : capacityUsedPct > 80 ? "warning" : "success"}
-                    />
+        {/* Chore list with per-chore helper dropdown */}
+        <Box sx={{ maxHeight: 400, overflowY: "auto" }}>
+          <Stack spacing={0.75}>
+            {plan.assignments.map((a) => (
+              <Stack
+                key={a.choreId}
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                sx={{ py: 0.5, px: 1, borderRadius: 1, bgcolor: assignments[a.choreId] ? "transparent" : "warning.50" }}
+              >
+                <Box flex={1} minWidth={0}>
+                  <Typography variant="body2" noWrap fontWeight={500}>{a.choreTitle}</Typography>
+                  <Stack direction="row" spacing={0.5}>
+                    {a.space && <Chip size="small" label={a.space} variant="outlined" sx={{ fontSize: 10, height: 18 }} />}
+                    <Chip size="small" label={a.cadence} variant="outlined" sx={{ fontSize: 10, height: 18 }} />
                   </Stack>
-                  <LinearProgress
-                    variant="determinate"
-                    value={Math.min(100, capacityUsedPct)}
-                    color={capacityUsedPct > 100 ? "error" : capacityUsedPct > 80 ? "warning" : "primary"}
-                    sx={{ height: 4, borderRadius: 1 }}
-                  />
-                  <Stack spacing={0.25}>
-                    {hChores.map((c) => (
-                      <Stack key={c.choreId} direction="row" spacing={1} alignItems="center">
-                        <Typography variant="caption" sx={{ flex: 1 }}>{c.choreTitle}</Typography>
-                        <Chip size="small" label={c.cadence} variant="outlined" sx={{ fontSize: 10 }} />
-                        <Typography variant="caption" color="text.secondary">~{c.estimatedMinutes}m</Typography>
-                      </Stack>
-                    ))}
-                  </Stack>
-                  <Typography variant="caption" color="text.secondary">
-                    {totalMinutes} min total · {hChores.length} chore{hChores.length === 1 ? "" : "s"}
-                  </Typography>
-                </Stack>
-              </CardContent>
-            </Card>
-          ))}
-
-          {plan.unassigned.length > 0 && (
-            <Card variant="outlined" sx={{ borderColor: "warning.main" }}>
-              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Typography variant="subtitle2" fontWeight={700} color="warning.main">
-                  Unassigned ({plan.unassigned.length})
-                </Typography>
-                <Stack spacing={0.25} mt={0.5}>
-                  {plan.unassigned.map((c) => (
-                    <Typography key={c.choreId} variant="caption" color="text.secondary">
-                      {c.choreTitle} — {c.reason}
-                    </Typography>
+                </Box>
+                <TextField
+                  select
+                  size="small"
+                  value={assignments[a.choreId] ?? ""}
+                  onChange={(e) => reassignChore(a.choreId, e.target.value || null)}
+                  sx={{ minWidth: 130 }}
+                  SelectProps={{ sx: { fontSize: 13 } }}
+                >
+                  <MenuItem value="" sx={{ fontSize: 13, color: "text.secondary" }}><em>Unassigned</em></MenuItem>
+                  {helpers.map((h) => (
+                    <MenuItem key={h.id} value={h.id} sx={{ fontSize: 13 }}>
+                      {h.name} ({h.type})
+                    </MenuItem>
                   ))}
-                </Stack>
-              </CardContent>
-            </Card>
-          )}
-
-          <Stack direction="row" spacing={1}>
-            <Button variant="contained" size="small" startIcon={<Assignment />} onClick={() => void applyAssignments()}>
-              Apply assignments ({plan.assignments.filter((a) => a.helperId).length})
-            </Button>
-            <Button variant="outlined" size="small" onClick={() => setStep("review_helpers")}>
-              Back to edit
-            </Button>
-            <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>
-              Not now
-            </Button>
+                </TextField>
+              </Stack>
+            ))}
           </Stack>
-        </Stack>
-      )}
+        </Box>
 
-      {/* Step 3: Applying */}
-      {step === "applying" && (
-        <Stack spacing={2} alignItems="center" py={2}>
-          <CircularProgress size={32} />
-          <Typography variant="body2">
-            Assigning chores... {applyProgress}/{applyTotal}
-          </Typography>
-          <LinearProgress variant="determinate" value={applyTotal > 0 ? (applyProgress / applyTotal) * 100 : 0} sx={{ width: "100%", height: 6, borderRadius: 1 }} />
-        </Stack>
-      )}
-
-      {/* Step 4: Done */}
-      {step === "done" && (
-        <Stack spacing={2} alignItems="center" py={2}>
-          <CheckCircle color="success" sx={{ fontSize: 40 }} />
-          <Typography variant="subtitle1" fontWeight={700}>
-            Assignments complete!
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {applyProgress} chore{applyProgress === 1 ? "" : "s"} assigned to helpers.
-          </Typography>
-          <Button variant="contained" size="small" onClick={onDismiss}>
-            Done
+        {/* Actions */}
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            disabled={assignedCount === 0}
+            onClick={() => void applyAssignments()}
+          >
+            Apply ({assignedCount})
+          </Button>
+          <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>
+            Not now
           </Button>
         </Stack>
-      )}
+      </Stack>
     </Paper>
   );
 }
