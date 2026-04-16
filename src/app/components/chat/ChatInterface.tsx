@@ -59,6 +59,7 @@ import { ONBOARDING_SYSTEM_PROMPT } from "../../services/sarvamApi";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
 import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type ToolCall } from "../../services/agentActions";
 import { OnboardingPanel } from "./OnboardingPanel";
+import { AssignmentPanel } from "./AssignmentPanel";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
 import { agentCreate, agentListHelpers, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
 import { useAuth } from "../../auth/AuthProvider";
@@ -886,6 +887,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const [coverageExperimentOpen, setCoverageExperimentOpen] = useState(false);
   const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState(true);
   const [assignmentNudgeDismissed, setAssignmentNudgeDismissed] = useState(false);
+  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
   const [unassignedChoreCount, setUnassignedChoreCount] = useState(0);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
@@ -3526,8 +3528,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             </DialogActions>
           </Dialog>
 
-          {/* Assignment nudge — fixed above messages, show when >5 unassigned chores */}
-          {unassignedChoreCount > 5 && !assignmentNudgeDismissed && (
+          {/* Assignment nudge — fixed above messages */}
+          {unassignedChoreCount > 5 && !assignmentNudgeDismissed && !assignmentPanelOpen && (
             <Paper variant="outlined" sx={{ px: 2, py: 1, mx: 2, mt: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
               <Stack direction="row" spacing={1.5} alignItems="center">
                 <Box flex={1}>
@@ -3535,10 +3537,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
                     {unassignedChoreCount} chore{unassignedChoreCount === 1 ? "" : "s"} not yet assigned to helpers
                   </Typography>
                 </Box>
-                <Button size="small" variant="contained" onClick={() => {
-                  setAssignmentNudgeDismissed(true);
-                  void sendMessage("Help me assign my unassigned chores to helpers based on their roles and schedules. Ask me about each helper's role and working hours, then suggest assignments.", { silent: true });
-                }}>
+                <Button size="small" variant="contained" onClick={() => setAssignmentPanelOpen(true)}>
                   Assign now
                 </Button>
                 <Button size="small" onClick={() => setAssignmentNudgeDismissed(true)} sx={{ minWidth: 0, color: "text.secondary" }}>
@@ -3546,6 +3545,20 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
                 </Button>
               </Stack>
             </Paper>
+          )}
+
+          {/* Assignment panel — full form for reviewing helpers and assigning chores */}
+          {assignmentPanelOpen && (
+            <Box sx={{ mx: 2, mt: 1 }}>
+              <AssignmentPanel
+                onDismiss={() => { setAssignmentPanelOpen(false); setAssignmentNudgeDismissed(true); }}
+                onComplete={(count) => {
+                  setAssignmentPanelOpen(false);
+                  setAssignmentNudgeDismissed(true);
+                  setUnassignedChoreCount((prev) => Math.max(0, prev - count));
+                }}
+              />
+            </Box>
           )}
 
           {/* Messages area */}
