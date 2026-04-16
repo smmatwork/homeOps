@@ -56,7 +56,7 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
   const [busyChoreId, setBusyChoreId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
 

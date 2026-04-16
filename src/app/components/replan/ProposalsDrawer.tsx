@@ -43,7 +43,7 @@ export function ProposalsDrawer({ open, onClose }: ProposalsDrawerProps) {
   const [dismissed, setDismissed] = useState<Record<string, boolean>>({});
 
   const loadProposals = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
 
