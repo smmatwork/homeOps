@@ -45,44 +45,97 @@ function buildFormContext(step: OnboardingStep, state: OnboardingState): Record<
   };
 
   if (step === "chore_recommendations") {
-    // Generate chore recommendations from room names
     const chores: Array<{ title: string; space: string; cadence: string }> = [];
     const rooms = state.roomNames;
 
     for (const room of rooms) {
       const lower = room.toLowerCase();
+
       if (/kitchen/.test(lower)) {
-        chores.push({ title: `${room} daily wipe-down`, space: room, cadence: "daily" });
-        chores.push({ title: `${room} deep clean`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — counter and stove wipe`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — sink and drain clean`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — sweep and mop floor`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — deep clean (cabinets, tiles, grout)`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — chimney and hob clean`, space: room, cadence: "biweekly" });
+        chores.push({ title: `${room} — fridge clean and organize`, space: room, cadence: "monthly" });
       } else if (/bath|toilet|washroom|powder/.test(lower)) {
-        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
-      } else if (/bedroom|master/.test(lower)) {
-        chores.push({ title: `Sweep and mop ${room}`, space: room, cadence: "daily" });
-        chores.push({ title: `Dust ${room}`, space: room, cadence: "weekly" });
-      } else if (/living|hall|drawing/.test(lower)) {
-        chores.push({ title: `Sweep and mop ${room}`, space: room, cadence: "daily" });
-        chores.push({ title: `Dust and vacuum ${room}`, space: room, cadence: "weekly" });
-      } else if (/balcony|terrace|deck/.test(lower)) {
-        chores.push({ title: `Sweep ${room}`, space: room, cadence: "weekly" });
-      } else if (/garden|lawn/.test(lower)) {
-        chores.push({ title: `Water plants in ${room}`, space: room, cadence: "daily" });
-        chores.push({ title: `Garden maintenance`, space: room, cadence: "monthly" });
-      } else if (/utility|laundry/.test(lower)) {
-        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — scrub toilet, sink, tiles`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — wipe mirror and glass surfaces`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — mop floor`, space: room, cadence: "daily" });
+      } else if (/bedroom|master|kids|guest|parent/.test(lower)) {
+        chores.push({ title: `${room} — bed making`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — sweep and mop floor`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — dust surfaces and furniture`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — wardrobe organize`, space: room, cadence: "monthly" });
+        chores.push({ title: `${room} — ceiling fan dusting`, space: room, cadence: "biweekly" });
+      } else if (/living|hall|drawing|foyer|formal/.test(lower)) {
+        chores.push({ title: `${room} — sweep and mop floor`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — dust furniture and shelves`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — glass surface and mirror clean`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — sofa and upholstery wipe`, space: room, cadence: "biweekly" });
+        chores.push({ title: `${room} — ceiling fan dusting`, space: room, cadence: "biweekly" });
+        chores.push({ title: `${room} — carpet/rug vacuum`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — cobweb removal`, space: room, cadence: "monthly" });
       } else if (/dining/.test(lower)) {
-        chores.push({ title: `Wipe ${room} table`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — wipe table and chairs`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — sweep and mop floor`, space: room, cadence: "daily" });
+      } else if (/balcony/.test(lower)) {
+        chores.push({ title: `${room} — sweep and mop`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — railing wipe and glass clean`, space: room, cadence: "biweekly" });
+        chores.push({ title: `${room} — water plants`, space: room, cadence: "daily" });
+      } else if (/terrace|deck/.test(lower)) {
+        chores.push({ title: `${room} — sweep`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — cobweb removal`, space: room, cadence: "monthly" });
+      } else if (/garden|lawn|courtyard/.test(lower)) {
+        chores.push({ title: `${room} — water plants`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — weed removal and trim`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — lawn mowing`, space: room, cadence: "biweekly" });
+      } else if (/utility|laundry/.test(lower)) {
+        chores.push({ title: `${room} — clean and organize`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — washing machine drum clean`, space: room, cadence: "monthly" });
       } else if (/pooja|prayer/.test(lower)) {
-        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
-      } else if (/garage|parking|car/.test(lower)) {
-        chores.push({ title: `Sweep ${room}`, space: room, cadence: "monthly" });
+        chores.push({ title: `${room} — clean and arrange`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — deep clean (brass, idols)`, space: room, cadence: "weekly" });
+      } else if (/garage|parking|car|porch/.test(lower)) {
+        chores.push({ title: `${room} — sweep`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — cobweb removal`, space: room, cadence: "monthly" });
+      } else if (/study|office|library/.test(lower)) {
+        chores.push({ title: `${room} — dust desk and shelves`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — sweep and mop floor`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — wipe electronics and screens`, space: room, cadence: "weekly" });
+      } else if (/pantry|store/.test(lower)) {
+        chores.push({ title: `${room} — organize and wipe shelves`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — check expiry dates`, space: room, cadence: "monthly" });
+      } else if (/stair/.test(lower)) {
+        chores.push({ title: `${room} — sweep and mop`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — railing and banister wipe`, space: room, cadence: "weekly" });
+      } else if (/verandah|patio/.test(lower)) {
+        chores.push({ title: `${room} — sweep and mop`, space: room, cadence: "daily" });
+        chores.push({ title: `${room} — furniture wipe`, space: room, cadence: "weekly" });
+      } else if (/theater|entertainment|gym/.test(lower)) {
+        chores.push({ title: `${room} — dust and wipe surfaces`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — vacuum floor`, space: room, cadence: "weekly" });
+      } else if (/maid|servant/.test(lower)) {
+        chores.push({ title: `${room} — clean`, space: room, cadence: "weekly" });
+      } else if (/lift|elevator/.test(lower)) {
+        chores.push({ title: `${room} — wipe walls and door`, space: room, cadence: "weekly" });
       } else {
-        chores.push({ title: `Clean ${room}`, space: room, cadence: "weekly" });
+        chores.push({ title: `${room} — sweep and mop`, space: room, cadence: "weekly" });
       }
     }
 
-    // Add general chores
-    chores.push({ title: "Trash disposal", space: "General", cadence: "daily" });
-    chores.push({ title: "Laundry", space: "General", cadence: "daily" });
+    // ── General household chores (not room-specific) ──────────
+    chores.push({ title: "Trash disposal and garbage segregation", space: "General", cadence: "daily" });
+    chores.push({ title: "Laundry — wash and dry", space: "General", cadence: "daily" });
+    chores.push({ title: "Iron and fold clothes", space: "General", cadence: "daily" });
+    chores.push({ title: "Dish washing", space: "Kitchen", cadence: "daily" });
+    chores.push({ title: "Shoe rack organize", space: "General", cadence: "weekly" });
+    chores.push({ title: "Dust all ceiling fans", space: "General", cadence: "biweekly" });
+    chores.push({ title: "Wipe switchboards and light fixtures", space: "General", cadence: "monthly" });
+    chores.push({ title: "Clean AC filters", space: "General", cadence: "monthly" });
+    chores.push({ title: "Window glass cleaning (all rooms)", space: "General", cadence: "monthly" });
+    chores.push({ title: "Cobweb check and removal (full house)", space: "General", cadence: "monthly" });
+    chores.push({ title: "Mattress air and flip", space: "General", cadence: "monthly" });
 
     return { ...base, chores };
   }

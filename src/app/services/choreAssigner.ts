@@ -77,18 +77,42 @@ function inferChoreCategory(title: string, space: string): string[] {
   const text = `${title} ${space}`.toLowerCase();
   const tags: string[] = [];
 
-  if (/kitchen|cook|wipe.*counter|dish|chimney/.test(text)) tags.push("kitchen", "cooking");
-  if (/clean|sweep|mop|dust|scrub/.test(text)) tags.push("cleaning", "sweeping", "mopping", "dusting");
-  if (/bath|toilet|washroom/.test(text)) tags.push("bathroom", "cleaning");
-  if (/bedroom|bed|master/.test(text)) tags.push("bedroom", "cleaning");
-  if (/living|hall|drawing/.test(text)) tags.push("living", "cleaning");
-  if (/garden|lawn|water.*plant|trim/.test(text)) tags.push("garden", "outdoor");
-  if (/balcony|terrace/.test(text)) tags.push("outdoor", "cleaning");
-  if (/garage|car|parking/.test(text)) tags.push("garage", "outdoor");
-  if (/laundry|wash|iron/.test(text)) tags.push("laundry");
-  if (/trash|garbage|disposal/.test(text)) tags.push("cleaning", "general");
-  if (/dining|table/.test(text)) tags.push("dining", "cleaning");
-  if (/pooja|prayer/.test(text)) tags.push("cleaning", "general");
+  // Kitchen
+  if (/kitchen|cook|wipe.*counter|dish|chimney|hob|stove|sink|fridge/.test(text)) tags.push("kitchen", "cooking");
+  // Cleaning (surface-level)
+  if (/clean|sweep|mop|dust|scrub|wipe/.test(text)) tags.push("cleaning", "sweeping", "mopping", "dusting");
+  // Glass and mirrors
+  if (/glass|mirror|window.*clean/.test(text)) tags.push("cleaning", "glass");
+  // Carpet and upholstery
+  if (/carpet|rug|vacuum|upholstery|sofa.*wipe|sofa.*clean/.test(text)) tags.push("cleaning", "carpet");
+  // Fans and fixtures
+  if (/fan.*dust|ceiling.*fan|light.*fixture|switchboard|cobweb/.test(text)) tags.push("cleaning", "fixtures");
+  // Bathrooms
+  if (/bath|toilet|washroom|powder/.test(text)) tags.push("bathroom", "cleaning");
+  // Bedrooms
+  if (/bedroom|bed.*mak|master|kids.*room|guest.*room|parent|wardrobe/.test(text)) tags.push("bedroom", "cleaning");
+  // Living areas
+  if (/living|hall|drawing|foyer|formal/.test(text)) tags.push("living", "cleaning");
+  // Garden and outdoor
+  if (/garden|lawn|water.*plant|trim|weed|courtyard/.test(text)) tags.push("garden", "outdoor");
+  if (/balcony|terrace|deck|verandah|patio/.test(text)) tags.push("outdoor", "cleaning");
+  if (/garage|car|parking|porch/.test(text)) tags.push("garage", "outdoor");
+  // Laundry
+  if (/laundry|wash.*cloth|iron|fold.*cloth|press/.test(text)) tags.push("laundry");
+  // General
+  if (/trash|garbage|disposal|segregat/.test(text)) tags.push("cleaning", "general");
+  if (/dining|table.*wipe/.test(text)) tags.push("dining", "cleaning");
+  if (/pooja|prayer|temple/.test(text)) tags.push("cleaning", "general");
+  // Study / office
+  if (/study|office|library|desk|screen|electronic/.test(text)) tags.push("cleaning", "general");
+  // Pantry / store
+  if (/pantry|store.*room|expiry|shelf|organize/.test(text)) tags.push("cleaning", "kitchen");
+  // Stairs
+  if (/stair|railing|banister/.test(text)) tags.push("cleaning", "general");
+  // AC / appliances
+  if (/ac.*filter|mattress|flip/.test(text)) tags.push("cleaning", "fixtures");
+  // Shoe rack
+  if (/shoe.*rack/.test(text)) tags.push("cleaning", "general");
 
   return tags.length > 0 ? tags : ["general"];
 }
