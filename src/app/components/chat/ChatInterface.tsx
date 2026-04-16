@@ -2970,7 +2970,9 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   }, [isStreaming, latestAssistantText]);
 
   // Orchestrator clarification handling: open the right UI when agent-service emits a structured clarification.
+  // Skip in onboarding mode — the inline forms handle all structured input.
   useEffect(() => {
+    if (isOnboarding) return;
     if (isStreaming) return;
     if (!proposedClarification) return;
 

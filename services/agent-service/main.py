@@ -3127,10 +3127,16 @@ async def chat_respond(
                 # by _take_pending_confirmation and we didn't resume it here).
                 _lf_span("orchestrator.confirmation.discarded", input={"count": len(pending.match_ids)})
 
-        helper_intent = _is_helper_intent(messages)
+        # Detect onboarding mode early — skip helper-agent routing entirely.
+        _early_onboarding = False
+        if messages and isinstance(messages[0], dict):
+            _sys0 = str(messages[0].get("content") or "")
+            _early_onboarding = "ONBOARDING FLOW" in _sys0
+
+        helper_intent = False if _early_onboarding else _is_helper_intent(messages)
         _lf_span(
             "orchestrator.intent_route",
-            input={"last_user": last_user[:600]},
+            input={"last_user": last_user[:600], "onboarding": _early_onboarding},
             output={"helper_intent": bool(helper_intent)},
         )
         try:
