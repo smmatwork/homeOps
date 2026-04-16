@@ -35,6 +35,7 @@ interface OnboardingPanelProps {
 
 /** Build step-specific context for the inline form. */
 function buildFormContext(step: OnboardingStep, state: OnboardingState): Record<string, unknown> {
+
   const base = {
     rooms: state.roomNames.map((n, i) => ({ id: `r_${i}`, template_name: n, display_name: n, floor: 0 })),
     floors: 1,
@@ -160,6 +161,7 @@ export function OnboardingPanel({
 
   const handleSubmit = async (data: Record<string, unknown>) => {
     const formType = String(data.form_type ?? "");
+
     let savedMsg = "";
     setSaving(true);
     setSaveError(null);
@@ -210,6 +212,7 @@ export function OnboardingPanel({
             await dbCall(supabase.from("chores").insert(
               chores.map((c: Record<string, unknown>) => ({
                 household_id: householdId,
+                user_id: userId,
                 title: c.title,
                 status: "pending",
                 priority: 1,

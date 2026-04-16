@@ -272,6 +272,7 @@ const CADENCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
 
 function ChoreRecommendationsForm({ context, onSubmit, disabled }: { context?: Record<string, unknown>; onSubmit: (d: Record<string, unknown>) => void; disabled?: boolean }) {
   const { t } = useI18n();
+
   const initial = Array.isArray(context?.chores) ? context.chores as Array<{ title: string; space?: string; cadence?: string }> : [];
   const [chores, setChores] = useState(initial.map((c, i) => ({ ...c, id: i, selected: true })));
 
