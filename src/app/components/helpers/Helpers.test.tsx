@@ -24,11 +24,14 @@ function createThenableBuilder(result: SupabaseResult) {
   const builder: any = {
     select: () => builder,
     eq: () => builder,
+    in: () => builder,
     is: () => builder,
     gte: () => builder,
     lt: () => builder,
+    neq: () => builder,
     order: () => builder,
     limit: () => builder,
+    maybeSingle: () => builder,
     then: (resolve: any, _reject?: any) => Promise.resolve(result).then(resolve),
   };
   return builder;
@@ -115,7 +118,7 @@ describe("Helpers", () => {
     const user = userEvent.setup();
     render(<Helpers />);
 
-    expect(await screen.findByText("Alice")).toBeInTheDocument();
+    expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: "Feedback" }));
 
@@ -136,7 +139,7 @@ describe("Helpers", () => {
     const user = userEvent.setup();
     render(<Helpers />);
 
-    expect(await screen.findByText("Alice")).toBeInTheDocument();
+    expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: "Rewards" }));
 

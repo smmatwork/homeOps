@@ -411,3 +411,213 @@ export async function voidCompensationLedgerEntry(params: ExecParams & {
     },
   });
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Phase 1.1b — Stage 2 magic-link web flow (helper-facing)
+//
+// These two functions hit unauthenticated edge routes — the URL
+// token IS the auth. There is NO bearer token, no household context,
+// no user JWT. That's intentional: helpers don't have accounts.
+// ────────────────────────────────────────────────────────────────────
+
+const edgeBaseUrl = (): string =>
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "http://127.0.0.1:54321";
+
+export type HelperInviteStatus =
+  | "active"
+  | "expired"
+  | "revoked"
+  | "already_completed"
+  | "not_found";
+
+export type HelperInviteInfo = {
+  status: HelperInviteStatus;
+  helperId: string;
+  helperName: string;
+  householdId: string;
+  channelChain: string[];
+  preferredLanguage: string | null;
+  expiresAt: string | null;
+};
+
+export type HelperConsentPayload = {
+  id_verification?: boolean;
+  vision_capture?: boolean;
+  multi_household_coord?: boolean;
+  call_recording?: boolean;
+  marketing_outreach?: boolean;
+};
+
+export type CompleteStage2Payload = {
+  preferredLanguage?: string;
+  profilePhotoUrl?: string;
+  preferredChannel?: string;
+  consents: HelperConsentPayload;
+};
+
+/**
+ * Fetch a Stage 2 invite by token. Unauthenticated — the URL token
+ * is the auth. Returns the helper's own basics (name, household, chain)
+ * along with a status the caller can switch on.
+ */
+export async function fetchHelperInvite(
+  token: string,
+): Promise<
+  | { ok: true; invite: HelperInviteInfo }
+  | { ok: false; status: HelperInviteStatus; error: string }
+> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { ok: false, status: "not_found", error: "Missing token" };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(
+      `${edgeBaseUrl()}/functions/v1/server/h/${encodeURIComponent(cleanToken)}`,
+      { method: "GET", signal: controller.signal },
+    );
+    clearTimeout(timer);
+
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+
+    if (res.status === 404) {
+      return { ok: false, status: "not_found", error: "Invite not found" };
+    }
+    if (!res.ok || !body || typeof body !== "object") {
+      return {
+        ok: false,
+        status: "not_found",
+        error: `Edge returned ${res.status}`,
+      };
+    }
+
+    const obj = body as Record<string, unknown>;
+    const status = String(obj.status || "not_found") as HelperInviteStatus;
+
+    if (status !== "active") {
+      return { ok: false, status, error: `Invite is ${status}` };
+    }
+
+    return {
+      ok: true,
+      invite: {
+        status,
+        helperId: String(obj.helper_id || ""),
+        helperName: String(obj.helper_name || ""),
+        householdId: String(obj.household_id || ""),
+        channelChain: Array.isArray(obj.channel_chain) ? (obj.channel_chain as string[]) : [],
+        preferredLanguage:
+          typeof obj.preferred_language === "string" ? obj.preferred_language : null,
+        expiresAt: typeof obj.expires_at === "string" ? obj.expires_at : null,
+      },
+    };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      return {
+        ok: false,
+        status: "not_found",
+        error: "Request timed out after 10s",
+      };
+    }
+    return {
+      ok: false,
+      status: "not_found",
+      error: e instanceof Error ? e.message : "Unknown network error",
+    };
+  }
+}
+
+/**
+ * Submit the Stage 2 consent payload. Unauthenticated.
+ */
+export async function completeHelperInvite(
+  token: string,
+  payload: CompleteStage2Payload,
+): Promise<
+  | { ok: true; status: "completed"; helperId: string; householdId: string }
+  | { ok: false; status: HelperInviteStatus | "invalid_payload"; error: string }
+> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { ok: false, status: "not_found", error: "Missing token" };
+  }
+
+  // Normalize payload to the snake_case shape the RPC expects.
+  const body: Record<string, unknown> = {
+    consents: payload.consents ?? {},
+  };
+  if (payload.preferredLanguage !== undefined) {
+    body.preferred_language = payload.preferredLanguage;
+  }
+  if (payload.profilePhotoUrl !== undefined) {
+    body.profile_photo_url = payload.profilePhotoUrl;
+  }
+  if (payload.preferredChannel !== undefined) {
+    body.preferred_channel = payload.preferredChannel;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(
+      `${edgeBaseUrl()}/functions/v1/server/h/${encodeURIComponent(cleanToken)}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timer);
+
+    const text = await res.text();
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+
+    const obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    const status = String(obj.status || "not_found");
+
+    if (status === "completed") {
+      return {
+        ok: true,
+        status: "completed",
+        helperId: String(obj.helper_id || ""),
+        householdId: String(obj.household_id || ""),
+      };
+    }
+
+    return {
+      ok: false,
+      status: status as HelperInviteStatus | "invalid_payload",
+      error:
+        typeof obj.error === "string"
+          ? obj.error
+          : `Edge returned ${res.status}: ${status}`,
+    };
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      return {
+        ok: false,
+        status: "not_found",
+        error: "Request timed out after 10s",
+      };
+    }
+    return {
+      ok: false,
+      status: "not_found",
+      error: e instanceof Error ? e.message : "Unknown network error",
+    };
+  }
+}

@@ -109,7 +109,7 @@ export function Signup() {
     }
 
     setBusy(false);
-    navigate("/", { replace: true });
+    navigate("/onboarding", { replace: true });
   };
 
   return (

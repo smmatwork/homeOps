@@ -27,6 +27,7 @@ The owner should not have to *remember* anything that the system can sense or
 infer. The agent's job is to surface the right action at the right moment,
 not to be queried. This can be measured in terms of decisions taken.
 
+
 **In-scope levers:**
 - Auto-creation of chores from sensed state (vision, helper check-ins,
   consumable depletion, schedule cadences).

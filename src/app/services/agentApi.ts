@@ -62,6 +62,15 @@ const correlationHeaders = (): Record<string, string> => {
   return headers;
 };
 
+/** Chat state calls the Edge Function + DB; cold starts often exceed 15s. */
+const CHAT_STATE_FETCH_TIMEOUT_MS = 60_000;
+
+function isAbortError(e: unknown): boolean {
+  if (e instanceof DOMException && e.name === "AbortError") return true;
+  if (e instanceof Error && e.name === "AbortError") return true;
+  return false;
+}
+
 const applyIndianChoreLocalization = (text: unknown): unknown => {
   if (typeof text !== "string") return text;
   const s = text;
@@ -430,7 +439,7 @@ export async function getChatState(params: {
 
     const anon = anonKey();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), CHAT_STATE_FETCH_TIMEOUT_MS);
 
     const res = await fetch(url.toString(), {
       method: "GET",
@@ -438,6 +447,7 @@ export async function getChatState(params: {
         apikey: anon,
         Authorization: `Bearer ${anon}`,
         "x-user-authorization": `Bearer ${accessToken}`,
+        ...correlationHeaders(),
       },
       signal: controller.signal,
     });
@@ -477,8 +487,12 @@ export async function getChatState(params: {
     setClientConversationId(conversationId);
     return { ok: true, conversationId, summary, messages };
   } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") {
-      return { ok: false, error: "Request timed out contacting the server (15s). Is Supabase running locally?" };
+    if (isAbortError(e)) {
+      const secs = CHAT_STATE_FETCH_TIMEOUT_MS / 1000;
+      return {
+        ok: false,
+        error: `Request timed out after ${secs}s loading chat history. Check your network and VITE_SUPABASE_URL. For local dev, run Supabase (e.g. supabase start) and ensure Edge Functions are served; hosted projects need the "server" function deployed.`,
+      };
     }
     return { ok: false, error: e instanceof Error ? e.message : "Unknown network error" };
   }

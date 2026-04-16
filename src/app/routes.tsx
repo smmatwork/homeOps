@@ -18,6 +18,11 @@ const SupportPanel = lazy(() => import("./components/support/SupportPanel").then
 const AcceptInvite = lazy(() => import("./components/invites/AcceptInvite").then(m => ({ default: m.AcceptInvite })));
 const Signals = lazy(() => import("./components/signals/Signals").then(m => ({ default: m.Signals })));
 const TestsDashboard = lazy(() => import("./components/tests/TestsDashboard").then(m => ({ default: m.TestsDashboard })));
+const OnboardingFlow = lazy(() => import("./components/onboarding/OnboardingFlow").then(m => ({ default: m.OnboardingFlow })));
+const CoveragePage = lazy(() => import("./components/coverage/CoveragePage").then(m => ({ default: m.CoveragePage })));
+const EventsPage = lazy(() => import("./components/events/EventsPage").then(m => ({ default: m.EventsPage })));
+const HomeProfilePage = lazy(() => import("./components/home-profile/HomeProfilePage").then(m => ({ default: m.HomeProfilePage })));
+const HelperMagicLinkPage = lazy(() => import("./components/helpers/HelperMagicLinkPage").then(m => ({ default: m.HelperMagicLinkPage })));
 
 // Auth components - keep these eagerly loaded as they're needed immediately
 import { Login } from "./components/auth/Login";
@@ -75,6 +80,30 @@ export const router = createBrowserRouter([
         Component: () => (
           <LazyWrapper>
             <Chores />
+          </LazyWrapper>
+        )
+      },
+      {
+        path: "home-profile",
+        Component: () => (
+          <LazyWrapper>
+            <HomeProfilePage />
+          </LazyWrapper>
+        )
+      },
+      {
+        path: "coverage",
+        Component: () => (
+          <LazyWrapper>
+            <CoveragePage />
+          </LazyWrapper>
+        )
+      },
+      {
+        path: "events",
+        Component: () => (
+          <LazyWrapper>
+            <EventsPage />
           </LazyWrapper>
         )
       },
@@ -169,12 +198,32 @@ export const router = createBrowserRouter([
     ],
   },
   {
+    path: "/onboarding",
+    Component: () => (
+      <RequireAuth>
+        <LazyWrapper>
+          <OnboardingFlow />
+        </LazyWrapper>
+      </RequireAuth>
+    ),
+  },
+  {
     path: "/login",
     Component: Login,
   },
   {
     path: "/signup",
     Component: Signup,
+  },
+  {
+    // Unauthenticated helper Stage 2 magic-link page. The token in
+    // the URL is the only auth — no RequireAuth wrapper.
+    path: "/h/:token",
+    Component: () => (
+      <LazyWrapper>
+        <HelperMagicLinkPage />
+      </LazyWrapper>
+    ),
   },
   {
     path: "*",

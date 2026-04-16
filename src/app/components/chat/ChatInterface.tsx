@@ -15,7 +15,6 @@ import {
   Divider,
   Drawer,
   FormControl,
-  FormControlLabel,
   IconButton,
   InputLabel,
   List,
@@ -23,12 +22,8 @@ import {
   ListItemButton,
   ListItemText,
   Stack,
-  Step,
-  StepLabel,
-  Stepper,
   Snackbar,
   Select,
-  Switch,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
@@ -50,6 +45,8 @@ import {
   Bolt,
   ExpandMore,
   ExpandLess,
+  Home,
+  BarChart,
 } from "@mui/icons-material";
 import { keyframes } from "@emotion/react";
 import { MessageBubble } from "./MessageBubble";
@@ -66,17 +63,18 @@ import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
 import { CoverageExperimentEntry } from "../../experiments/coverage/CoverageExperimentEntry";
+import { useHomeProfileWizard } from "../home-profile/useHomeProfileWizard";
+import { HomeProfileWizard } from "../home-profile/HomeProfileWizard";
 import { useNavigate } from "react-router";
 import Sanscript from "@sanskrit-coders/sanscript";
+import {
+  HOME_PROFILE_TEMPLATES,
+  normalizeSpacesToRooms,
+} from "../../config/homeProfileTemplates";
 
 type HelperOption = { id: string; name: string; type: string | null; phone: string | null };
 
 type ChoreDraft = {
-  id: string;
-  action: AgentCreateAction;
-};
-
-type HomeProfileDraft = {
   id: string;
   action: AgentCreateAction;
 };
@@ -780,7 +778,7 @@ function TypingIndicator() {
 // ─── Main Component ────────────────────────────────────────────────────────────
 export function ChatInterface(props: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
-  const { t, setLang: setUiLang } = useI18n();
+  const { t, lang: uiLang, setLang: setUiLang } = useI18n();
   const [input, setInput] = useState("");
   const [lang, setLang] = useState<SpeechLang>("en-IN");
   const [sttError, setSttError] = useState<string | null>(null);
@@ -984,15 +982,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   const [choreDrafts, setChoreDrafts] = useState<ChoreDraft[]>([]);
   const [selectedChoreDraftIds, setSelectedChoreDraftIds] = useState<Record<string, boolean>>({});
   const [editChoreDraftId, setEditChoreDraftId] = useState<string | null>(null);
-  const [homeProfileDraft, setHomeProfileDraft] = useState<HomeProfileDraft | null>(null);
-  const [homeProfileBusy, setHomeProfileBusy] = useState(false);
-  const [homeProfileError, setHomeProfileError] = useState<string | null>(null);
-  const [homeProfileWizardOpen, setHomeProfileWizardOpen] = useState(false);
-  const [homeProfileWizardStep, setHomeProfileWizardStep] = useState(0);
-  const [homeProfileNewSpace, setHomeProfileNewSpace] = useState("");
-  const [homeProfileMode, setHomeProfileMode] = useState<"view" | "edit">("edit");
-  const [homeProfileExists, setHomeProfileExists] = useState(false);
-
   const [accountAnchorEl, setAccountAnchorEl] = useState<HTMLElement | null>(null);
   const accountMenuOpen = Boolean(accountAnchorEl);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
@@ -1073,129 +1062,11 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     setFeedbackRating(5);
   }, [authedUser, authedHouseholdId, feedbackMessage, feedbackRating]);
 
-  const getBaselineSpaces = useCallback((homeType: string, bhk: number) => {
-    const ht = homeType.trim().toLowerCase();
-    const n = Number.isFinite(bhk) && bhk > 0 ? Math.floor(bhk) : 2;
-    const base: string[] = ["living room", "dining area", "work area", "study", "powder room", "utility room", "store room", "pantry", "pooja room", "balcony", "terrace", "deck", "home office", "gym", "basement", "lift", "battery room", "solar storage", "servant room", "laundry", "garden", "parking", "car porch"];
-    for (let i = 1; i <= n; i += 1) base.push(`bedroom ${i}`);
-    if (ht === "villa") base.push("stairs");
-    return base;
-  }, []);
-
-  const buildMasterSpaceOptions = useCallback((params: {
-    homeType: string;
-    bhk: number;
-    numBathrooms: number | null;
-    balconyCount: number | null;
-    terraceCount: number | null;
-  }): string[] => {
-    const { homeType, bhk, numBathrooms, balconyCount, terraceCount } = params;
-    const out = new Set<string>();
-    const baseline = getBaselineSpaces(homeType, bhk);
-    baseline.forEach((s) => out.add(s));
-
-    const nb = typeof numBathrooms === "number" && Number.isFinite(numBathrooms) ? Math.max(0, Math.floor(numBathrooms)) : 0;
-    if (nb > 0) {
-      out.add("master bathroom");
-      out.add("common bathroom");
-      out.add("guest bathroom");
-      out.add("attached bathroom");
-      for (let i = 3; i <= nb; i += 1) out.add(`bathroom ${i}`);
-    }
-
-    const bc = typeof balconyCount === "number" && Number.isFinite(balconyCount) ? Math.max(0, Math.floor(balconyCount)) : 0;
-    if (bc > 1) {
-      out.delete("balcony");
-      for (let i = 1; i <= bc; i += 1) out.add(`balcony ${i}`);
-    }
-
-    const tc = typeof terraceCount === "number" && Number.isFinite(terraceCount) ? Math.max(0, Math.floor(terraceCount)) : 0;
-    if (tc > 1) {
-      out.delete("terrace");
-      for (let i = 1; i <= tc; i += 1) out.add(`terrace ${i}`);
-    }
-
-    return Array.from(out).sort((a, b) => a.localeCompare(b));
-  }, [getBaselineSpaces]);
-
   const getAgentSetup = useCallback(() => {
     const token = authedAccessToken.trim() || agentAccessToken.trim();
     const householdId = authedHouseholdId.trim() || agentHouseholdId.trim();
     return { token, householdId };
   }, [authedAccessToken, agentAccessToken, authedHouseholdId, agentHouseholdId]);
-
-  const reviewHomeProfile = useCallback(async () => {
-    setHomeProfileError(null);
-    const { householdId } = getAgentSetup();
-    if (!householdId) {
-      setHomeProfileError("Missing household_id. Click Agent Setup to confirm your home is linked.");
-      setAgentDialogOpen(true);
-      return;
-    }
-
-    setHomeProfileBusy(true);
-    let { data, error } = await supabase
-      .from("home_profiles")
-      .select("home_type, bhk, square_feet, floors, spaces, space_counts, has_balcony, has_pets, has_kids, flooring_type, num_bathrooms")
-      .eq("household_id", householdId)
-      .maybeSingle();
-
-    // Backward-compatible fallback if migrations haven't been applied yet.
-    const msg = (error as any)?.message ? String((error as any).message) : "";
-    if (error && /schema cache/i.test(msg) && /(floors|square_feet|spaces|space_counts)/i.test(msg)) {
-      const legacy = await supabase
-        .from("home_profiles")
-        .select("home_type, bhk, has_balcony, has_pets, has_kids, flooring_type, num_bathrooms")
-        .eq("household_id", householdId)
-        .maybeSingle();
-      data = legacy.data as any;
-      error = legacy.error as any;
-      if (!legacy.error) {
-        setHomeProfileError(
-          "Your database is missing the latest home profile fields (floors/square feet/spaces). Apply the latest Supabase migration to enable these fields.",
-        );
-      }
-    }
-    setHomeProfileBusy(false);
-
-    if (error) {
-      setHomeProfileError("We couldn't load your home profile right now. Please try again.");
-      return;
-    }
-
-    if (!data) {
-      setHomeProfileExists(false);
-      setHomeProfileError("You don't have a home profile yet. Click 'Create home profile' to set it up.");
-      return;
-    }
-
-    setHomeProfileExists(true);
-
-    setHomeProfileDraft({
-      id: `${Date.now()}`,
-      action: {
-        type: "create",
-        table: "home_profiles",
-        record: {
-          home_type: data?.home_type ?? "apartment",
-          bhk: typeof data?.bhk === "number" ? data.bhk : 2,
-          square_feet: typeof (data as any)?.square_feet === "number" ? (data as any).square_feet : null,
-          floors: typeof (data as any)?.floors === "number" ? (data as any).floors : null,
-          spaces: Array.isArray((data as any)?.spaces) ? (data as any).spaces : [],
-          space_counts: (data as any)?.space_counts && typeof (data as any).space_counts === "object" ? (data as any).space_counts : {},
-          has_balcony: typeof data?.has_balcony === "boolean" ? data.has_balcony : false,
-          has_pets: typeof data?.has_pets === "boolean" ? data.has_pets : false,
-          has_kids: typeof data?.has_kids === "boolean" ? data.has_kids : false,
-          flooring_type: data?.flooring_type ?? null,
-          num_bathrooms: typeof data?.num_bathrooms === "number" ? data.num_bathrooms : null,
-        },
-        reason: "Review and update home profile",
-      },
-    });
-    setHomeProfileMode("view");
-    setHomeProfileWizardStep(0);
-    setHomeProfileWizardOpen(true);
-  }, [getAgentSetup]);
 
   const ensureHomeSpacesForValidation = useCallback(
     async (householdId: string): Promise<string[]> => {
@@ -1274,32 +1145,37 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     [],
   );
 
-  const refreshHomeProfileExists = useCallback(async () => {
-    const { householdId } = getAgentSetup();
-    if (!householdId) {
-      setHomeProfileExists(false);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("home_profiles")
-      .select("household_id")
-      .eq("household_id", householdId)
-      .limit(1);
-
-    if (error) {
-      return;
-    }
-
-    setHomeProfileExists(Array.isArray(data) && data.length > 0);
-  }, [getAgentSetup]);
-
   function withHouseholdId(tc: ToolCall, householdId: string): ToolCall {
     const args = (tc.args ?? {}) as Record<string, unknown>;
     return { ...tc, args: { ...args, household_id: householdId } };
   }
 
   const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat();
+
+  const homeProfileWizardHook = useHomeProfileWizard({
+    getAgentSetup: () => {
+      const token = authedAccessToken.trim() || agentAccessToken.trim();
+      const householdId = authedHouseholdId.trim() || agentHouseholdId.trim();
+      return { token, householdId };
+    },
+    memoryScope,
+    appendAssistantMessage,
+    setToolBusy,
+    setToolError,
+    setToolSuccess,
+  });
+  const {
+    homeProfileDraft, setHomeProfileDraft,
+    homeProfileBusy, homeProfileError,
+    homeProfileWizardOpen, setHomeProfileWizardOpen,
+    homeProfileWizardStep, setHomeProfileWizardStep,
+    homeProfileNewSpace, setHomeProfileNewSpace,
+    homeProfileMode, setHomeProfileMode,
+    homeProfileExists,
+    reviewHomeProfile, refreshHomeProfileExists,
+    saveHomeProfileDraft, openHomeProfileWizard, closeHomeProfileWizard,
+    updateHomeProfileRecord, goNextHomeProfileStep, goBackHomeProfileStep,
+  } = homeProfileWizardHook;
 
   const latestUserText = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1794,11 +1670,8 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
   const approveClientChore = useCallback(async () => {
     try {
-      console.log("approveClientChore clicked", clientChoreSession.toolCall);
       setToolError(null);
       setToolSuccess(null);
-      setToolSuccess("Approve clicked (client chore)");
-      appendAssistantMessage("Approve clicked (client chore)");
 
       if (!clientChoreSession.toolCall) return;
       dispatchClientChore({ type: "EXECUTING" });
@@ -1849,11 +1722,11 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         setDeleteChoresFlowSynced({ phase: "idle" });
         return;
       }
-      // Keep the flow deterministic: re-ask for a valid scope.
-      appendUserMessage(trimmed);
-      setInput("");
-      appendAssistantMessage("Please reply with one of: overdue, completed, all, or specific ones.");
-      return;
+      // If the message doesn’t look like a delete scope response at all,
+      // reset the stale delete flow and let the message proceed normally
+      // (e.g., the user changed their mind and is asking something else).
+      setDeleteChoresFlowSynced({ phase: "idle" });
+      // Fall through to normal message handling below.
     }
 
     if (deleteChoresFlow.phase === "awaiting_confirm") {
@@ -1896,6 +1769,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       const t = (text || "").trim().toLowerCase();
       if (!t) return false;
       if (!/\bchore(s)?\b/.test(t)) return false;
+      // Only match when "delete/remove" refers to the chores themselves,
+      // not to a field within a chore (e.g., "remove the description" or
+      // "remove from the title" should NOT trigger the delete flow).
+      const isFieldEdit = /\b(description|title|name|text|wording)\b/.test(t)
+        || /\b(change|update|edit|modify|replace|instead|mention)\b/.test(t);
+      if (isFieldEdit) return false;
       if (/\b(delete|remove|clear|erase)\b/.test(t)) return true;
       if (/\bmark\s+as\s+deleted\b/.test(t)) return true;
       return false;
@@ -2366,157 +2245,32 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const latestRecord = (latest.record ?? {}) as Record<string, unknown>;
     const nextHomeType = typeof latestRecord.home_type === "string" ? latestRecord.home_type : "apartment";
     const nextBhk = asNumberOrNull(latestRecord.bhk) ?? 2;
-    const latestSpaces = Array.isArray(latestRecord.spaces)
-      ? (latestRecord.spaces as unknown[]).map(String).filter(Boolean)
-      : [];
-    const baseline = getBaselineSpaces(nextHomeType, nextBhk);
-    const mergedSpaces = latestSpaces.length > 0 ? latestSpaces : baseline;
+    // Find the best matching template, fall back to 2BHK apartment.
+    const matchedTemplate =
+      HOME_PROFILE_TEMPLATES.find((t) => t.home_type === nextHomeType && t.bhk === nextBhk) ??
+      HOME_PROFILE_TEMPLATES.find((t) => t.home_type === nextHomeType) ??
+      HOME_PROFILE_TEMPLATES.find((t) => t.key === "2bhk_apartment")!;
+    const rooms = normalizeSpacesToRooms(latestRecord.spaces).length > 0
+      ? normalizeSpacesToRooms(latestRecord.spaces)
+      : matchedTemplate.rooms;
     setHomeProfileDraft({
       id: `${Date.now()}`,
       action: {
         ...latest,
-        record: { ...latest.record, spaces: mergedSpaces },
-      },
-    });
-    setHomeProfileMode("edit");
-    setHomeProfileWizardStep(0);
-    setHomeProfileWizardOpen(true);
-  }, [latestAssistantText, isStreaming, getBaselineSpaces, homeProfileExists, reviewHomeProfile]);
-
-  const saveHomeProfileDraft = useCallback(async () => {
-    if (!homeProfileDraft) return;
-    setToolError(null);
-    setToolSuccess(null);
-    setHomeProfileError(null);
-    const { token, householdId } = getAgentSetup();
-    if (!token || !householdId) {
-      setToolError("Missing access_token or household_id. Click Agent Setup to confirm your session token + household id.");
-      return;
-    }
-
-    setToolBusy(true);
-    const tc: ToolCall = {
-      id: `hp_${Date.now()}`,
-      tool: "db.insert",
-      args: {
-        table: "home_profiles",
-        record: homeProfileDraft.action.record,
-      },
-      reason: homeProfileDraft.action.reason,
-    };
-
-    const res = await executeToolCall({
-      accessToken: token,
-      householdId,
-      scope: memoryScope,
-      toolCall: withHouseholdId(tc, householdId),
-    });
-    setToolBusy(false);
-
-    if (!res.ok) {
-      setToolError("error" in res ? res.error : "Couldn’t save the home profile");
-      return;
-    }
-
-    setToolSuccess(res.summary);
-    appendAssistantMessage(res.summary);
-    setHomeProfileDraft(null);
-    setHomeProfileExists(true);
-  }, [homeProfileDraft, memoryScope, appendAssistantMessage, getAgentSetup]);
-
-  useEffect(() => {
-    void refreshHomeProfileExists();
-  }, [authedHouseholdId, agentHouseholdId, refreshHomeProfileExists]);
-
-  const HOME_SPACE_SUGGESTIONS = useMemo(
-    () => [
-      "living room",
-      "dining area",
-      "work area",
-      "study",
-      "powder room",
-      "utility room",
-      "store room",
-      "pantry",
-      "pooja room",
-      "balcony",
-      "terrace",
-      "deck",
-      "home office",
-      "gym",
-      "basement",
-      "lift",
-      "battery room",
-      "solar storage",
-      "servant room",
-      "laundry",
-      "garden",
-      "parking",
-      "car porch",
-    ],
-    [],
-  );
-
-  const openHomeProfileWizard = useCallback(() => {
-    if (homeProfileExists) {
-      void reviewHomeProfile();
-      return;
-    }
-    if (!homeProfileDraft) {
-      const baseline = getBaselineSpaces("apartment", 2);
-      setHomeProfileDraft({
-        id: `${Date.now()}`,
-        action: {
-          type: "create",
-          table: "home_profiles",
-          record: {
-            home_type: "apartment",
-            bhk: 2,
-            square_feet: null,
-            floors: null,
-            spaces: baseline,
-            space_counts: {},
-            has_balcony: false,
-            has_pets: false,
-            has_kids: false,
-            flooring_type: null,
-            num_bathrooms: null,
-          },
-          reason: "Draft home profile",
+        record: {
+          ...latest.record,
+          home_type: nextHomeType,
+          bhk: nextBhk,
+          spaces: rooms,
+          floors: matchedTemplate.floors_default,
+          square_feet: asNumberOrNull(latestRecord.square_feet) ?? matchedTemplate.square_feet_min ?? null,
         },
-      });
-    }
+      },
+    });
     setHomeProfileMode("edit");
-    setHomeProfileWizardStep(0);
+    setHomeProfileWizardStep(1); // Skip template picker; agent already chose a type.
     setHomeProfileWizardOpen(true);
-  }, [homeProfileDraft, getBaselineSpaces, homeProfileExists, reviewHomeProfile]);
-
-  const closeHomeProfileWizard = useCallback(() => {
-    setHomeProfileWizardOpen(false);
-    setHomeProfileNewSpace("");
-  }, []);
-
-  const updateHomeProfileRecord = useCallback((patch: Record<string, unknown>) => {
-    setHomeProfileDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            action: {
-              ...prev.action,
-              record: { ...(prev.action.record as Record<string, unknown>), ...patch },
-            },
-          }
-        : prev,
-    );
-  }, []);
-
-  const goNextHomeProfileStep = useCallback(() => {
-    setHomeProfileWizardStep((s) => Math.min(3, s + 1));
-  }, []);
-
-  const goBackHomeProfileStep = useCallback(() => {
-    setHomeProfileWizardStep((s) => Math.max(0, s - 1));
-  }, []);
+  }, [latestAssistantText, isStreaming, homeProfileExists, reviewHomeProfile]);
 
   // Load helpers list for household
   useEffect(() => {
@@ -2797,11 +2551,8 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
   const approveToolCall = useCallback(async (tc: ToolCall) => {
     try {
-      console.log("approveToolCall clicked", tc);
       setToolError(null);
       setToolSuccess(null);
-      setToolSuccess(`Approve clicked: ${tc.tool}`);
-      appendAssistantMessage(`Approve clicked: ${tc.tool}`);
 
       const { token, householdId } = getAgentSetup();
       if (!token || !householdId) {
@@ -2809,7 +2560,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session token + household id.");
         return;
       }
-      appendAssistantMessage(`Executing ${tc.tool}...`);
       setToolBusy(true);
       const tcWithHousehold = withHouseholdId(tc, householdId);
 
@@ -3130,12 +2880,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     if (!token || !householdId) return;
 
     setAutoExecutedToolCallIds((prev) => ({ ...prev, [key]: true }));
-
-    try {
-      appendAssistantMessage(`Executing ${tc.tool}...`);
-    } catch {
-      // ignore
-    }
 
     const tcWithHousehold = withHouseholdId(tc, householdId);
     const res = await executeToolCall({
@@ -4526,6 +4270,28 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
             <div ref={messagesEndRef} />
           </Box>
 
+          {/* Smart buttons */}
+          <Stack direction="row" spacing={1} px={1} pb={0.5} flexWrap="wrap">
+            <Chip
+              icon={<Home sx={{ fontSize: 16 }} />}
+              label={homeProfileExists ? "Home Profile" : "Create Home Profile"}
+              size="small"
+              variant="outlined"
+              clickable
+              onClick={() => (homeProfileExists ? reviewHomeProfile() : openHomeProfileWizard())}
+              sx={{ fontSize: "0.78rem" }}
+            />
+            <Chip
+              icon={<BarChart sx={{ fontSize: 16 }} />}
+              label="Coverage Planner"
+              size="small"
+              variant="outlined"
+              clickable
+              onClick={() => setCoverageExperimentOpen(true)}
+              sx={{ fontSize: "0.78rem" }}
+            />
+          </Stack>
+
           {/* Input */}
           <ChatInput
             value={input}
@@ -4706,372 +4472,25 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         <CoverageExperimentEntry householdId={authedHouseholdId.trim() || agentHouseholdId.trim()} onClose={() => setCoverageExperimentOpen(false)} />
       </Dialog>
 
-      <Dialog open={homeProfileWizardOpen} onClose={closeHomeProfileWizard} maxWidth="sm" fullWidth>
-        <DialogTitle>Home Profile</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} mt={1}>
-            {homeProfileMode === "edit" && (
-              <Stepper activeStep={homeProfileWizardStep} alternativeLabel>
-                <Step>
-                  <StepLabel>Basics</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Spaces</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Household</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Review</StepLabel>
-                </Step>
-              </Stepper>
-            )}
-
-            {homeProfileDraft && (() => {
-              const r = homeProfileDraft.action.record as Record<string, unknown>;
-              const homeType = typeof r.home_type === "string" ? r.home_type : "apartment";
-              const bhk = asNumberOrNull(r.bhk) ?? 2;
-              const squareFeet = asNumberOrNull(r.square_feet);
-              const floors = asNumberOrNull(r.floors);
-              const spaces = Array.isArray(r.spaces) ? (r.spaces as unknown[]).map(String).filter(Boolean) : [];
-              const spaceCountsRaw = r.space_counts && typeof r.space_counts === "object" ? (r.space_counts as Record<string, unknown>) : {};
-              const balconyCount = asNumberOrNull(spaceCountsRaw.balcony);
-              const terraceCount = asNumberOrNull(spaceCountsRaw.terrace);
-              const hasBalcony = typeof r.has_balcony === "boolean" ? r.has_balcony : false;
-              const hasPets = typeof r.has_pets === "boolean" ? r.has_pets : false;
-              const hasKids = typeof r.has_kids === "boolean" ? r.has_kids : false;
-              const flooringType = typeof r.flooring_type === "string" ? r.flooring_type : "";
-              const numBathrooms = asNumberOrNull(r.num_bathrooms);
-
-              const reviewLines: string[] = [];
-              reviewLines.push(`Type: ${homeType}`);
-              reviewLines.push(`BHK: ${bhk}`);
-              if (typeof squareFeet === "number") reviewLines.push(`Area: ${squareFeet} sq ft`);
-              if (typeof floors === "number") reviewLines.push(`Floors: ${floors}`);
-              reviewLines.push(`Balcony: ${hasBalcony ? "Yes" : "No"}`);
-              if (typeof balconyCount === "number") reviewLines.push(`Balconies: ${balconyCount}`);
-              if (typeof terraceCount === "number") reviewLines.push(`Terraces: ${terraceCount}`);
-              reviewLines.push(`Pets: ${hasPets ? "Yes" : "No"}`);
-              reviewLines.push(`Kids: ${hasKids ? "Yes" : "No"}`);
-              if (spaces.length > 0) reviewLines.push(`Spaces: ${spaces.join(", ")}`);
-              if (typeof numBathrooms === "number") reviewLines.push(`Bathrooms: ${numBathrooms}`);
-              if (flooringType.trim()) reviewLines.push(`Flooring: ${flooringType.trim()}`);
-
-              if (homeProfileMode === "view") {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Here’s what’s saved for your home.
-                    </Typography>
-                    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
-                      <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
-                        {reviewLines.map((l) => `- ${l}`).join("\n")}
-                      </Typography>
-                    </Paper>
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 0) {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Quick basics — you can add more details in the next steps.
-                    </Typography>
-                    <Stack spacing={1.5}>
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                          Home type
-                        </Typography>
-                        <ToggleButtonGroup
-                          exclusive
-                          value={homeType}
-                          onChange={(_, v) => {
-                            if (!v) return;
-                            const nextType = String(v);
-                            const baseline = getBaselineSpaces(nextType, bhk);
-                            const nextSpaces = spaces.length > 0 ? spaces : baseline;
-                            updateHomeProfileRecord({ home_type: nextType, spaces: nextSpaces });
-                          }}
-                          fullWidth
-                          size="small"
-                        >
-                          <ToggleButton value="apartment">Apartment</ToggleButton>
-                          <ToggleButton value="villa">Villa</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Box>
-
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                          BHK
-                        </Typography>
-                        <ToggleButtonGroup
-                          exclusive
-                          value={String(bhk)}
-                          onChange={(_, v) => {
-                            if (!v) return;
-                            const nextBhk = Number(v);
-                            const baseline = getBaselineSpaces(homeType, nextBhk);
-                            const nextSpaces = spaces.length > 0 ? spaces : baseline;
-                            updateHomeProfileRecord({ bhk: nextBhk, spaces: nextSpaces });
-                          }}
-                          fullWidth
-                          size="small"
-                        >
-                          <ToggleButton value="1">1</ToggleButton>
-                          <ToggleButton value="2">2</ToggleButton>
-                          <ToggleButton value="3">3</ToggleButton>
-                          <ToggleButton value="4">4</ToggleButton>
-                          <ToggleButton value="5">5+</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Box>
-
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                        <TextField
-                          label="Area (sq ft) (optional)"
-                          type="number"
-                          value={typeof squareFeet === "number" ? squareFeet : ""}
-                          onChange={(e) => updateHomeProfileRecord({ square_feet: asNumberOrNull(e.target.value) })}
-                          fullWidth
-                          size="small"
-                          inputProps={{ min: 0, max: 200000 }}
-                        />
-                        <TextField
-                          label="Floors (optional)"
-                          type="number"
-                          value={typeof floors === "number" ? floors : ""}
-                          onChange={(e) => updateHomeProfileRecord({ floors: asNumberOrNull(e.target.value) })}
-                          fullWidth
-                          size="small"
-                          inputProps={{ min: 0, max: 50 }}
-                        />
-                      </Stack>
-                    </Stack>
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 1) {
-                const hasBalconySpace = spaces.some((s) => s.toLowerCase().includes("balcony"));
-                const hasTerraceSpace = spaces.some((s) => s.toLowerCase().includes("terrace"));
-                const masterOptions = buildMasterSpaceOptions({
-                  homeType,
-                  bhk,
-                  numBathrooms,
-                  balconyCount,
-                  terraceCount,
-                });
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Add notable spaces. You can select suggestions or type your own.
-                    </Typography>
-                    <Autocomplete
-                      multiple
-                      options={masterOptions}
-                      value={spaces}
-                      onChange={(_, next) => {
-                        const nextSpaces = (Array.isArray(next) ? next : []).map(String).filter(Boolean);
-                        const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                        updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                      }}
-                      renderInput={(params) => <TextField {...params} label="Spaces" size="small" />}
-                    />
-
-                    {spaces.length > 0 && (
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.75}>
-                          Selected spaces
-                        </Typography>
-                        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                          {spaces.map((s, idx) => (
-                            <Chip
-                              key={`${s}-${idx}`}
-                              label={s}
-                              size="small"
-                              variant="outlined"
-                              onDelete={() => {
-                                const nextSpaces = spaces.filter((_, i) => i !== idx);
-                                const hasBalconyFromSpaces = nextSpaces.some((x) => x.toLowerCase().includes("balcony"));
-                                updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                              }}
-                            />
-                          ))}
-                        </Stack>
-                      </Box>
-                    )}
-
-                    {(hasBalconySpace || hasTerraceSpace) && (
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                        {hasBalconySpace && (
-                          <TextField
-                            label="Number of balconies (optional)"
-                            type="number"
-                            value={typeof balconyCount === "number" ? balconyCount : ""}
-                            onChange={(e) => {
-                              const next = asNumberOrNull(e.target.value);
-                              updateHomeProfileRecord({
-                                space_counts: { ...spaceCountsRaw, balcony: next ?? undefined },
-                                has_balcony: true,
-                              });
-                            }}
-                            fullWidth
-                            size="small"
-                            inputProps={{ min: 0, max: 50 }}
-                          />
-                        )}
-                        {hasTerraceSpace && (
-                          <TextField
-                            label="Number of terraces (optional)"
-                            type="number"
-                            value={typeof terraceCount === "number" ? terraceCount : ""}
-                            onChange={(e) => {
-                              const next = asNumberOrNull(e.target.value);
-                              updateHomeProfileRecord({
-                                space_counts: { ...spaceCountsRaw, terrace: next ?? undefined },
-                              });
-                            }}
-                            fullWidth
-                            size="small"
-                            inputProps={{ min: 0, max: 50 }}
-                          />
-                        )}
-                      </Stack>
-                    )}
-
-                    <FormControlLabel
-                      control={<Switch checked={hasBalcony} onChange={(e) => updateHomeProfileRecord({ has_balcony: e.target.checked })} />}
-                      label="Has balcony"
-                    />
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 2) {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Household context — helps personalize schedules and recommendations.
-                    </Typography>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                      <FormControlLabel
-                        control={<Switch checked={hasPets} onChange={(e) => updateHomeProfileRecord({ has_pets: e.target.checked })} />}
-                        label="Pets"
-                      />
-                      <FormControlLabel
-                        control={<Switch checked={hasKids} onChange={(e) => updateHomeProfileRecord({ has_kids: e.target.checked })} />}
-                        label="Kids"
-                      />
-                    </Stack>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                      <TextField
-                        label="Balconies (optional)"
-                        type="number"
-                        value={typeof balconyCount === "number" ? balconyCount : ""}
-                        onChange={(e) => {
-                          const next = asNumberOrNull(e.target.value);
-                          updateHomeProfileRecord({
-                            space_counts: { ...spaceCountsRaw, balcony: next ?? undefined },
-                            has_balcony: hasBalcony || (typeof next === "number" && next > 0),
-                          });
-                        }}
-                        fullWidth
-                        size="small"
-                        inputProps={{ min: 0, max: 50 }}
-                      />
-                      <TextField
-                        label="Bathrooms (optional)"
-                        type="number"
-                        value={typeof numBathrooms === "number" ? numBathrooms : ""}
-                        onChange={(e) => updateHomeProfileRecord({ num_bathrooms: asNumberOrNull(e.target.value) })}
-                        fullWidth
-                        size="small"
-                        inputProps={{ min: 0, max: 20 }}
-                      />
-                      <TextField
-                        label="Flooring type (optional)"
-                        value={flooringType}
-                        onChange={(e) => updateHomeProfileRecord({ flooring_type: e.target.value || null })}
-                        fullWidth
-                        size="small"
-                      />
-                    </Stack>
-                  </Stack>
-                );
-              }
-
-              return (
-                <Stack spacing={2}>
-                  <Typography variant="body2" color="text.secondary">
-                    Review your home profile. You can go back to edit anything.
-                  </Typography>
-                  <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
-                    <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
-                      {reviewLines.map((l) => `- ${l}`).join("\n")}
-                    </Typography>
-                  </Paper>
-                </Stack>
-              );
-            })()}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          {homeProfileMode === "view" ? (
-            <>
-              <Button variant="outlined" disabled={toolBusy || homeProfileBusy} onClick={closeHomeProfileWizard}>
-                Close
-              </Button>
-              <Button
-                variant="contained"
-                disabled={toolBusy || homeProfileBusy || !homeProfileDraft}
-                onClick={() => {
-                  setHomeProfileMode("edit");
-                  setHomeProfileWizardStep(0);
-                }}
-              >
-                Edit
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                variant="outlined"
-                disabled={toolBusy || homeProfileBusy}
-                onClick={() => {
-                  setHomeProfileDraft(null);
-                  closeHomeProfileWizard();
-                }}
-              >
-                Discard
-              </Button>
-              <Box sx={{ flex: 1 }} />
-              <Button
-                variant="text"
-                disabled={homeProfileWizardStep === 0 || toolBusy || homeProfileBusy}
-                onClick={goBackHomeProfileStep}
-              >
-                Back
-              </Button>
-              {homeProfileWizardStep < 3 ? (
-                <Button variant="contained" disabled={toolBusy || homeProfileBusy || !homeProfileDraft} onClick={goNextHomeProfileStep}>
-                  Next
-                </Button>
-              ) : (
-                <Button
-                  variant="contained"
-                  disabled={toolBusy || homeProfileBusy || !homeProfileDraft}
-                  onClick={async () => {
-                    await saveHomeProfileDraft();
-                    closeHomeProfileWizard();
-                  }}
-                >
-                  Save
-                </Button>
-              )}
-            </>
-          )}
-        </DialogActions>
-      </Dialog>
+      <HomeProfileWizard
+        open={homeProfileWizardOpen}
+        onClose={closeHomeProfileWizard}
+        draft={homeProfileDraft}
+        setDraft={setHomeProfileDraft}
+        mode={homeProfileMode}
+        setMode={setHomeProfileMode}
+        step={homeProfileWizardStep}
+        setStep={setHomeProfileWizardStep}
+        newSpace={homeProfileNewSpace}
+        setNewSpace={setHomeProfileNewSpace}
+        busy={homeProfileBusy}
+        error={homeProfileError}
+        toolBusy={toolBusy}
+        updateRecord={updateHomeProfileRecord}
+        goNext={goNextHomeProfileStep}
+        goBack={goBackHomeProfileStep}
+        onSave={saveHomeProfileDraft}
+      />
 
       <Dialog open={profileDialogOpen} onClose={() => setProfileDialogOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Profile</DialogTitle>

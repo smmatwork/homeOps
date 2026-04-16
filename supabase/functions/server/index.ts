@@ -3087,6 +3087,112 @@ api.post("/agent/delete", async (c) => {
   return c.json({ ok: true });
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// Helper Stage 2 magic-link routes (Phase 1.1b)
+//
+// Both routes are UNAUTHENTICATED. The URL token is the only auth;
+// the backing RPCs (fetch_helper_invite, complete_helper_stage2)
+// validate the token internally and return status strings the caller
+// uses to route the response. No x-user-authorization required.
+// ─────────────────────────────────────────────────────────────────────
+
+// GET /h/:token — resolve a magic-link invite for the Stage 2 page.
+// Returns helper basics + invite status. No auth required.
+api.get("/h/:token", async (c) => {
+  const token = (c.req.param("token") || "").trim();
+  if (!token) {
+    return c.json({ error: "Missing token" }, 400);
+  }
+
+  const admin = supabaseAdmin();
+  const { data, error } = await admin.rpc("fetch_helper_invite", { p_token: token });
+  if (error) {
+    console.error("fetch_helper_invite RPC failed", { error: error.message });
+    return c.json({ error: "Internal error" }, 500);
+  }
+
+  // RPC returns a setof rows; we unwrap the first (there's exactly one).
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== "object") {
+    return c.json({ status: "not_found" }, 404);
+  }
+
+  const status = String((row as Record<string, unknown>).status || "not_found");
+
+  if (status === "not_found") {
+    return c.json({ status: "not_found" }, 404);
+  }
+
+  // For revoked/expired/already_completed we still return 200 with
+  // the status field so the magic-link page can render a clear
+  // message without a network-error fallback.
+  return c.json({
+    status,
+    helper_id: (row as Record<string, unknown>).helper_id,
+    helper_name: (row as Record<string, unknown>).helper_name,
+    household_id: (row as Record<string, unknown>).household_id,
+    channel_chain: (row as Record<string, unknown>).channel_chain,
+    preferred_language: (row as Record<string, unknown>).preferred_language,
+    expires_at: (row as Record<string, unknown>).expires_at,
+  }, 200);
+});
+
+// POST /h/:token/complete — submit Stage 2 consent payload.
+// Body: { preferred_language?, profile_photo_url?, preferred_channel?,
+//         consents: { id_verification?, vision_capture?, ... } }
+// No auth required; the token is the auth.
+api.post("/h/:token/complete", async (c) => {
+  const token = (c.req.param("token") || "").trim();
+  if (!token) {
+    return c.json({ error: "Missing token" }, 400);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return c.json({ error: "Body must be an object" }, 400);
+  }
+
+  const admin = supabaseAdmin();
+  const { data, error } = await admin.rpc("complete_helper_stage2", {
+    p_token: token,
+    p_payload: payload,
+  });
+  if (error) {
+    console.error("complete_helper_stage2 RPC failed", { error: error.message });
+    return c.json({ error: "Internal error" }, 500);
+  }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== "object") {
+    return c.json({ status: "not_found" }, 404);
+  }
+
+  const status = String((row as Record<string, unknown>).status || "not_found");
+
+  const httpStatus =
+    status === "completed"
+      ? 200
+      : status === "not_found"
+        ? 404
+        : status === "invalid_payload"
+          ? 400
+          : status === "expired" || status === "revoked" || status === "already_completed"
+            ? 409
+            : 500;
+
+  return c.json({
+    status,
+    helper_id: (row as Record<string, unknown>).helper_id ?? null,
+    household_id: (row as Record<string, unknown>).household_id ?? null,
+  }, httpStatus);
+});
+
 // Health check endpoint
 api.get("/make-server-e874fae9/health", (c) => {
   return c.json({ status: "ok" });

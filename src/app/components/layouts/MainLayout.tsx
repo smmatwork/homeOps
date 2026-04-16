@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Outlet, Link, useLocation, useNavigate } from "react-router";
+import { useOnboardingGate } from "../../hooks/useOnboardingGate";
 import {
   Box,
   Button,
@@ -41,6 +42,8 @@ import {
   Person,
   Feedback as FeedbackIcon,
   Science,
+  GridView,
+  Event as EventIcon,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
@@ -48,6 +51,8 @@ import { executeToolCall } from "../../services/agentApi";
 import { ChatInterface } from "../chat/ChatInterface";
 import { useI18n } from "../../i18n";
 import { LanguageSwitcher } from "../LanguageSwitcher";
+import { ProposalsDrawer } from "../replan/ProposalsDrawer";
+import AutoAwesome from "@mui/icons-material/AutoAwesome";
 
 type EscalationChoreRow = {
   id: string;
@@ -60,7 +65,10 @@ type EscalationChoreRow = {
 
 const NAV_ITEMS = [
   { key: "nav.dashboard", path: "/", icon: Home, roles: ["household", "admin", "owner", "support"] },
+  { key: "nav.home_profile", path: "/home-profile", icon: Home, roles: ["household", "admin"] },
   { key: "nav.chores", path: "/chores", icon: Assignment, roles: ["household", "admin"] },
+  { key: "nav.coverage", path: "/coverage", icon: GridView, roles: ["household", "admin"] },
+  { key: "nav.events", path: "/events", icon: EventIcon, roles: ["household", "admin"] },
   { key: "nav.recipes", path: "/recipes", icon: MenuBook, roles: ["household", "admin"] },
   { key: "nav.helpers", path: "/helpers", icon: People, roles: ["household", "admin"] },
   { key: "nav.alerts", path: "/alerts", icon: NotificationsNone, roles: ["household", "admin", "support"] },
@@ -77,6 +85,7 @@ const NAV_ITEMS = [
 type Role = "household" | "admin" | "owner" | "support";
 
 export function MainLayout() {
+  const { loading: onboardingLoading } = useOnboardingGate();
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut, user, householdId, accessToken } = useAuth();
@@ -84,6 +93,7 @@ export function MainLayout() {
   const [role, setRole] = useState<Role>("household");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [proposalsOpen, setProposalsOpen] = useState(false);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
@@ -454,6 +464,14 @@ export function MainLayout() {
     </>
   );
 
+  if (onboardingLoading) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" height="100vh">
+        <Typography color="text.secondary">{t("common.loading")}</Typography>
+      </Box>
+    );
+  }
+
   return (
     <Box display="flex" height="100vh" overflow="hidden">
       {/* Desktop permanent drawer */}
@@ -520,6 +538,16 @@ export function MainLayout() {
           {location.pathname.startsWith("/chat") ? null : (
             <Button
               variant="outlined"
+              startIcon={<AutoAwesome fontSize="small" />}
+              onClick={() => setProposalsOpen(true)}
+              sx={{ textTransform: "none" }}
+            >
+              {t("replan.button")}
+            </Button>
+          )}
+          {location.pathname.startsWith("/chat") ? null : (
+            <Button
+              variant="outlined"
               startIcon={<Chat fontSize="small" />}
               onClick={openChatDrawer}
               sx={{ textTransform: "none" }}
@@ -530,6 +558,8 @@ export function MainLayout() {
         </Box>
         <Outlet />
       </Box>
+
+      <ProposalsDrawer open={proposalsOpen} onClose={() => setProposalsOpen(false)} />
 
       <Drawer
         anchor="right"

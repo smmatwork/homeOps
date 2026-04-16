@@ -73,22 +73,22 @@ function isZoneDevice(key: string): boolean {
 
 export function CoverageExperimentEntry(props: { householdId: string; onClose: () => void }) {
   const householdId = String(props.householdId ?? "").trim();
+  const draftKey = householdId || "anon";
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [draft, setDraft] = useState<CoverageDraft>(() => loadCoverageDraft(householdId) ?? defaultCoverageDraft());
+  const [draft, setDraft] = useState<CoverageDraft>(() => loadCoverageDraft(draftKey) ?? defaultCoverageDraft());
   const [homeSpaces, setHomeSpaces] = useState<string[]>([]);
   const [otherMachineInput, setOtherMachineInput] = useState("");
   const [saveBannerOpen, setSaveBannerOpen] = useState(false);
 
   const persistDraft = () => {
-    if (!householdId) return;
-    saveCoverageDraft(householdId, draft);
+    saveCoverageDraft(draftKey, draft);
   };
 
   useEffect(() => {
-    setDraft(loadCoverageDraft(householdId) ?? defaultCoverageDraft());
-  }, [householdId]);
+    setDraft(loadCoverageDraft(draftKey) ?? defaultCoverageDraft());
+  }, [draftKey]);
 
   useEffect(() => {
     if (!householdId) return;
@@ -121,9 +121,8 @@ export function CoverageExperimentEntry(props: { householdId: string; onClose: (
   }, [householdId]);
 
   useEffect(() => {
-    if (!householdId) return;
-    saveCoverageDraft(householdId, draft);
-  }, [householdId, draft]);
+    saveCoverageDraft(draftKey, draft);
+  }, [draftKey, draft]);
 
   const areas = useMemo(() => {
     const a = Array.from(new Set(draft.areas.map((x) => x.trim()).filter(Boolean)));
@@ -196,10 +195,6 @@ export function CoverageExperimentEntry(props: { householdId: string; onClose: (
   };
 
   const body = (() => {
-    if (!householdId) {
-      return <Alert severity="warning">Link your home first (Agent Setup → Set up my home), then configure coverage.</Alert>;
-    }
-
     if (step === 0) {
       return (
         <Stack spacing={2}>
@@ -555,11 +550,10 @@ export function CoverageExperimentEntry(props: { householdId: string; onClose: (
           color="error"
           variant="text"
           onClick={() => {
-            clearCoverageDraft(householdId);
+            clearCoverageDraft(draftKey);
             setDraft(defaultCoverageDraft());
             setStep(0);
           }}
-          disabled={!householdId}
         >
           Clear
         </Button>

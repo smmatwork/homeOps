@@ -9,6 +9,8 @@ export interface ToolCallState {
   approvedToolCallKeys: Record<string, boolean>;
   toolCallOverridesByKey: Record<string, ToolCall>;
   autoExecutedToolCallIds: Record<string, boolean>;
+  ambiguousIntents: string[]; // Multiple possible intents detected
+  rejectedIntents: Record<string, string>; // Key=intent, value=reason
 }
 
 export interface ToolCallActions {
@@ -22,6 +24,8 @@ export interface ToolCallActions {
   setToolCallOverride: (key: string, call: ToolCall) => void;
   markAutoExecuted: (callId: string) => void;
   clearToolState: () => void;
+  setAmbiguousIntents: (intents: string[]) => void;
+  setRejectedIntents: (intents: Record<string, string>) => void;
 }
 
 export function useToolCalls(): [ToolCallState, ToolCallActions] {
@@ -32,6 +36,8 @@ export function useToolCalls(): [ToolCallState, ToolCallActions] {
   const [approvedToolCallKeys, setApprovedToolCallKeys] = useState<Record<string, boolean>>({});
   const [toolCallOverridesByKey, setToolCallOverridesByKey] = useState<Record<string, ToolCall>>({});
   const [autoExecutedToolCallIds, setAutoExecutedToolCallIds] = useState<Record<string, boolean>>({});
+  const [ambiguousIntents, setAmbiguousIntents] = useState<string[]>([]);
+  const [rejectedIntents, setRejectedIntents] = useState<Record<string, string>>({});
 
   const addPendingToolCall = useCallback((call: ToolCall) => {
     setPendingToolCalls(prev => [...prev, call]);
@@ -71,6 +77,8 @@ export function useToolCalls(): [ToolCallState, ToolCallActions] {
     approvedToolCallKeys,
     toolCallOverridesByKey,
     autoExecutedToolCallIds,
+    ambiguousIntents,
+    rejectedIntents,
   }), [
     toolBusy,
     toolError,
@@ -79,6 +87,8 @@ export function useToolCalls(): [ToolCallState, ToolCallActions] {
     approvedToolCallKeys,
     toolCallOverridesByKey,
     autoExecutedToolCallIds,
+    ambiguousIntents,
+    rejectedIntents,
   ]);
 
   const actions: ToolCallActions = useMemo(() => ({
@@ -92,6 +102,8 @@ export function useToolCalls(): [ToolCallState, ToolCallActions] {
     setToolCallOverride,
     markAutoExecuted,
     clearToolState,
+    setAmbiguousIntents,
+    setRejectedIntents,
   }), [
     addPendingToolCall,
     removePendingToolCall,

@@ -92,6 +92,7 @@ export default defineConfig({
   
   // Development server optimizations
   server: {
+    host: true,
     hmr: {
       overlay: false,
     },
