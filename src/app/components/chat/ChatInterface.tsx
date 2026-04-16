@@ -1893,7 +1893,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
     }
     return null;
   }, [isOnboarding, latestAssistantText]);
-  const [inlineFormDismissed, setInlineFormDismissed] = useState<string | null>(null);
+  const [inlineFormsDismissed, setInlineFormsDismissed] = useState<Set<string>>(new Set());
 
   const proposedClarificationKey = useMemo(() => {
     if (!proposedClarification) return "";
@@ -4322,15 +4322,97 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             {showTypingDots && <TypingIndicator />}
 
             {/* Inline onboarding form rendered inside chat */}
-            {proposedInlineForm && inlineFormDismissed !== proposedInlineForm.inline_form && (
+            {proposedInlineForm && !inlineFormsDismissed.has(proposedInlineForm.inline_form) && (
               <Box sx={{ maxWidth: 520, mx: "auto", my: 1 }}>
                 <OnboardingInlineForm
                   formType={proposedInlineForm.inline_form}
                   context={proposedInlineForm.context}
                   disabled={isStreaming}
                   onSubmit={(data) => {
-                    setInlineFormDismissed(proposedInlineForm.inline_form);
-                    void sendMessage(JSON.stringify({ form_response: data }), { silent: true });
+                    setInlineFormsDismissed((prev) => new Set(prev).add(proposedInlineForm.inline_form));
+                    // Save form data directly via Supabase, then tell the agent what was saved
+                    void (async () => {
+                      const hid = (authedHouseholdId || agentHouseholdId || "").trim();
+                      const formType = String(data.form_type ?? "");
+                      let savedMsg = "";
+
+                      try {
+                        if (formType === "home_type_picker" && hid) {
+                          const rooms = Array.isArray(data.rooms) ? data.rooms : [];
+                          await supabase.from("home_profiles").upsert({
+                            household_id: hid,
+                            home_type: data.home_type ?? "apartment",
+                            bhk: data.bhk ?? 2,
+                            spaces: rooms,
+                            floors: data.floors ?? 1,
+                            has_balcony: rooms.some((r: Record<string, unknown>) => String(r.display_name ?? "").toLowerCase().includes("balcony")),
+                          }, { onConflict: "household_id" });
+                          savedMsg = `Home profile saved: ${data.home_type}, ${data.bhk} BHK, ${rooms.length} rooms. Proceed to the next step.`;
+                        } else if (formType === "room_editor" && hid) {
+                          const rooms = Array.isArray(data.rooms) ? data.rooms : [];
+                          await supabase.from("home_profiles").update({ spaces: rooms }).eq("household_id", hid);
+                          savedMsg = `Rooms updated: ${rooms.length} rooms saved. Proceed to the next step.`;
+                        } else if (formType === "feature_selector" && hid) {
+                          const features = Array.isArray(data.features) ? data.features : [];
+                          // Delete existing then insert
+                          await supabase.from("home_features").delete().eq("household_id", hid);
+                          if (features.length > 0) {
+                            await supabase.from("home_features").insert(
+                              features.map((f: Record<string, unknown>) => ({
+                                household_id: hid,
+                                feature_key: f.feature_key,
+                                quantity: f.quantity ?? 1,
+                              }))
+                            );
+                          }
+                          savedMsg = `${features.length} home features saved. Proceed to the next step.`;
+                        } else if (formType === "household_details" && hid) {
+                          await supabase.from("home_profiles").update({
+                            has_pets: data.has_pets ?? false,
+                            has_kids: data.has_kids ?? false,
+                            num_bathrooms: data.num_bathrooms ?? null,
+                            flooring_type: data.flooring_type ?? null,
+                          }).eq("household_id", hid);
+                          savedMsg = `Household details saved. Proceed to the next step.`;
+                        } else if (formType === "helper_form") {
+                          if (data.skipped) {
+                            savedMsg = "User skipped adding helpers. Wrap up onboarding.";
+                          } else if (hid) {
+                            await supabase.from("helpers").insert({
+                              household_id: hid,
+                              name: data.name,
+                              type: data.type ?? null,
+                              phone: data.phone ?? null,
+                            });
+                            savedMsg = `Helper "${data.name}" added. Ask if they want to add more helpers or finish.`;
+                          }
+                        } else if (formType === "chore_recommendations") {
+                          if (data.skipped) {
+                            savedMsg = "User skipped chore creation. Proceed to helpers step.";
+                          } else {
+                            const chores = Array.isArray(data.confirmed_chores) ? data.confirmed_chores : [];
+                            if (chores.length > 0 && hid) {
+                              await supabase.from("chores").insert(
+                                chores.map((c: Record<string, unknown>) => ({
+                                  household_id: hid,
+                                  title: c.title,
+                                  status: "pending",
+                                  priority: 1,
+                                  metadata: { space: c.space, cadence: c.cadence, source: "onboarding" },
+                                }))
+                              );
+                            }
+                            savedMsg = `${chores.length} chores created. Proceed to the next step.`;
+                          }
+                        }
+                      } catch (e) {
+                        savedMsg = `Error saving: ${e instanceof Error ? e.message : "unknown"}. Please try again.`;
+                      }
+
+                      if (savedMsg) {
+                        void sendMessage(savedMsg, { silent: true });
+                      }
+                    })();
                   }}
                 />
               </Box>
