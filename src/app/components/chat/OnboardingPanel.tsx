@@ -4,6 +4,7 @@
  * Shows: progress bar → current inline form → skip/dismiss buttons.
  */
 
+import { useState } from "react";
 import {
   Alert,
   Box,
@@ -147,47 +148,57 @@ export function OnboardingPanel({
   }
 
   const progressPct = Math.round((completedSteps.length / totalSteps) * 100);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  /** Helper: run a Supabase call and throw on error */
+  const dbCall = async (op: PromiseLike<{ error: { message: string } | null }>): Promise<void> => {
+    const { error: err } = await op;
+    if (err) throw new Error(err.message);
+  };
 
   const handleSubmit = async (data: Record<string, unknown>) => {
     const formType = String(data.form_type ?? "");
     let savedMsg = "";
+    setSaving(true);
+    setSaveError(null);
 
     try {
       if (formType === "home_type_picker" && householdId) {
         const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-        await supabase.from("home_profiles").upsert({
+        await dbCall(supabase.from("home_profiles").upsert({
           household_id: householdId,
           home_type: data.home_type ?? "apartment",
           bhk: data.bhk ?? 2,
           spaces: rooms,
           floors: data.floors ?? 1,
           has_balcony: rooms.some((r: Record<string, unknown>) => String(r.display_name ?? "").toLowerCase().includes("balcony")),
-        }, { onConflict: "household_id" });
+        }, { onConflict: "household_id" }));
         savedMsg = `Home profile saved: ${data.home_type}, ${data.bhk} BHK.`;
       } else if (formType === "room_editor" && householdId) {
         const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-        await supabase.from("home_profiles").update({ spaces: rooms }).eq("household_id", householdId);
+        await dbCall(supabase.from("home_profiles").update({ spaces: rooms }).eq("household_id", householdId));
         savedMsg = `${rooms.length} rooms saved.`;
       } else if (formType === "feature_selector" && householdId) {
         const features = Array.isArray(data.features) ? data.features : [];
-        await supabase.from("home_features").delete().eq("household_id", householdId);
+        await dbCall(supabase.from("home_features").delete().eq("household_id", householdId));
         if (features.length > 0) {
-          await supabase.from("home_features").insert(
+          await dbCall(supabase.from("home_features").insert(
             features.map((f: Record<string, unknown>) => ({
               household_id: householdId,
               feature_key: f.feature_key,
               quantity: f.quantity ?? 1,
             }))
-          );
+          ));
         }
         savedMsg = `${features.length} features saved.`;
       } else if (formType === "household_details" && householdId) {
-        await supabase.from("home_profiles").update({
+        await dbCall(supabase.from("home_profiles").update({
           has_pets: data.has_pets ?? false,
           has_kids: data.has_kids ?? false,
           num_bathrooms: data.num_bathrooms ?? null,
           flooring_type: data.flooring_type ?? null,
-        }).eq("household_id", householdId);
+        }).eq("household_id", householdId));
         savedMsg = "Household details saved.";
       } else if (formType === "chore_recommendations") {
         if (data.skipped) {
@@ -195,7 +206,7 @@ export function OnboardingPanel({
         } else {
           const chores = Array.isArray(data.confirmed_chores) ? data.confirmed_chores : [];
           if (chores.length > 0 && householdId) {
-            await supabase.from("chores").insert(
+            await dbCall(supabase.from("chores").insert(
               chores.map((c: Record<string, unknown>) => ({
                 household_id: householdId,
                 title: c.title,
@@ -203,7 +214,7 @@ export function OnboardingPanel({
                 priority: 1,
                 metadata: { space: c.space, cadence: c.cadence, source: "onboarding" },
               }))
-            );
+            ));
           }
           savedMsg = `${chores.length} chores created.`;
         }
@@ -211,17 +222,20 @@ export function OnboardingPanel({
         if (data.skipped) {
           savedMsg = "Helper setup skipped.";
         } else if (householdId) {
-          await supabase.from("helpers").insert({
+          await dbCall(supabase.from("helpers").insert({
             household_id: householdId,
             name: data.name,
             type: data.type ?? null,
             phone: data.phone ?? null,
-          });
+          }));
           savedMsg = `Helper "${data.name}" added.`;
         }
       }
     } catch (e) {
-      savedMsg = `Error saving: ${e instanceof Error ? e.message : "unknown"}`;
+      const errMsg = e instanceof Error ? e.message : "Unknown error";
+      setSaveError(errMsg);
+      setSaving(false);
+      return; // Don't advance on error
     }
 
     if (savedMsg) {
@@ -230,6 +244,7 @@ export function OnboardingPanel({
 
     // Re-read DB state to advance to next step
     await advance();
+    setSaving(false);
   };
 
   return (
@@ -260,11 +275,15 @@ export function OnboardingPanel({
           </Stack>
         </Stack>
 
+        {/* Error display */}
+        {saveError && <Alert severity="error" onClose={() => setSaveError(null)}>{saveError}</Alert>}
+
         {/* Current form with step-specific context */}
         <OnboardingInlineForm
           formType={currentStep as any}
           context={state ? buildFormContext(currentStep, state) : undefined}
           onSubmit={handleSubmit}
+          disabled={saving}
         />
 
         {/* Skip / Dismiss buttons */}
