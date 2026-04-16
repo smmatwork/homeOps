@@ -3845,13 +3845,30 @@ async def chat_respond(
             input={"intent": intent, "facts_len": len(facts_section)},
         )
 
+        # Detect onboarding mode — the frontend sends a special system prompt
+        # containing "ONBOARDING FLOW". In this mode, skip the strict JSON
+        # output contract and intent routing, letting the LLM follow the
+        # onboarding prompt's own instructions (conversational + inline_form).
+        is_onboarding = False
+        if messages and isinstance(messages[0], dict):
+            sys_content = str(messages[0].get("content") or "")
+            is_onboarding = "ONBOARDING FLOW" in sys_content
+
         # Compose the enhanced system prompt.
         enhanced_suffix = ""
-        if facts_section:
-            enhanced_suffix += "\n\n" + facts_section
-        if intent_instruction:
-            enhanced_suffix += "\n" + intent_instruction
-        enhanced_suffix += final_only_clause
+        if not is_onboarding:
+            # Normal mode: inject FACTS + intent + strict JSON contract
+            if facts_section:
+                enhanced_suffix += "\n\n" + facts_section
+            if intent_instruction:
+                enhanced_suffix += "\n" + intent_instruction
+            enhanced_suffix += final_only_clause
+        else:
+            # Onboarding mode: only add FACTS (for context), skip intent
+            # routing and strict JSON contract. The onboarding system prompt
+            # has its own output rules.
+            if facts_section:
+                enhanced_suffix += "\n\n" + facts_section
 
         if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
             c0 = messages[0].get("content")
@@ -3864,8 +3881,9 @@ async def chat_respond(
         # If we can extract a structured intent with high confidence, convert
         # it directly to tool calls and skip the main LLM call entirely.
         # This is faster, more reliable, and avoids hallucination.
+        # Skip in onboarding mode — let the LLM handle everything conversationally.
         extracted_intent: ExtractedIntent | None = None
-        if intent in ("update",):
+        if not is_onboarding and intent in ("update",):
             try:
                 extracted_intent = await _extract_structured_intent(last_user_text, model, facts_section)
                 if extracted_intent:
