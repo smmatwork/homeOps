@@ -268,37 +268,62 @@ function HouseholdDetailsForm({ onSubmit, disabled }: { onSubmit: (d: Record<str
 
 // ── Chore Recommendations ────────────────────────────────────────
 
+const CADENCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
+
 function ChoreRecommendationsForm({ context, onSubmit, disabled }: { context?: Record<string, unknown>; onSubmit: (d: Record<string, unknown>) => void; disabled?: boolean }) {
   const { t } = useI18n();
-  const chores = Array.isArray(context?.chores) ? context.chores as Array<{ title: string; space?: string; cadence?: string }> : [];
-  const [selected, setSelected] = useState<Record<number, boolean>>(Object.fromEntries(chores.map((_, i) => [i, true])));
+  const initial = Array.isArray(context?.chores) ? context.chores as Array<{ title: string; space?: string; cadence?: string }> : [];
+  const [chores, setChores] = useState(initial.map((c, i) => ({ ...c, id: i, selected: true })));
+
+  const toggle = (id: number) => setChores((prev) => prev.map((c) => c.id === id ? { ...c, selected: !c.selected } : c));
+  const updateTitle = (id: number, title: string) => setChores((prev) => prev.map((c) => c.id === id ? { ...c, title } : c));
+  const updateCadence = (id: number, cadence: string) => setChores((prev) => prev.map((c) => c.id === id ? { ...c, cadence } : c));
+  const removeChore = (id: number) => setChores((prev) => prev.filter((c) => c.id !== id));
+
+  const selectedCount = chores.filter((c) => c.selected).length;
 
   return (
     <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, bgcolor: "background.paper" }}>
       <Typography variant="subtitle2" fontWeight={600} mb={1}>
         {t("onboarding.review_chores")}
       </Typography>
-      <Stack spacing={0.5} mb={2}>
-        {chores.map((c, i) => (
-          <FormControlLabel
-            key={i}
-            control={<Checkbox size="small" checked={!!selected[i]} onChange={(e) => setSelected((p) => ({ ...p, [i]: e.target.checked }))} />}
-            label={
-              <Stack direction="row" spacing={1} alignItems="center">
-                <Typography variant="body2">{c.title}</Typography>
-                {c.space && <Chip size="small" label={c.space} variant="outlined" />}
-                {c.cadence && <Chip size="small" label={c.cadence} variant="outlined" />}
-              </Stack>
-            }
-          />
+      <Typography variant="caption" color="text.secondary" mb={1.5} display="block">
+        {t("onboarding.review_chores_hint")}
+      </Typography>
+      <Stack spacing={1} mb={2} sx={{ maxHeight: 360, overflowY: "auto" }}>
+        {chores.map((c) => (
+          <Stack key={c.id} direction="row" spacing={1} alignItems="center" sx={{ opacity: c.selected ? 1 : 0.5 }}>
+            <Checkbox size="small" checked={c.selected} onChange={() => toggle(c.id)} />
+            <TextField
+              size="small"
+              value={c.title}
+              onChange={(e) => updateTitle(c.id, e.target.value)}
+              sx={{ flex: 1 }}
+              variant="standard"
+              InputProps={{ disableUnderline: !c.selected, sx: { fontSize: 13 } }}
+              disabled={!c.selected}
+            />
+            {c.space && <Chip size="small" label={c.space} variant="outlined" sx={{ fontSize: 11 }} />}
+            <TextField
+              select
+              size="small"
+              value={c.cadence ?? "weekly"}
+              onChange={(e) => updateCadence(c.id, e.target.value)}
+              disabled={!c.selected}
+              sx={{ minWidth: 90 }}
+              SelectProps={{ native: true, sx: { fontSize: 12 } }}
+            >
+              {CADENCE_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+            </TextField>
+          </Stack>
         ))}
       </Stack>
       <Stack direction="row" spacing={1}>
-        <Button variant="contained" size="small" disabled={disabled} onClick={() => {
-          const confirmed = chores.filter((_, i) => selected[i]);
+        <Button variant="contained" size="small" disabled={disabled || selectedCount === 0} onClick={() => {
+          const confirmed = chores.filter((c) => c.selected).map(({ title, space, cadence }) => ({ title, space, cadence }));
           onSubmit({ form_type: "chore_recommendations", confirmed_chores: confirmed });
         }}>
-          {t("onboarding.create_chores")} ({Object.values(selected).filter(Boolean).length})
+          {t("onboarding.create_chores")} ({selectedCount})
         </Button>
         <Button variant="text" size="small" disabled={disabled} onClick={() => onSubmit({ form_type: "chore_recommendations", confirmed_chores: [], skipped: true })}>
           {t("onboarding.skip_chores")}

@@ -833,6 +833,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const [agentHouseholdId, setAgentHouseholdId] = useState("");
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [coverageExperimentOpen, setCoverageExperimentOpen] = useState(false);
+  const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [agentSuccess, setAgentSuccess] = useState<string | null>(null);
@@ -4317,27 +4318,40 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
             <div ref={messagesEndRef} />
           </Box>
 
-          {/* Smart buttons */}
-          <Stack direction="row" spacing={1} px={1} pb={0.5} flexWrap="wrap">
-            <Chip
-              icon={<Home sx={{ fontSize: 16 }} />}
-              label={homeProfileExists ? "Home Profile" : "Create Home Profile"}
-              size="small"
-              variant="outlined"
-              clickable
-              onClick={() => (homeProfileExists ? reviewHomeProfile() : openHomeProfileWizard())}
-              sx={{ fontSize: "0.78rem" }}
-            />
-            <Chip
-              icon={<BarChart sx={{ fontSize: 16 }} />}
-              label="Coverage Planner"
-              size="small"
-              variant="outlined"
-              clickable
-              onClick={() => setCoverageExperimentOpen(true)}
-              sx={{ fontSize: "0.78rem" }}
-            />
-          </Stack>
+          {/* Quick commands — collapsible */}
+          {!isOnboarding && (
+            <Box px={1} pb={0.5}>
+              <Button
+                size="small"
+                onClick={() => setQuickCommandsCollapsed((p) => !p)}
+                sx={{ textTransform: "none", color: "text.secondary", fontSize: "0.75rem", minWidth: 0, p: 0.5 }}
+              >
+                {quickCommandsCollapsed ? "▸ Quick actions" : "▾ Quick actions"}
+              </Button>
+              {!quickCommandsCollapsed && (
+                <Stack direction="row" spacing={1} mt={0.5} flexWrap="wrap">
+                  <Chip
+                    icon={<Home sx={{ fontSize: 16 }} />}
+                    label={homeProfileExists ? "Home Profile" : "Create Home Profile"}
+                    size="small"
+                    variant="outlined"
+                    clickable
+                    onClick={() => (homeProfileExists ? reviewHomeProfile() : openHomeProfileWizard())}
+                    sx={{ fontSize: "0.78rem" }}
+                  />
+                  <Chip
+                    icon={<BarChart sx={{ fontSize: 16 }} />}
+                    label="Coverage Planner"
+                    size="small"
+                    variant="outlined"
+                    clickable
+                    onClick={() => setCoverageExperimentOpen(true)}
+                    sx={{ fontSize: "0.78rem" }}
+                  />
+                </Stack>
+              )}
+            </Box>
+          )}
 
           {/* Input */}
           <ChatInput
