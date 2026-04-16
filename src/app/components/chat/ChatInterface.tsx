@@ -57,8 +57,8 @@ import { buildThreadKey, useClarificationStore } from "../../stores/clarificatio
 import { useSarvamChat } from "../../hooks/useSarvamChat";
 import { ONBOARDING_SYSTEM_PROMPT } from "../../services/sarvamApi";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
-import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseInlineFormFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type InlineFormPayload, type ToolCall } from "../../services/agentActions";
-import { OnboardingInlineForm } from "./OnboardingInlineForms";
+import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type ToolCall } from "../../services/agentActions";
+import { OnboardingPanel } from "./OnboardingPanel";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
 import { agentCreate, agentListHelpers, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
 import { useAuth } from "../../auth/AuthProvider";
@@ -1868,34 +1868,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const proposedAutomationSuggestions = parseAutomationSuggestionsFromAssistantText(latestAssistantText);
   const proposedToolCalls = parseToolCallsFromAssistantText(latestAssistantText);
   const proposedClarification = parseClarificationFromAssistantText(latestAssistantText);
-  const [inlineFormsDismissed, setInlineFormsDismissed] = useState<Set<string>>(new Set());
-
-  // Parse explicit inline_form marker from agent, or infer from keywords as fallback.
-  // Never propose a form that was already submitted (dismissed).
-  const proposedInlineForm = useMemo((): InlineFormPayload | null => {
-    if (!isOnboarding) return null;
-
-    const propose = (form: InlineFormPayload): InlineFormPayload | null =>
-      inlineFormsDismissed.has(form.inline_form) ? null : form;
-
-    // 1. Explicit JSON marker (always takes priority, even if dismissed — agent explicitly asked for it)
-    const explicit = parseInlineFormFromAssistantText(latestAssistantText);
-    if (explicit) return propose(explicit);
-
-    // 2. Keyword fallback — detect what the agent is asking about
-    const lower = latestAssistantText.toLowerCase();
-    if (/what (type|kind) of (home|house)|apartment or villa|home type/i.test(lower))
-      return propose({ inline_form: "home_type_picker" });
-    if (/rooms|spaces|bedrooms|which rooms|add.*room|set up.*room/i.test(lower) && !/chore|clean|sweep/i.test(lower))
-      return propose({ inline_form: "room_editor" });
-    if (/features|appliances|what.*does your home have/i.test(lower) && !/saved|service|vendor|maintain/i.test(lower))
-      return propose({ inline_form: "feature_selector" });
-    if (/pets|kids|children|bathrooms|flooring|household details/i.test(lower) && !/chore|room/i.test(lower))
-      return propose({ inline_form: "household_details" });
-    if (/helper|maid|cook|servant|cleaner|do you have.*help/i.test(lower) && !/assign|chore|saved/i.test(lower))
-      return propose({ inline_form: "helper_form" });
-    return null;
-  }, [isOnboarding, latestAssistantText, inlineFormsDismissed]);
+  // Onboarding state is now managed by OnboardingPanel (state machine),
+  // not keyword detection. The panel is rendered below the messages.
 
   const proposedClarificationKey = useMemo(() => {
     if (!proposedClarification) return "";
@@ -4325,98 +4299,16 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
 
             {showTypingDots && <TypingIndicator />}
 
-            {/* Inline onboarding form rendered inside chat */}
-            {proposedInlineForm && !inlineFormsDismissed.has(proposedInlineForm.inline_form) && (
-              <Box sx={{ maxWidth: 520, mx: "auto", my: 1 }}>
-                <OnboardingInlineForm
-                  formType={proposedInlineForm.inline_form}
-                  context={proposedInlineForm.context}
-                  disabled={isStreaming}
-                  onSubmit={(data) => {
-                    setInlineFormsDismissed((prev) => new Set(prev).add(proposedInlineForm.inline_form));
-                    // Save form data directly via Supabase, then tell the agent what was saved
-                    void (async () => {
-                      const hid = (authedHouseholdId || agentHouseholdId || "").trim();
-                      const formType = String(data.form_type ?? "");
-                      let savedMsg = "";
-
-                      try {
-                        if (formType === "home_type_picker" && hid) {
-                          const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-                          await supabase.from("home_profiles").upsert({
-                            household_id: hid,
-                            home_type: data.home_type ?? "apartment",
-                            bhk: data.bhk ?? 2,
-                            spaces: rooms,
-                            floors: data.floors ?? 1,
-                            has_balcony: rooms.some((r: Record<string, unknown>) => String(r.display_name ?? "").toLowerCase().includes("balcony")),
-                          }, { onConflict: "household_id" });
-                          savedMsg = `Home profile saved: ${data.home_type}, ${data.bhk} BHK, ${rooms.length} rooms. Proceed to the next step.`;
-                        } else if (formType === "room_editor" && hid) {
-                          const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-                          await supabase.from("home_profiles").update({ spaces: rooms }).eq("household_id", hid);
-                          savedMsg = `Rooms updated: ${rooms.length} rooms saved. Proceed to the next step.`;
-                        } else if (formType === "feature_selector" && hid) {
-                          const features = Array.isArray(data.features) ? data.features : [];
-                          // Delete existing then insert
-                          await supabase.from("home_features").delete().eq("household_id", hid);
-                          if (features.length > 0) {
-                            await supabase.from("home_features").insert(
-                              features.map((f: Record<string, unknown>) => ({
-                                household_id: hid,
-                                feature_key: f.feature_key,
-                                quantity: f.quantity ?? 1,
-                              }))
-                            );
-                          }
-                          savedMsg = `${features.length} home features saved. Proceed to the next step.`;
-                        } else if (formType === "household_details" && hid) {
-                          await supabase.from("home_profiles").update({
-                            has_pets: data.has_pets ?? false,
-                            has_kids: data.has_kids ?? false,
-                            num_bathrooms: data.num_bathrooms ?? null,
-                            flooring_type: data.flooring_type ?? null,
-                          }).eq("household_id", hid);
-                          savedMsg = `Household details saved. Proceed to the next step.`;
-                        } else if (formType === "helper_form") {
-                          if (data.skipped) {
-                            savedMsg = "User skipped adding helpers. Wrap up onboarding.";
-                          } else if (hid) {
-                            await supabase.from("helpers").insert({
-                              household_id: hid,
-                              name: data.name,
-                              type: data.type ?? null,
-                              phone: data.phone ?? null,
-                            });
-                            savedMsg = `Helper "${data.name}" added. Ask if they want to add more helpers or finish.`;
-                          }
-                        } else if (formType === "chore_recommendations") {
-                          if (data.skipped) {
-                            savedMsg = "User skipped chore creation. Proceed to helpers step.";
-                          } else {
-                            const chores = Array.isArray(data.confirmed_chores) ? data.confirmed_chores : [];
-                            if (chores.length > 0 && hid) {
-                              await supabase.from("chores").insert(
-                                chores.map((c: Record<string, unknown>) => ({
-                                  household_id: hid,
-                                  title: c.title,
-                                  status: "pending",
-                                  priority: 1,
-                                  metadata: { space: c.space, cadence: c.cadence, source: "onboarding" },
-                                }))
-                              );
-                            }
-                            savedMsg = `${chores.length} chores created. Proceed to the next step.`;
-                          }
-                        }
-                      } catch (e) {
-                        savedMsg = `Error saving: ${e instanceof Error ? e.message : "unknown"}. Please try again.`;
-                      }
-
-                      if (savedMsg) {
-                        void sendMessage(savedMsg, { silent: true });
-                      }
-                    })();
+            {/* State-driven onboarding panel — replaces keyword-based form detection */}
+            {isOnboarding && (
+              <Box sx={{ my: 1 }}>
+                <OnboardingPanel
+                  householdId={(authedHouseholdId || agentHouseholdId || "").trim()}
+                  userId={authedUser?.id ?? ""}
+                  onFormSubmitted={(msg) => void sendMessage(msg, { silent: true })}
+                  onComplete={() => {
+                    // Navigate away from onboarding mode
+                    navigate("/", { replace: true });
                   }}
                 />
               </Box>
