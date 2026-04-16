@@ -22,7 +22,9 @@ import { useOnboardingSteps, type OnboardingStep } from "../../hooks/useOnboardi
 import type { OnboardingState } from "../../services/onboardingState";
 import { OnboardingInlineForm } from "./OnboardingInlineForms";
 import { supabase } from "../../services/supabaseClient";
+import { executeToolCall } from "../../services/agentApi";
 import { markOnboardingComplete } from "../../services/profileService";
+import { useAuth } from "../../auth/AuthProvider";
 
 interface OnboardingPanelProps {
   householdId: string;
@@ -104,6 +106,7 @@ export function OnboardingPanel({
   onComplete,
 }: OnboardingPanelProps) {
   const { t } = useI18n();
+  const { accessToken } = useAuth();
   const {
     currentStep,
     state,
@@ -208,34 +211,55 @@ export function OnboardingPanel({
           savedMsg = "Chore creation skipped.";
         } else {
           const chores = Array.isArray(data.confirmed_chores) ? data.confirmed_chores : [];
-          if (chores.length > 0 && householdId) {
-            await dbCall(supabase.from("chores").insert(
-              chores.map((c: Record<string, unknown>) => ({
-                household_id: householdId,
-                user_id: userId,
-                title: c.title,
-                status: "pending",
-                priority: 1,
-                metadata: { space: c.space, cadence: c.cadence, source: "onboarding" },
-              }))
-            ));
+          if (chores.length > 0 && householdId && accessToken) {
+            for (const c of chores as Array<Record<string, unknown>>) {
+              await executeToolCall({
+                accessToken,
+                householdId,
+                scope: "household",
+                toolCall: {
+                  id: `onboard_chore_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                  tool: "db.insert",
+                  args: {
+                    table: "chores",
+                    record: {
+                      title: c.title,
+                      status: "pending",
+                      priority: 1,
+                      metadata: { space: c.space, cadence: c.cadence, source: "onboarding" },
+                    },
+                  },
+                  reason: "Onboarding: create chore",
+                },
+              });
+            }
           }
           savedMsg = `${chores.length} chores created.`;
         }
       } else if (formType === "helper_form") {
         if (data.skipped) {
           savedMsg = "Helper setup skipped.";
-        } else if (householdId) {
+        } else if (householdId && accessToken) {
           const helpers = Array.isArray(data.helpers) ? data.helpers : [];
-          if (helpers.length > 0) {
-            await dbCall(supabase.from("helpers").insert(
-              helpers.map((h: Record<string, unknown>) => ({
-                household_id: householdId,
-                name: h.name,
-                type: h.type ?? null,
-                phone: h.phone ?? null,
-              }))
-            ));
+          for (const h of helpers as Array<Record<string, unknown>>) {
+            await executeToolCall({
+              accessToken,
+              householdId,
+              scope: "household",
+              toolCall: {
+                id: `onboard_helper_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                tool: "db.insert",
+                args: {
+                  table: "helpers",
+                  record: {
+                    name: h.name,
+                    type: h.type ?? null,
+                    phone: h.phone ?? null,
+                  },
+                },
+                reason: "Onboarding: create helper",
+              },
+            });
           }
           savedMsg = `${helpers.length} helper${helpers.length === 1 ? "" : "s"} added.`;
         }
