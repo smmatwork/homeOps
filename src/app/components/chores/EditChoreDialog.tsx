@@ -11,6 +11,7 @@ import {
 } from "@mui/material";
 import { useI18n } from "../../i18n";
 import type { ChoreRow } from "./ChoreCard";
+import { cadenceLabel } from "../../services/choreRecommendationEngine";
 
 interface EditChoreDialogProps {
   open: boolean;
@@ -35,7 +36,11 @@ interface EditChoreDialogProps {
 
 const STATUS_OPTIONS = ["pending", "in-progress", "completed"] as const;
 const PRIORITY_OPTIONS = [1, 2, 3] as const;
-const CADENCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
+const CADENCE_OPTIONS = [
+  "daily", "alternate_days", "every_3_days", "every_4_days",
+  "weekly_mon", "weekly_tue", "weekly_wed", "weekly_thu", "weekly_fri", "weekly_sat", "weekly_sun",
+  "biweekly_mon", "biweekly_sat", "monthly",
+] as const;
 
 function datetimeLocalFromIso(iso: string | null): string {
   if (!iso) return "";
@@ -140,8 +145,9 @@ export function EditChoreDialog({
           </TextField>
           <TextField size="small" label={t("chores.space")} value={form.space} onChange={set("space")} />
           <TextField size="small" select label={t("chat.frequency")} value={form.cadence} onChange={set("cadence")}>
+            <MenuItem value=""><em>—</em></MenuItem>
             {CADENCE_OPTIONS.map((c) => (
-              <MenuItem key={c} value={c}>{t(`chat.frequency_${c}`)}</MenuItem>
+              <MenuItem key={c} value={c}>{cadenceLabel(c)}</MenuItem>
             ))}
           </TextField>
           <TextField size="small" label={t("chores.category")} value={form.category} onChange={set("category")} />

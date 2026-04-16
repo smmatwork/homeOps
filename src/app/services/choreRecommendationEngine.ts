@@ -27,39 +27,52 @@ export type Intensity = "light" | "normal" | "heavy";
 
 export type Cadence =
   | "daily"
+  | "alternate_days"
   | "every_2_days"
   | "every_3_days"
   | "every_4_days"
   | "every_5_days"
   | "weekly"
+  | "weekly_mon" | "weekly_tue" | "weekly_wed" | "weekly_thu" | "weekly_fri" | "weekly_sat" | "weekly_sun"
   | "biweekly"
+  | "biweekly_mon" | "biweekly_sat"
   | "monthly";
 
-/** Convert a cadence to its interval in days. Returns null for non-interval cadences. */
+/** Convert a cadence to its interval in days. */
 export function cadenceIntervalDays(cadence: Cadence): number {
-  switch (cadence) {
-    case "daily": return 1;
-    case "every_2_days": return 2;
-    case "every_3_days": return 3;
-    case "every_4_days": return 4;
-    case "every_5_days": return 5;
-    case "weekly": return 7;
-    case "biweekly": return 14;
-    case "monthly": return 30;
-  }
+  if (cadence === "daily") return 1;
+  if (cadence === "alternate_days" || cadence === "every_2_days") return 2;
+  if (cadence === "every_3_days") return 3;
+  if (cadence === "every_4_days") return 4;
+  if (cadence === "every_5_days") return 5;
+  if (cadence.startsWith("weekly")) return 7;
+  if (cadence.startsWith("biweekly")) return 14;
+  if (cadence === "monthly") return 30;
+  return 7;
 }
 
 /** Human-readable label for a cadence value. */
-export function cadenceLabel(cadence: Cadence): string {
+export function cadenceLabel(cadence: Cadence | string): string {
   switch (cadence) {
     case "daily": return "Daily";
+    case "alternate_days": return "Alternate days";
     case "every_2_days": return "Every 2 days";
     case "every_3_days": return "Every 3 days";
     case "every_4_days": return "Every 4 days";
     case "every_5_days": return "Every 5 days";
     case "weekly": return "Weekly";
+    case "weekly_mon": return "Weekly — Mon";
+    case "weekly_tue": return "Weekly — Tue";
+    case "weekly_wed": return "Weekly — Wed";
+    case "weekly_thu": return "Weekly — Thu";
+    case "weekly_fri": return "Weekly — Fri";
+    case "weekly_sat": return "Weekly — Sat";
+    case "weekly_sun": return "Weekly — Sun";
     case "biweekly": return "Biweekly";
+    case "biweekly_mon": return "Alt. week — Mon";
+    case "biweekly_sat": return "Alt. week — Sat";
     case "monthly": return "Monthly";
+    default: return String(cadence);
   }
 }
 

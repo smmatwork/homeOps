@@ -25,13 +25,19 @@ interface CreateChoreDialogProps {
   }) => void;
 }
 
-const CADENCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
+import { cadenceLabel } from "../../services/choreRecommendationEngine";
+
+const CADENCE_OPTIONS = [
+  "daily", "alternate_days", "every_3_days", "every_4_days",
+  "weekly_mon", "weekly_tue", "weekly_wed", "weekly_thu", "weekly_fri", "weekly_sat", "weekly_sun",
+  "biweekly_mon", "biweekly_sat", "monthly",
+] as const;
 
 const EMPTY_FORM = {
   title: "",
   description: "",
   helperId: "",
-  cadence: "weekly",
+  cadence: "weekly_sat",
   dueAt: "",
 };
 
@@ -103,7 +109,7 @@ export function CreateChoreDialog({
           >
             {CADENCE_OPTIONS.map((c) => (
               <MenuItem key={c} value={c}>
-                {t(`chat.frequency_${c}`)}
+                {cadenceLabel(c)}
               </MenuItem>
             ))}
           </TextField>

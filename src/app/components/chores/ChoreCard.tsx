@@ -16,6 +16,7 @@ import {
   ReportProblem,
 } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
+import { cadenceLabel } from "../../services/choreRecommendationEngine";
 
 /* ── shared types & helpers ── */
 
@@ -180,7 +181,7 @@ export function ChoreCard({
               )}
               {cadence && (
                 <Typography variant="caption">
-                  {t("chores.cadence")}: {cadence}
+                  {t("chores.cadence")}: {cadenceLabel(cadence)}
                 </Typography>
               )}
               {helperName && (
