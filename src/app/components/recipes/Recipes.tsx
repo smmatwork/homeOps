@@ -1,426 +1,777 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import {
+  Alert,
+  Autocomplete,
   Box,
   Button,
   Card,
   CardContent,
   CardHeader,
+  Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
-  Alert,
   FormControl,
+  IconButton,
   InputLabel,
   MenuItem,
   Select,
+  Snackbar,
+  Stack,
+  Tab,
+  Tabs,
   TextField,
   Typography,
-  IconButton,
-  Chip,
-  Stack,
 } from "@mui/material";
 import {
   Add,
-  Search,
-  Timer,
-  People,
+  CheckCircle,
+  Delete,
+  Edit,
   Favorite,
   FavoriteBorder,
-  Edit,
-  Delete,
+  People,
+  Search,
+  ShoppingCart,
+  Timer,
 } from "@mui/icons-material";
-import { executeToolCall, getYoutubeSettings, setYoutubeSettings } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
 import { useAuth } from "../../auth/AuthProvider";
+import {
+  MEAL_TYPES,
+  RECIPE_CATEGORIES,
+  createRecipe,
+  deleteRecipe,
+  deleteMealPlan,
+  fetchMealPlans,
+  fetchPantryItems,
+  fetchRecipes,
+  generateShoppingList,
+  updateRecipe,
+  upsertMealPlan,
+  type MealPlanEntry,
+  type PantryItem,
+  type Recipe,
+  type RecipeMetadata,
+  type ShoppingListItem,
+} from "../../services/recipesApi";
 
-type YoutubeSettings = {
-  queryTemplate: string;
-  preferredChannels: string;
-  includeShorts: boolean;
-};
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-const DEFAULT_YT_SETTINGS: YoutubeSettings = {
-  queryTemplate: "{recipe} recipe",
-  preferredChannels: "",
-  includeShorts: false,
-};
-
-function buildYoutubeQuery(params: {
-  recipe: string;
-  settings: YoutubeSettings;
-}): string {
-  const { recipe, settings } = params;
-  const base = (settings.queryTemplate || "{recipe} recipe").split("{recipe}").join(recipe.trim());
-  const parts = [base.trim()];
-  if (settings.preferredChannels.trim()) parts.push(settings.preferredChannels.trim());
-  if (settings.includeShorts) parts.push("shorts");
-  return parts.filter(Boolean).join(" ");
+function mondayOfWeek(offset: number): Date {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1) + offset * 7;
+  d.setDate(diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
+function formatDateShort(d: Date): string {
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function toIsoDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function weekDates(weekOffset: number): Date[] {
+  const monday = mondayOfWeek(weekOffset);
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(d.getDate() + i);
+    return d;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main Component
+// ---------------------------------------------------------------------------
+
 export function Recipes() {
-  const { householdId, accessToken } = useAuth();
+  const { householdId } = useAuth();
   const { t } = useI18n();
+
+  const [tab, setTab] = useState(0);
+  const [snack, setSnack] = useState<{ msg: string; severity: "success" | "error" } | null>(null);
+
+  // ── Recipes state ──────────────────────────────────────────────
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipesLoading, setRecipesLoading] = useState(true);
+  const [recipesError, setRecipesError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [category, setCategory] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
+  const [saveBusy, setSaveBusy] = useState(false);
 
-  const [agentAccessToken, setAgentAccessToken] = useState("");
-  const [agentHouseholdId, setAgentHouseholdId] = useState("");
+  // Recipe form fields
+  const [formTitle, setFormTitle] = useState("");
+  const [formDescription, setFormDescription] = useState("");
+  const [formCategory, setFormCategory] = useState("");
+  const [formCuisine, setFormCuisine] = useState("");
+  const [formPrepTime, setFormPrepTime] = useState("");
+  const [formCookTime, setFormCookTime] = useState("");
+  const [formServings, setFormServings] = useState("");
+  const [formDifficulty, setFormDifficulty] = useState("");
+  const [formIngredients, setFormIngredients] = useState("");
+  const [formInstructions, setFormInstructions] = useState("");
+  const [formSourceUrl, setFormSourceUrl] = useState("");
 
-  const [ytSearchText, setYtSearchText] = useState("");
-  const [ytSettings, setYtSettings] = useState<YoutubeSettings>(DEFAULT_YT_SETTINGS);
-  const [ytSettingsOpen, setYtSettingsOpen] = useState(false);
-  const [ytBusy, setYtBusy] = useState(false);
-  const [ytError, setYtError] = useState<string | null>(null);
-  const [ytSuccess, setYtSuccess] = useState<string | null>(null);
+  // ── Meal planner state ─────────────────────────────────────────
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [mealPlans, setMealPlans] = useState<MealPlanEntry[]>([]);
+  const [mealsLoading, setMealsLoading] = useState(false);
+  const [mealDialogOpen, setMealDialogOpen] = useState(false);
+  const [mealDate, setMealDate] = useState("");
+  const [mealType, setMealType] = useState<string>("lunch");
+  const [mealRecipeId, setMealRecipeId] = useState<string | null>(null);
+  const [mealCustom, setMealCustom] = useState("");
+  const [mealNotes, setMealNotes] = useState("");
+  const [mealBusy, setMealBusy] = useState(false);
 
-  // Load saved agent setup (shared with chat)
-  useEffect(() => {
-    try {
-      const savedToken = localStorage.getItem("homeops.agent.access_token") ?? "";
-      const savedHousehold = localStorage.getItem("homeops.agent.household_id") ?? "";
-      if (savedToken) setAgentAccessToken(savedToken);
-      if (savedHousehold) setAgentHouseholdId(savedHousehold);
-    } catch {
-      // ignore
+  // ── Shopping list state ────────────────────────────────────────
+  const [pantry, setPantry] = useState<PantryItem[]>([]);
+  const [pantryLoading, setPantryLoading] = useState(false);
+
+  // ── Data loading ───────────────────────────────────────────────
+
+  const loadRecipes = useCallback(async () => {
+    if (!householdId) return;
+    setRecipesLoading(true);
+    setRecipesError(null);
+    const result = await fetchRecipes(householdId);
+    setRecipesLoading(false);
+    if (result.error) {
+      setRecipesError(result.error);
+      return;
     }
-  }, []);
+    setRecipes(result.recipes);
+  }, [householdId]);
 
-  // Load per-household YouTube settings
+  const dates = useMemo(() => weekDates(weekOffset), [weekOffset]);
+
+  const loadMealPlans = useCallback(async () => {
+    if (!householdId || dates.length === 0) return;
+    setMealsLoading(true);
+    const result = await fetchMealPlans(
+      householdId,
+      toIsoDate(dates[0]),
+      toIsoDate(dates[6]),
+    );
+    setMealsLoading(false);
+    if (!result.error) setMealPlans(result.plans);
+  }, [householdId, dates]);
+
+  const loadPantry = useCallback(async () => {
+    if (!householdId) return;
+    setPantryLoading(true);
+    const result = await fetchPantryItems(householdId);
+    setPantryLoading(false);
+    if (!result.error) setPantry(result.items);
+  }, [householdId]);
+
   useEffect(() => {
-    const token = agentAccessToken.trim();
-    const householdId = agentHouseholdId.trim();
-    if (!token || !householdId) return;
+    void loadRecipes();
+  }, [loadRecipes]);
 
-    let cancelled = false;
-    (async () => {
-      setYtError(null);
-      setYtBusy(true);
-      const res = await getYoutubeSettings({ accessToken: token, householdId });
-      setYtBusy(false);
-      if (cancelled) return;
-      if (!res.ok) {
-        setYtError("error" in res ? res.error : "Failed to load YouTube settings");
-        return;
-      }
-      const raw = res.settings;
-      if (raw && typeof raw === "object") {
-        const obj = raw as Partial<YoutubeSettings>;
-        setYtSettings({
-          queryTemplate: typeof obj.queryTemplate === "string" ? obj.queryTemplate : DEFAULT_YT_SETTINGS.queryTemplate,
-          preferredChannels: typeof obj.preferredChannels === "string" ? obj.preferredChannels : DEFAULT_YT_SETTINGS.preferredChannels,
-          includeShorts: typeof obj.includeShorts === "boolean" ? obj.includeShorts : DEFAULT_YT_SETTINGS.includeShorts,
-        });
-      } else {
-        setYtSettings(DEFAULT_YT_SETTINGS);
-      }
-    })();
+  useEffect(() => {
+    if (tab === 1) void loadMealPlans();
+  }, [tab, loadMealPlans]);
 
-    return () => {
-      cancelled = true;
+  useEffect(() => {
+    if (tab === 2) {
+      void loadMealPlans();
+      void loadPantry();
+    }
+  }, [tab, loadMealPlans, loadPantry]);
+
+  // ── Recipe form helpers ────────────────────────────────────────
+
+  const resetForm = () => {
+    setFormTitle("");
+    setFormDescription("");
+    setFormCategory("");
+    setFormCuisine("");
+    setFormPrepTime("");
+    setFormCookTime("");
+    setFormServings("");
+    setFormDifficulty("");
+    setFormIngredients("");
+    setFormInstructions("");
+    setFormSourceUrl("");
+    setEditingRecipe(null);
+  };
+
+  const openAddDialog = () => {
+    resetForm();
+    setDialogOpen(true);
+  };
+
+  const openEditDialog = (recipe: Recipe) => {
+    setEditingRecipe(recipe);
+    const m = recipe.metadata;
+    setFormTitle(recipe.title);
+    setFormDescription(m.description ?? "");
+    setFormCategory(m.category ?? "");
+    setFormCuisine(m.cuisine ?? "");
+    setFormPrepTime(m.prepTime ?? "");
+    setFormCookTime(m.cookTime ?? "");
+    setFormServings(m.servings?.toString() ?? "");
+    setFormDifficulty(m.difficulty ?? "");
+    setFormIngredients((m.ingredients ?? []).join("\n"));
+    setFormInstructions(m.instructions ?? "");
+    setFormSourceUrl(recipe.sourceUrl ?? "");
+    setDialogOpen(true);
+  };
+
+  const handleSaveRecipe = async () => {
+    if (!householdId || !formTitle.trim()) return;
+    setSaveBusy(true);
+
+    const metadata: RecipeMetadata = {
+      description: formDescription || undefined,
+      category: formCategory || undefined,
+      cuisine: formCuisine || undefined,
+      prepTime: formPrepTime || undefined,
+      cookTime: formCookTime || undefined,
+      servings: formServings ? parseInt(formServings, 10) : undefined,
+      difficulty: formDifficulty || undefined,
+      ingredients: formIngredients
+        ? formIngredients.split("\n").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      instructions: formInstructions || undefined,
     };
-  }, [agentAccessToken, agentHouseholdId]);
 
-  const ytEffectiveQuery = useMemo(() => {
-    const recipe = ytSearchText.trim();
-    if (!recipe) return "";
-    return buildYoutubeQuery({ recipe, settings: ytSettings });
-  }, [ytSearchText, ytSettings]);
+    let result;
+    if (editingRecipe) {
+      result = await updateRecipe({
+        recipeId: editingRecipe.id,
+        title: formTitle,
+        sourceUrl: formSourceUrl || undefined,
+        metadata,
+      });
+    } else {
+      result = await createRecipe({
+        householdId,
+        title: formTitle,
+        sourceUrl: formSourceUrl || undefined,
+        metadata,
+      });
+    }
 
-  const openYoutubeSearch = () => {
-    if (!ytEffectiveQuery) return;
-    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(ytEffectiveQuery)}`;
-    window.open(url, "_blank", "noopener,noreferrer");
+    setSaveBusy(false);
+
+    if (!result.ok) {
+      setSnack({ msg: "error" in result ? result.error : "Failed to save", severity: "error" });
+      return;
+    }
+
+    setDialogOpen(false);
+    resetForm();
+    setSnack({ msg: editingRecipe ? "Recipe updated" : "Recipe added", severity: "success" });
+    await loadRecipes();
   };
 
-  const saveYoutubeSettings = async () => {
-    setYtError(null);
-    setYtSuccess(null);
-    const token = agentAccessToken.trim();
-    const householdId = agentHouseholdId.trim();
-    if (!token) {
-      setYtError("Missing access token. Set it in Chat → Agent Setup first.");
+  const handleDeleteRecipe = async (id: string) => {
+    const result = await deleteRecipe(id);
+    if (!result.ok) {
+      setSnack({ msg: "error" in result ? result.error : "Failed to delete", severity: "error" });
       return;
     }
-    if (!householdId) {
-      setYtError("Missing household_id. Set it in Chat → Agent Setup first.");
-      return;
-    }
-
-    setYtBusy(true);
-    const res = await setYoutubeSettings({ accessToken: token, householdId, settings: ytSettings });
-    setYtBusy(false);
-    if (!res.ok) {
-      setYtError("error" in res ? res.error : "Failed to save YouTube settings");
-      return;
-    }
-    setYtSuccess("Saved YouTube search settings.");
-    setYtSettingsOpen(false);
+    setSnack({ msg: "Recipe deleted", severity: "success" });
+    await loadRecipes();
   };
 
-  const recipes = [
-    {
-      id: 1,
-      title: "Spaghetti Carbonara",
-      category: "Dinner",
-      cuisine: "Italian",
-      prepTime: "15 min",
-      cookTime: "20 min",
-      servings: 4,
-      difficulty: "Medium",
-      description: "Classic Italian pasta dish with eggs, cheese, and pancetta",
-      ingredients: ["400g spaghetti", "200g pancetta", "4 eggs", "100g parmesan", "Black pepper"],
-      isFavorite: true,
-    },
-    {
-      id: 2,
-      title: "Avocado Toast",
-      category: "Breakfast",
-      cuisine: "Modern",
-      prepTime: "5 min",
-      cookTime: "5 min",
-      servings: 2,
-      difficulty: "Easy",
-      description: "Simple and healthy breakfast option",
-      ingredients: ["2 slices bread", "1 avocado", "Salt", "Pepper", "Lemon juice"],
-      isFavorite: false,
-    },
-  ];
+  const handleToggleFavorite = async (recipe: Recipe) => {
+    await updateRecipe({
+      recipeId: recipe.id,
+      metadata: { ...recipe.metadata, isFavorite: !recipe.metadata.isFavorite },
+    });
+    await loadRecipes();
+  };
 
-  const filteredRecipes = recipes.filter((recipe) => {
+  // ── Meal plan handlers ─────────────────────────────────────────
+
+  const openMealDialog = (date: Date, meal: string) => {
+    setMealDate(toIsoDate(date));
+    setMealType(meal);
+    setMealRecipeId(null);
+    setMealCustom("");
+    setMealNotes("");
+    setMealDialogOpen(true);
+  };
+
+  const handleSaveMealPlan = async () => {
+    if (!householdId || !mealDate) return;
+    setMealBusy(true);
+    const result = await upsertMealPlan({
+      householdId,
+      planDate: mealDate,
+      mealType: mealType,
+      recipeId: mealRecipeId ?? undefined,
+      customMeal: mealCustom || undefined,
+      notes: mealNotes || undefined,
+    });
+    setMealBusy(false);
+    if (!result.ok) {
+      setSnack({ msg: "error" in result ? result.error : "Failed to save", severity: "error" });
+      return;
+    }
+    setMealDialogOpen(false);
+    await loadMealPlans();
+  };
+
+  const handleDeleteMealPlan = async (planId: string) => {
+    const result = await deleteMealPlan(planId);
+    if (result.ok) await loadMealPlans();
+  };
+
+  // ── Shopping list (computed) ───────────────────────────────────
+
+  const shoppingList: ShoppingListItem[] = useMemo(
+    () => generateShoppingList(mealPlans, pantry),
+    [mealPlans, pantry],
+  );
+
+  // ── Filtered recipes ──────────────────────────────────────────
+
+  const filteredRecipes = recipes.filter((r) => {
     const matchesSearch =
-      recipe.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      recipe.cuisine.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = category === "all" || recipe.category === category;
+      r.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (r.metadata.cuisine ?? "").toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory =
+      category === "all" || r.metadata.category === category;
     return matchesSearch && matchesCategory;
   });
 
+  // ── Render ────────────────────────────────────────────────────
+
   return (
-    <Box p={4}>
-      {/* Header */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
+    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1200, mx: "auto" }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" mb={2}>
         <Box>
-          <Typography variant="h4" fontWeight="bold">
+          <Typography variant="h4" fontWeight={700}>
             {t("recipes.title")}
           </Typography>
-          <Typography color="textSecondary">
+          <Typography variant="body2" color="text.secondary">
             {t("recipes.subtitle")}
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={() => setDialogOpen(true)}
-        >
-          {t("recipes.add_recipe")}
-        </Button>
-      </Box>
+        {tab === 0 && (
+          <Button variant="contained" startIcon={<Add />} onClick={openAddDialog}>
+            {t("recipes.add_recipe")}
+          </Button>
+        )}
+      </Stack>
 
-      {/* YouTube Recipe Search */}
-      <Card variant="outlined" sx={{ mb: 3 }}>
-        <CardHeader
-          title={t("recipes.youtube_search")}
-          subheader={t("recipes.youtube_search_subtitle")}
-          action={
-            <Button variant="outlined" size="small" onClick={() => setYtSettingsOpen(true)}>
-              {t("recipes.search_options")}
-            </Button>
-          }
-        />
-        <Divider />
-        <CardContent>
-          <Stack spacing={1.5}>
-            {ytError && <Alert severity="error">{ytError}</Alert>}
-            {ytSuccess && <Alert severity="success">{ytSuccess}</Alert>}
-            {(!agentAccessToken.trim() || !agentHouseholdId.trim()) && (
-              <Alert severity="warning">
-                To save search options per household, set your <strong>access_token</strong> and <strong>household_id</strong> in Chat → Agent Setup.
-              </Alert>
-            )}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 3 }}>
+        <Tab label={t("recipes.tab_recipes")} />
+        <Tab label={t("recipes.tab_meal_plan")} />
+        <Tab label={t("recipes.tab_shopping_list")} />
+      </Tabs>
 
+      {/* ── Tab 0: Recipes ─────────────────────────────────────── */}
+      {tab === 0 && (
+        <>
+          <Box display="flex" gap={2} mb={3}>
             <TextField
-              label={t("recipes.recipe")}
-              value={ytSearchText}
-              onChange={(e) => setYtSearchText(e.target.value)}
-              placeholder="e.g. paneer butter masala"
+              placeholder={t("recipes.search_placeholder")}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               fullWidth
               size="small"
+              InputProps={{ startAdornment: <Search sx={{ mr: 1, color: "action.active" }} /> }}
             />
-
-            <TextField
-              label={t("recipes.generated_query")}
-              value={ytEffectiveQuery}
-              fullWidth
-              size="small"
-              InputProps={{ readOnly: true }}
-            />
-
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-              <Button variant="contained" onClick={openYoutubeSearch} disabled={!ytEffectiveQuery}>
-                {t("recipes.search_youtube")}
-              </Button>
-              <Button variant="text" onClick={() => setYtSearchText(searchQuery)} disabled={!searchQuery.trim()}>
-                {t("recipes.use_current_search")}
-              </Button>
-            </Stack>
-          </Stack>
-        </CardContent>
-      </Card>
-
-      {/* Search and Filter */}
-      <Box display="flex" gap={2} mb={4}>
-        <TextField
-          placeholder={t("recipes.search_placeholder")}
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          fullWidth
-          InputProps={{
-            startAdornment: <Search sx={{ mr: 1, color: "action.active" }} />,
-          }}
-        />
-        <FormControl size="small" sx={{ minWidth: 200 }}>
-          <InputLabel>{t("recipes.category")}</InputLabel>
-          <Select value={category} onChange={(e) => setCategory(e.target.value)}>
-            <MenuItem value="all">{t("recipes.all")}</MenuItem>
-            <MenuItem value="Breakfast">{t("recipes.breakfast")}</MenuItem>
-            <MenuItem value="Lunch">{t("recipes.lunch")}</MenuItem>
-            <MenuItem value="Dinner">{t("recipes.dinner")}</MenuItem>
-            <MenuItem value="Dessert">{t("recipes.dessert")}</MenuItem>
-          </Select>
-        </FormControl>
-      </Box>
-
-      {/* Recipes Grid */}
-      <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(300px, 1fr))" gap={2}>
-        {filteredRecipes.map((recipe) => (
-          <Card key={recipe.id}>
-            <CardHeader
-              title={recipe.title}
-              subheader={recipe.description}
-              action={
-                <IconButton>
-                  {recipe.isFavorite ? <Favorite color="error" /> : <FavoriteBorder />}
-                </IconButton>
-              }
-            />
-            <CardContent>
-              <Box display="flex" gap={1} mb={2}>
-                <Chip label={`${recipe.prepTime} + ${recipe.cookTime}`} icon={<Timer />} />
-                <Chip label={`${recipe.servings} servings`} icon={<People />} />
-                <Chip label={recipe.difficulty} />
-              </Box>
-              <Typography variant="body2" color="textSecondary">
-                {t("recipes.ingredients")}
-              </Typography>
-              <ul>
-                {recipe.ingredients.slice(0, 3).map((ingredient, idx) => (
-                  <li key={idx}>
-                    <Typography variant="body2">{ingredient}</Typography>
-                  </li>
+            <FormControl size="small" sx={{ minWidth: 160 }}>
+              <InputLabel>{t("recipes.category")}</InputLabel>
+              <Select value={category} label={t("recipes.category")} onChange={(e) => setCategory(e.target.value)}>
+                <MenuItem value="all">{t("recipes.all")}</MenuItem>
+                {RECIPE_CATEGORIES.map((c) => (
+                  <MenuItem key={c} value={c}>{c}</MenuItem>
                 ))}
-                {recipe.ingredients.length > 3 && (
-                  <Typography variant="caption" color="textSecondary">
-                    + {recipe.ingredients.length - 3} {t("recipes.more")}
-                  </Typography>
-                )}
-              </ul>
-            </CardContent>
-            <Divider />
-            <Box display="flex" justifyContent="space-between" p={2}>
-              <Button variant="outlined" size="small">
-                {t("recipes.view_full")}
-              </Button>
-              <Box>
-                <IconButton>
-                  <Edit />
-                </IconButton>
-                <IconButton color="error">
-                  <Delete />
-                </IconButton>
-              </Box>
-            </Box>
-          </Card>
-        ))}
-      </Box>
+              </Select>
+            </FormControl>
+          </Box>
 
-      {filteredRecipes.length === 0 && (
-        <Box textAlign="center" py={4}>
-          <Typography variant="h6">{t("recipes.no_recipes")}</Typography>
-          <Typography color="textSecondary">
-            {t("recipes.no_recipes_hint")}
-          </Typography>
-        </Box>
+          {recipesLoading ? (
+            <Box display="flex" justifyContent="center" py={4}>
+              <CircularProgress />
+            </Box>
+          ) : recipesError ? (
+            <Alert severity="error">{recipesError}</Alert>
+          ) : filteredRecipes.length === 0 ? (
+            <Box textAlign="center" py={6}>
+              <Typography variant="h6">{t("recipes.no_recipes")}</Typography>
+              <Typography color="text.secondary">{t("recipes.no_recipes_hint")}</Typography>
+            </Box>
+          ) : (
+            <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(300px, 1fr))" gap={2}>
+              {filteredRecipes.map((recipe) => (
+                <Card key={recipe.id} variant="outlined">
+                  <CardHeader
+                    title={recipe.title}
+                    subheader={recipe.metadata.description}
+                    action={
+                      <IconButton onClick={() => void handleToggleFavorite(recipe)}>
+                        {recipe.metadata.isFavorite ? <Favorite color="error" /> : <FavoriteBorder />}
+                      </IconButton>
+                    }
+                  />
+                  <CardContent>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap mb={1}>
+                      {recipe.metadata.prepTime && (
+                        <Chip size="small" icon={<Timer />} label={recipe.metadata.prepTime} />
+                      )}
+                      {recipe.metadata.servings && (
+                        <Chip size="small" icon={<People />} label={`${recipe.metadata.servings} servings`} />
+                      )}
+                      {recipe.metadata.difficulty && (
+                        <Chip size="small" label={recipe.metadata.difficulty} />
+                      )}
+                      {recipe.metadata.category && (
+                        <Chip size="small" variant="outlined" label={recipe.metadata.category} />
+                      )}
+                    </Stack>
+                    {recipe.metadata.ingredients && recipe.metadata.ingredients.length > 0 && (
+                      <Typography variant="caption" color="text.secondary">
+                        {recipe.metadata.ingredients.slice(0, 4).join(", ")}
+                        {recipe.metadata.ingredients.length > 4 &&
+                          ` +${recipe.metadata.ingredients.length - 4} more`}
+                      </Typography>
+                    )}
+                  </CardContent>
+                  <Divider />
+                  <Stack direction="row" justifyContent="flex-end" spacing={0.5} p={1}>
+                    {recipe.householdId && (
+                      <>
+                        <IconButton size="small" onClick={() => openEditDialog(recipe)}>
+                          <Edit fontSize="small" />
+                        </IconButton>
+                        <IconButton size="small" color="error" onClick={() => void handleDeleteRecipe(recipe.id)}>
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      </>
+                    )}
+                  </Stack>
+                </Card>
+              ))}
+            </Box>
+          )}
+        </>
       )}
 
-      {/* Add Recipe Dialog */}
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>{t("recipes.add_new_recipe")}</DialogTitle>
-        <DialogContent>
-          <Box display="flex" flexDirection="column" gap={2}>
-            <TextField label={t("recipes.recipe_title")} fullWidth />
-            <TextField label={t("recipes.description")} fullWidth multiline rows={2} />
-            <Box display="flex" gap={2}>
-              <TextField label={t("recipes.category")} fullWidth />
-              <TextField label={t("recipes.cuisine")} fullWidth />
-            </Box>
-            <Box display="flex" gap={2}>
-              <TextField label={t("recipes.prep_time")} fullWidth />
-              <TextField label={t("recipes.cook_time")} fullWidth />
-              <TextField label={t("recipes.servings")} fullWidth type="number" />
-            </Box>
-            <TextField label={t("recipes.ingredients")} fullWidth multiline rows={4} />
-            <TextField label={t("recipes.instructions")} fullWidth multiline rows={6} />
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
-          <Button variant="contained">{t("recipes.save_recipe")}</Button>
-        </DialogActions>
-      </Dialog>
+      {/* ── Tab 1: Meal Planner ────────────────────────────────── */}
+      {tab === 1 && (
+        <>
+          <Stack direction="row" justifyContent="center" alignItems="center" spacing={2} mb={3}>
+            <Button size="small" onClick={() => setWeekOffset((w) => w - 1)}>
+              ← {t("recipes.prev_week")}
+            </Button>
+            <Typography variant="subtitle1" fontWeight={600}>
+              {formatDateShort(dates[0])} — {formatDateShort(dates[6])}
+            </Typography>
+            <Button size="small" onClick={() => setWeekOffset((w) => w + 1)}>
+              {t("recipes.next_week")} →
+            </Button>
+          </Stack>
 
-      {/* YouTube Settings Dialog */}
-      <Dialog open={ytSettingsOpen} onClose={() => setYtSettingsOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>{t("recipes.youtube_options")}</DialogTitle>
+          {mealsLoading ? (
+            <Box display="flex" justifyContent="center" py={4}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <Box sx={{ overflowX: "auto" }}>
+              <Box
+                display="grid"
+                gridTemplateColumns={`100px repeat(7, 1fr)`}
+                gap={1}
+                sx={{ minWidth: 800 }}
+              >
+                {/* Header row */}
+                <Box />
+                {dates.map((d) => (
+                  <Box key={toIsoDate(d)} textAlign="center">
+                    <Typography variant="caption" fontWeight={600}>
+                      {formatDateShort(d)}
+                    </Typography>
+                  </Box>
+                ))}
+
+                {/* Meal type rows */}
+                {MEAL_TYPES.map((meal) => (
+                  <>
+                    <Box
+                      key={`label-${meal}`}
+                      display="flex"
+                      alignItems="center"
+                      sx={{ textTransform: "capitalize" }}
+                    >
+                      <Typography variant="body2" fontWeight={600}>
+                        {meal}
+                      </Typography>
+                    </Box>
+                    {dates.map((d) => {
+                      const dateStr = toIsoDate(d);
+                      const plan = mealPlans.find(
+                        (p) => p.planDate === dateStr && p.mealType === meal,
+                      );
+                      return (
+                        <Card
+                          key={`${dateStr}-${meal}`}
+                          variant="outlined"
+                          sx={{
+                            minHeight: 60,
+                            cursor: "pointer",
+                            "&:hover": { bgcolor: "action.hover" },
+                          }}
+                          onClick={() => openMealDialog(d, meal)}
+                        >
+                          <CardContent sx={{ p: 1, "&:last-child": { pb: 1 } }}>
+                            {plan ? (
+                              <Stack spacing={0.5}>
+                                <Typography variant="caption" fontWeight={600} noWrap>
+                                  {plan.recipe?.title ?? plan.customMeal ?? "—"}
+                                </Typography>
+                                {plan.notes && (
+                                  <Typography variant="caption" color="text.secondary" noWrap>
+                                    {plan.notes}
+                                  </Typography>
+                                )}
+                                <Box textAlign="right">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleDeleteMealPlan(plan.id);
+                                    }}
+                                  >
+                                    <Delete sx={{ fontSize: 14 }} />
+                                  </IconButton>
+                                </Box>
+                              </Stack>
+                            ) : (
+                              <Typography variant="caption" color="text.disabled">
+                                +
+                              </Typography>
+                            )}
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </>
+                ))}
+              </Box>
+            </Box>
+          )}
+        </>
+      )}
+
+      {/* ── Tab 2: Shopping List ───────────────────────────────── */}
+      {tab === 2 && (
+        <>
+          <Typography variant="body2" color="text.secondary" mb={2}>
+            {t("recipes.shopping_list_hint")}
+          </Typography>
+
+          {pantryLoading || mealsLoading ? (
+            <Box display="flex" justifyContent="center" py={4}>
+              <CircularProgress />
+            </Box>
+          ) : shoppingList.length === 0 ? (
+            <Box textAlign="center" py={6}>
+              <ShoppingCart sx={{ fontSize: 64, color: "text.disabled", mb: 1 }} />
+              <Typography color="text.secondary">{t("recipes.shopping_list_empty")}</Typography>
+            </Box>
+          ) : (
+            <Stack spacing={1}>
+              {shoppingList.map((item) => (
+                <Card key={item.ingredient} variant="outlined">
+                  <CardContent sx={{ py: 1, "&:last-child": { pb: 1 } }}>
+                    <Stack direction="row" alignItems="center" spacing={2}>
+                      {item.inPantry ? (
+                        <CheckCircle color="success" fontSize="small" />
+                      ) : (
+                        <ShoppingCart color="warning" fontSize="small" />
+                      )}
+                      <Box flex={1}>
+                        <Typography
+                          variant="body2"
+                          fontWeight={item.inPantry ? 400 : 600}
+                          sx={item.inPantry ? { textDecoration: "line-through", color: "text.secondary" } : {}}
+                        >
+                          {item.ingredient}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          For: {item.neededForRecipes.join(", ")}
+                        </Typography>
+                      </Box>
+                      {item.inPantry && (
+                        <Chip size="small" label={`${item.pantryQuantity} in stock`} color="success" variant="outlined" />
+                      )}
+                    </Stack>
+                  </CardContent>
+                </Card>
+              ))}
+            </Stack>
+          )}
+        </>
+      )}
+
+      {/* ── Add/Edit Recipe Dialog ─────────────────────────────── */}
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {editingRecipe ? t("recipes.edit_recipe") : t("recipes.add_new_recipe")}
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
             <TextField
-              label={t("recipes.query_template")}
-              value={ytSettings.queryTemplate}
-              onChange={(e) => setYtSettings((prev) => ({ ...prev, queryTemplate: e.target.value }))}
-              helperText='Use "{recipe}" placeholder. Example: "{recipe} hebbars kitchen"'
+              label={t("recipes.recipe_title")}
+              value={formTitle}
+              onChange={(e) => setFormTitle(e.target.value)}
               fullWidth
               size="small"
+              required
             />
             <TextField
-              label={t("recipes.preferred_channels")}
-              value={ytSettings.preferredChannels}
-              onChange={(e) => setYtSettings((prev) => ({ ...prev, preferredChannels: e.target.value }))}
-              helperText='Example: "Hebbars Kitchen" or "Ranveer Brar"'
+              label={t("recipes.description")}
+              value={formDescription}
+              onChange={(e) => setFormDescription(e.target.value)}
               fullWidth
               size="small"
+              multiline
+              minRows={2}
             />
-            <FormControl fullWidth size="small">
-              <InputLabel>{t("recipes.include_shorts")}</InputLabel>
-              <Select
-                value={ytSettings.includeShorts ? "yes" : "no"}
-                label={t("recipes.include_shorts")}
-                onChange={(e) => setYtSettings((prev) => ({ ...prev, includeShorts: e.target.value === "yes" }))}
-              >
-                <MenuItem value="no">{t("recipes.no")}</MenuItem>
-                <MenuItem value="yes">{t("recipes.yes")}</MenuItem>
-              </Select>
-            </FormControl>
+            <Stack direction="row" spacing={2}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>{t("recipes.category")}</InputLabel>
+                <Select value={formCategory} label={t("recipes.category")} onChange={(e) => setFormCategory(e.target.value)}>
+                  {RECIPE_CATEGORIES.map((c) => (
+                    <MenuItem key={c} value={c}>{c}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <TextField
+                label={t("recipes.cuisine")}
+                value={formCuisine}
+                onChange={(e) => setFormCuisine(e.target.value)}
+                fullWidth
+                size="small"
+              />
+            </Stack>
+            <Stack direction="row" spacing={2}>
+              <TextField label={t("recipes.prep_time")} value={formPrepTime} onChange={(e) => setFormPrepTime(e.target.value)} fullWidth size="small" />
+              <TextField label={t("recipes.cook_time")} value={formCookTime} onChange={(e) => setFormCookTime(e.target.value)} fullWidth size="small" />
+              <TextField label={t("recipes.servings")} value={formServings} onChange={(e) => setFormServings(e.target.value)} fullWidth size="small" type="number" />
+            </Stack>
+            <TextField
+              label={t("recipes.ingredients")}
+              value={formIngredients}
+              onChange={(e) => setFormIngredients(e.target.value)}
+              fullWidth
+              size="small"
+              multiline
+              minRows={3}
+              helperText={t("recipes.ingredients_hint")}
+            />
+            <TextField
+              label={t("recipes.instructions")}
+              value={formInstructions}
+              onChange={(e) => setFormInstructions(e.target.value)}
+              fullWidth
+              size="small"
+              multiline
+              minRows={4}
+            />
+            <TextField
+              label={t("recipes.source_url")}
+              value={formSourceUrl}
+              onChange={(e) => setFormSourceUrl(e.target.value)}
+              fullWidth
+              size="small"
+              placeholder="https://..."
+            />
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setYtSettingsOpen(false)}>{t("common.cancel")}</Button>
-          <Button variant="contained" onClick={saveYoutubeSettings} disabled={ytBusy}>
+          <Button onClick={() => setDialogOpen(false)} disabled={saveBusy}>
+            {t("common.cancel")}
+          </Button>
+          <Button variant="contained" onClick={handleSaveRecipe} disabled={saveBusy || !formTitle.trim()}>
             {t("common.save")}
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* ── Assign Meal Dialog ─────────────────────────────────── */}
+      <Dialog open={mealDialogOpen} onClose={() => setMealDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{t("recipes.assign_meal")}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <TextField label={t("recipes.date")} value={mealDate} size="small" fullWidth InputProps={{ readOnly: true }} />
+            <TextField label={t("recipes.meal_type")} value={mealType} size="small" fullWidth InputProps={{ readOnly: true }} />
+            <Autocomplete
+              options={recipes}
+              getOptionLabel={(r) => r.title}
+              value={recipes.find((r) => r.id === mealRecipeId) ?? null}
+              onChange={(_, v) => {
+                setMealRecipeId(v?.id ?? null);
+                if (v) setMealCustom("");
+              }}
+              renderInput={(params) => (
+                <TextField {...params} label={t("recipes.pick_recipe")} size="small" />
+              )}
+              size="small"
+            />
+            <Typography variant="caption" color="text.secondary" textAlign="center">
+              — {t("recipes.or")} —
+            </Typography>
+            <TextField
+              label={t("recipes.custom_meal")}
+              value={mealCustom}
+              onChange={(e) => {
+                setMealCustom(e.target.value);
+                if (e.target.value) setMealRecipeId(null);
+              }}
+              fullWidth
+              size="small"
+              placeholder="e.g. Order pizza"
+            />
+            <TextField
+              label={t("recipes.notes")}
+              value={mealNotes}
+              onChange={(e) => setMealNotes(e.target.value)}
+              fullWidth
+              size="small"
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMealDialogOpen(false)} disabled={mealBusy}>
+            {t("common.cancel")}
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleSaveMealPlan}
+            disabled={mealBusy || (!mealRecipeId && !mealCustom.trim())}
+          >
+            {t("common.save")}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Snackbar ───────────────────────────────────────────── */}
+      <Snackbar
+        open={!!snack}
+        autoHideDuration={4000}
+        onClose={() => setSnack(null)}
+        message={snack?.msg}
+      />
     </Box>
   );
 }

@@ -210,23 +210,14 @@ export function CoverageDashboard({ onApplied, refreshKey = 0 }: CoverageDashboa
       setError(null);
 
       const nextMetadata = withDismissedGap(data.metadata, gap.id);
-      const res = await executeToolCall({
-        accessToken,
-        householdId,
-        scope: "household",
-        toolCall: {
-          id: `gap_dismiss_${gap.id}_${Date.now()}`,
-          tool: "db.insert",
-          args: {
-            table: "home_profiles",
-            record: {
-              household_id: householdId,
-              metadata: nextMetadata,
-            },
-          },
-          reason: `Coverage dashboard: dismiss gap "${gap.id}"`,
-        },
-      });
+
+      // Use direct Supabase update — the home_profiles row already exists.
+      const { error: updateErr } = await supabase
+        .from("home_profiles")
+        .update({ metadata: nextMetadata })
+        .eq("household_id", householdId);
+
+      const res = updateErr ? { ok: false as const, error: updateErr.message } : { ok: true as const };
       setBusy(false);
 
       if (!res.ok) {

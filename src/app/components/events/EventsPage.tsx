@@ -13,11 +13,12 @@ import {
   DialogTitle,
   IconButton,
   MenuItem,
+  Snackbar,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
-import { Add, Delete, Event as EventIcon } from "@mui/icons-material";
+import { Add, Delete, Event as EventIcon, Lightbulb } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import {
@@ -27,6 +28,7 @@ import {
   fetchHouseholdEvents,
   type HouseholdEvent,
 } from "../../services/householdEventsApi";
+import { ProposalsDrawer } from "../replan/ProposalsDrawer";
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return "";
@@ -54,6 +56,9 @@ export function EventsPage() {
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [snackOpen, setSnackOpen] = useState(false);
 
   // Form state
   const [type, setType] = useState<string>("guest_arrival");
@@ -101,6 +106,7 @@ export function EventsPage() {
     setEndAt("");
     setNotes("");
     await load();
+    setSnackOpen(true);
   };
 
   const handleDelete = async (eventId: string) => {
@@ -112,6 +118,7 @@ export function EventsPage() {
       return;
     }
     await load();
+    setSnackOpen(true);
   };
 
   return (
@@ -125,13 +132,22 @@ export function EventsPage() {
             {t("events.subtitle")}
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={() => setDialogOpen(true)}
-        >
-          {t("events.add_event")}
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="outlined"
+            startIcon={<Lightbulb />}
+            onClick={() => setDrawerOpen(true)}
+          >
+            {t("replan.title")}
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<Add />}
+            onClick={() => setDialogOpen(true)}
+          >
+            {t("events.add_event")}
+          </Button>
+        </Stack>
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
@@ -241,6 +257,27 @@ export function EventsPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <ProposalsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+
+      <Snackbar
+        open={snackOpen}
+        autoHideDuration={6000}
+        onClose={() => setSnackOpen(false)}
+        message={t("events.replan_hint")}
+        action={
+          <Button
+            color="inherit"
+            size="small"
+            onClick={() => {
+              setSnackOpen(false);
+              setDrawerOpen(true);
+            }}
+          >
+            {t("replan.title")}
+          </Button>
+        }
+      />
     </Box>
   );
 }
