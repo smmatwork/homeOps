@@ -7,14 +7,21 @@ import {
   Card,
   CardContent,
   CircularProgress,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
   Tab,
   Tabs,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
 import { ChecklistRtl, Close, DeleteOutline } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
 import { ChoreCard, type ChoreRow, getMetaStrings } from "./ChoreCard";
+import { cadenceLabel } from "../../services/choreRecommendationEngine";
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -36,34 +43,17 @@ interface ChoreListViewProps {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
+/*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
 const STATUS_TABS = ["all", "pending", "in_progress", "completed"] as const;
 type StatusTab = (typeof STATUS_TABS)[number];
+type GroupBy = "space" | "category" | "helper";
 
 function matchesTab(status: string, tab: StatusTab) {
   if (tab === "all") return true;
+  if (tab === "in_progress") return status === "in-progress" || status === "in_progress";
   return status === tab;
-}
-
-function groupByHelper(
-  chores: ChoreRow[],
-  helpers: Array<{ id: string; name: string }>,
-) {
-  const unassigned = chores.filter((c) => !c.helper_id);
-  const byId = new Map<string, ChoreRow[]>();
-  for (const c of chores) {
-    if (!c.helper_id) continue;
-    const arr = byId.get(c.helper_id) ?? [];
-    arr.push(c);
-    byId.set(c.helper_id, arr);
-  }
-  const sorted = [...helpers].sort((a, b) => a.name.localeCompare(b.name));
-  const byHelper = sorted
-    .map((h) => ({ helper: h, chores: byId.get(h.id) ?? [] }))
-    .filter((x) => x.chores.length > 0);
-  return { unassigned, byHelper };
 }
 
 /* ------------------------------------------------------------------ */
@@ -79,47 +69,104 @@ export function ChoreListView(props: ChoreListViewProps) {
 
   const [tab, setTab] = useState<StatusTab>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [groupBy, setGroupBy] = useState<GroupBy>("space");
+  const [filterSpace, setFilterSpace] = useState<string>(spaceFilter ?? "");
+  const [filterCategory, setFilterCategory] = useState<string>("");
+  const [filterCadence, setFilterCadence] = useState<string>(cadenceFilter ?? "");
 
-  /* ---------- derived data ---------- */
+  /* ---------- extract unique values for filter dropdowns ---------- */
+
+  const allSpaces = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of chores) { const s = getMetaStrings(c).space; if (s) set.add(s); }
+    return [...set].sort();
+  }, [chores]);
+
+  const allCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of chores) { const cat = getMetaStrings(c).category; if (cat) set.add(cat); }
+    return [...set].sort();
+  }, [chores]);
+
+  const allCadences = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of chores) { const cad = getMetaStrings(c).cadence; if (cad) set.add(cad); }
+    return [...set].sort();
+  }, [chores]);
+
+  /* ---------- filtered data ---------- */
 
   const filtered = useMemo(() => {
     let rows = chores;
-    if (spaceFilter) rows = rows.filter((c) => getMetaStrings(c).space === spaceFilter);
-    if (cadenceFilter) rows = rows.filter((c) => getMetaStrings(c).cadence === cadenceFilter);
+    if (filterSpace) rows = rows.filter((c) => getMetaStrings(c).space === filterSpace);
+    if (filterCategory) rows = rows.filter((c) => getMetaStrings(c).category === filterCategory);
+    if (filterCadence) rows = rows.filter((c) => getMetaStrings(c).cadence === filterCadence);
     return rows;
-  }, [chores, spaceFilter, cadenceFilter, t]);
+  }, [chores, filterSpace, filterCategory, filterCadence]);
 
   const counts = useMemo(() => {
     const m: Record<StatusTab, number> = { all: filtered.length, pending: 0, in_progress: 0, completed: 0 };
     for (const c of filtered) {
       if (c.status === "pending") m.pending++;
-      else if (c.status === "in_progress") m.in_progress++;
+      else if (c.status === "in-progress" || c.status === "in_progress") m.in_progress++;
       else if (c.status === "completed") m.completed++;
     }
     return m;
   }, [filtered]);
 
   const visible = useMemo(() => filtered.filter((c) => matchesTab(c.status, tab)), [filtered, tab]);
-  const { unassigned, byHelper } = useMemo(() => groupByHelper(visible, helpers), [visible, helpers]);
   const allIds = useMemo(() => visible.map((c) => c.id), [visible]);
+
+  /* ---------- grouping ---------- */
+
+  const groups = useMemo((): Array<{ label: string; chores: ChoreRow[] }> => {
+    const map = new Map<string, ChoreRow[]>();
+    const ungrouped: ChoreRow[] = [];
+
+    for (const c of visible) {
+      let key = "";
+      if (groupBy === "space") {
+        key = getMetaStrings(c).space || "";
+      } else if (groupBy === "category") {
+        key = getMetaStrings(c).category || "";
+      } else {
+        const helper = helpers.find((h) => h.id === c.helper_id);
+        key = helper?.name ?? "";
+      }
+      if (!key) {
+        ungrouped.push(c);
+      } else {
+        const arr = map.get(key) ?? [];
+        arr.push(c);
+        map.set(key, arr);
+      }
+    }
+
+    const sorted = [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const result = sorted.map(([label, chores]) => ({ label, chores }));
+
+    const ungroupedLabel = groupBy === "helper" ? t("chores.unassigned") : t("chores.none");
+    if (ungrouped.length > 0) result.push({ label: ungroupedLabel, chores: ungrouped });
+    return result;
+  }, [visible, groupBy, helpers, t]);
 
   /* ---------- selection ---------- */
 
   const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id));
 
-  const toggleAll = () => {
-    setSelected(allSelected ? new Set() : new Set(allIds));
-  };
-
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(allIds));
   const toggle = (id: string) => {
     const next = new Set(selected);
     next.has(id) ? next.delete(id) : next.add(id);
     setSelected(next);
   };
 
-  /* ---------- render helpers ---------- */
+  /* ---------- active filter chips ---------- */
 
-  const hasFilters = !!(spaceFilter || cadenceFilter);
+  const hasFilters = !!(filterSpace || filterCategory || filterCadence);
+  const clearAllFilters = () => { setFilterSpace(""); setFilterCategory(""); setFilterCadence(""); onClearFilters(); };
+
+  /* ---------- render ---------- */
 
   const renderGroup = (label: string, rows: ChoreRow[]) => {
     if (rows.length === 0) return null;
@@ -128,20 +175,12 @@ export function ChoreListView(props: ChoreListViewProps) {
 
     return (
       <Box key={label}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5, px: 0.5 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1, px: 0.5 }}>
           <Stack direction="row" spacing={1} alignItems="baseline">
-            <Typography variant="subtitle1" fontWeight={700}>
-              {label}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {completedCount}/{rows.length}
-            </Typography>
+            <Typography variant="subtitle1" fontWeight={700}>{label}</Typography>
+            <Typography variant="caption" color="text.secondary">{completedCount}/{rows.length}</Typography>
           </Stack>
-          <Chip
-            label={`${progressPct}%`}
-            size="small"
-            color={progressPct === 100 ? "success" : progressPct > 50 ? "primary" : "default"}
-          />
+          <Chip label={`${progressPct}%`} size="small" color={progressPct === 100 ? "success" : progressPct > 50 ? "primary" : "default"} />
         </Stack>
         <Stack spacing={1}>
           {rows.map((chore) => {
@@ -167,8 +206,6 @@ export function ChoreListView(props: ChoreListViewProps) {
     );
   };
 
-  /* ---------- main render ---------- */
-
   return (
     <Box>
       {/* Status tabs */}
@@ -178,12 +215,46 @@ export function ChoreListView(props: ChoreListViewProps) {
         ))}
       </Tabs>
 
-      {/* Active filters */}
+      {/* Group by + Filters row */}
+      <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+        <ToggleButtonGroup size="small" value={groupBy} exclusive onChange={(_, v) => { if (v) setGroupBy(v); }}>
+          <ToggleButton value="space">{t("chores.space")}</ToggleButton>
+          <ToggleButton value="category">{t("chores.category")}</ToggleButton>
+          <ToggleButton value="helper">{t("chores.helper")}</ToggleButton>
+        </ToggleButtonGroup>
+
+        <FormControl size="small" sx={{ minWidth: 120 }}>
+          <InputLabel>{t("chores.space")}</InputLabel>
+          <Select value={filterSpace} label={t("chores.space")} onChange={(e) => setFilterSpace(e.target.value)}>
+            <MenuItem value=""><em>{t("recipes.all")}</em></MenuItem>
+            {allSpaces.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
+          </Select>
+        </FormControl>
+
+        <FormControl size="small" sx={{ minWidth: 120 }}>
+          <InputLabel>{t("chores.category")}</InputLabel>
+          <Select value={filterCategory} label={t("chores.category")} onChange={(e) => setFilterCategory(e.target.value)}>
+            <MenuItem value=""><em>{t("recipes.all")}</em></MenuItem>
+            {allCategories.map((c) => <MenuItem key={c} value={c}>{c}</MenuItem>)}
+          </Select>
+        </FormControl>
+
+        <FormControl size="small" sx={{ minWidth: 130 }}>
+          <InputLabel>{t("chores.cadence")}</InputLabel>
+          <Select value={filterCadence} label={t("chores.cadence")} onChange={(e) => setFilterCadence(e.target.value)}>
+            <MenuItem value=""><em>{t("recipes.all")}</em></MenuItem>
+            {allCadences.map((c) => <MenuItem key={c} value={c}>{cadenceLabel(c)}</MenuItem>)}
+          </Select>
+        </FormControl>
+      </Stack>
+
+      {/* Active filter chips */}
       {hasFilters && (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-          {spaceFilter && <Chip size="small" label={spaceFilter} onDelete={onClearFilters} deleteIcon={<Close />} />}
-          {cadenceFilter && <Chip size="small" label={cadenceFilter} onDelete={onClearFilters} deleteIcon={<Close />} />}
-          <Button size="small" onClick={onClearFilters}>{t("chores.clear_filters")}</Button>
+        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
+          {filterSpace && <Chip size="small" label={filterSpace} onDelete={() => setFilterSpace("")} deleteIcon={<Close />} />}
+          {filterCategory && <Chip size="small" label={filterCategory} onDelete={() => setFilterCategory("")} deleteIcon={<Close />} />}
+          {filterCadence && <Chip size="small" label={cadenceLabel(filterCadence)} onDelete={() => setFilterCadence("")} deleteIcon={<Close />} />}
+          <Button size="small" onClick={clearAllFilters}>{t("chores.clear_filters")}</Button>
         </Stack>
       )}
 
@@ -194,12 +265,8 @@ export function ChoreListView(props: ChoreListViewProps) {
           {selected.size > 0 ? t("chores.n_selected").replace("{count}", String(selected.size)) : t("chores.select_all")}
         </Typography>
         {selected.size > 0 && (
-          <Button
-            size="small"
-            color="error"
-            startIcon={<DeleteOutline />}
-            onClick={() => { onBulkDelete([...selected]); setSelected(new Set()); }}
-          >
+          <Button size="small" color="error" startIcon={<DeleteOutline />}
+            onClick={() => { onBulkDelete([...selected]); setSelected(new Set()); }}>
             {t("chores.delete_selected")}
           </Button>
         )}
@@ -207,22 +274,19 @@ export function ChoreListView(props: ChoreListViewProps) {
 
       {/* Content */}
       {busy ? (
-        <Box display="flex" justifyContent="center" py={4}>
-          <CircularProgress />
-        </Box>
+        <Box display="flex" justifyContent="center" py={4}><CircularProgress /></Box>
       ) : visible.length === 0 ? (
         <Card variant="outlined">
           <CardContent sx={{ textAlign: "center", py: 6 }}>
             <ChecklistRtl sx={{ fontSize: 64, color: "text.disabled", mb: 2 }} />
             <Typography color="text.secondary">
-              {hasFilters ? t("chores.empty_filtered") : t("chores.empty")}
+              {hasFilters ? t("chores.no_chores_found") : t("chores.empty_title")}
             </Typography>
           </CardContent>
         </Card>
       ) : (
         <Stack spacing={3}>
-          {renderGroup(t("chores.unassigned"), unassigned)}
-          {byHelper.map(({ helper, chores: hc }) => renderGroup(helper.name, hc))}
+          {groups.map(({ label, chores: gc }) => renderGroup(label, gc))}
         </Stack>
       )}
     </Box>
