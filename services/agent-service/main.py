@@ -3864,11 +3864,18 @@ async def chat_respond(
                 enhanced_suffix += "\n" + intent_instruction
             enhanced_suffix += final_only_clause
         else:
-            # Onboarding mode: only add FACTS (for context), skip intent
-            # routing and strict JSON contract. The onboarding system prompt
-            # has its own output rules.
+            # Onboarding mode: add FACTS (for context) + a light output guard.
+            # The onboarding system prompt has its own detailed output rules,
+            # but we reinforce the no-chain-of-thought rule here.
             if facts_section:
                 enhanced_suffix += "\n\n" + facts_section
+            enhanced_suffix += (
+                "\n\nOUTPUT GUARD (onboarding mode):\n"
+                "- Return ONLY user-facing text. No chain-of-thought, no narration, no meta-commentary.\n"
+                "- NEVER say 'User has submitted', 'Next steps:', 'I will now', 'Let me process'.\n"
+                "- After receiving form data, respond with a 1-sentence acknowledgment then the next form or tool_calls.\n"
+                "- NEVER ask 'What would you like to do?' — always auto-proceed to the next onboarding step.\n"
+            )
 
         if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
             c0 = messages[0].get("content")
