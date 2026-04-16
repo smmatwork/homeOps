@@ -1155,15 +1155,29 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const onboardingPrompt = isOnboarding ? ONBOARDING_SYSTEM_PROMPT : undefined;
   const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat(onboardingPrompt ? { systemPrompt: onboardingPrompt } : undefined);
 
-  // Auto-trigger the agent greeting when onboarding starts
+  // Auto-trigger the agent greeting when onboarding starts, with state context
   const onboardingSentRef = useRef(false);
   useEffect(() => {
     if (isOnboarding && !onboardingSentRef.current && memoryReady) {
       onboardingSentRef.current = true;
-      // Send a silent trigger so the agent starts the conversation
-      void sendMessage("Hi, I'm new here. Help me set up my home.", { silent: false });
+      const hid = authedHouseholdId.trim() || agentHouseholdId.trim();
+      const uid = authedUser?.id ?? "";
+      if (hid && uid) {
+        // Detect current state and include it in the opening message
+        void (async () => {
+          const { detectOnboardingState, buildOnboardingContext } = await import("../../services/onboardingState");
+          const state = await detectOnboardingState(hid, uid);
+          const context = buildOnboardingContext(state);
+          const greeting = state.homeProfileExists
+            ? `I'm continuing my home setup. Here's what's done so far:\n\n${context}`
+            : "Hi, I'm new here. Help me set up my home.";
+          void sendMessage(greeting);
+        })();
+      } else {
+        void sendMessage("Hi, I'm new here. Help me set up my home.");
+      }
     }
-  }, [isOnboarding, memoryReady, sendMessage]);
+  }, [isOnboarding, memoryReady, sendMessage, authedHouseholdId, agentHouseholdId, authedUser?.id]);
 
   const homeProfileWizardHook = useHomeProfileWizard({
     getAgentSetup: () => {

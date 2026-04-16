@@ -17,6 +17,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Stack,
   TextField,
   Typography,
 } from "@mui/material";
@@ -81,12 +82,13 @@ function isoFromDatetimeLocal(value: string): string | null {
 }
 
 export function Dashboard() {
-  const { accessToken, householdId } = useAuth();
+  const { accessToken, householdId, user } = useAuth();
   const { t } = useI18n();
   const [chores, setChores] = useState<ChoreRow[]>([]);
   const [helpers, setHelpers] = useState<HelperRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [editBusy, setEditBusy] = useState(false);
+  const [setupState, setSetupState] = useState<{ loaded: boolean; remaining: string[] }>({ loaded: false, remaining: [] });
 
   const [editOpen, setEditOpen] = useState(false);
   const [editChore, setEditChore] = useState<ChoreRow | null>(null);
@@ -160,6 +162,26 @@ export function Dashboard() {
       cancelled = true;
     };
   }, [householdId]);
+
+  // Detect onboarding setup state for the "Continue Setup" banner
+  useEffect(() => {
+    const hid = householdId?.trim();
+    const uid = user?.id;
+    if (!hid || !uid) return;
+    let cancelled = false;
+    (async () => {
+      const { detectOnboardingState, buildOnboardingContext } = await import("../../services/onboardingState");
+      const state = await detectOnboardingState(hid, uid);
+      if (cancelled) return;
+      const remaining: string[] = [];
+      if (!state.homeProfileExists) remaining.push(t("dashboard.setup_home_profile"));
+      else if (!state.hasFeatures) remaining.push(t("dashboard.setup_features"));
+      if (state.choreCount === 0) remaining.push(t("dashboard.setup_chores"));
+      if (state.helperCount === 0) remaining.push(t("dashboard.setup_helpers"));
+      setSetupState({ loaded: true, remaining });
+    })();
+    return () => { cancelled = true; };
+  }, [householdId, user?.id, t]);
 
   const helperName = (helperId: string | null): string => {
     if (!helperId) return "Unassigned";
@@ -263,6 +285,32 @@ export function Dashboard() {
           {t("dashboard.subtitle")}
         </Typography>
       </Box>
+
+      {/* Setup progress banner — shown when onboarding steps are incomplete */}
+      {setupState.loaded && setupState.remaining.length > 0 && (
+        <Card variant="outlined" sx={{ mb: 3, bgcolor: "primary.50", borderColor: "primary.200" }}>
+          <CardContent sx={{ py: 2 }}>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700}>
+                  {t("dashboard.setup_incomplete")}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {setupState.remaining.join(" · ")}
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                size="small"
+                href="/chat?onboarding=true"
+                sx={{ whiteSpace: "nowrap" }}
+              >
+                {t("dashboard.continue_setup")}
+              </Button>
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Stats */}
       <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))" gap={2} mb={3}>
