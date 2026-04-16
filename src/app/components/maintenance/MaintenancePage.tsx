@@ -75,7 +75,7 @@ export function MaintenancePage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     const result = await fetchMaintenancePlan(householdId, year);

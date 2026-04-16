@@ -23,7 +23,7 @@ export function HelperWorkloadCard() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     const result = await fetchHelperWorkloads(householdId);

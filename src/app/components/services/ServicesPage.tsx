@@ -86,7 +86,7 @@ export function ServicesPage() {
 
   // ── Load services tab data ─────────────────────────────────────
   const loadServices = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoadingServices(false); return; }
     setLoadingServices(true);
     setError(null);
     try {
@@ -112,7 +112,7 @@ export function ServicesPage() {
 
   // ── Load vendors tab data ──────────────────────────────────────
   const loadVendors = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoadingVendors(false); return; }
     setLoadingVendors(true);
     setError(null);
     const res = await fetchVendors(householdId);

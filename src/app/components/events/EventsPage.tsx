@@ -67,7 +67,7 @@ export function EventsPage() {
   const [notes, setNotes] = useState("");
 
   const load = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     const result = await fetchHouseholdEvents(householdId);

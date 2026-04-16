@@ -142,7 +142,7 @@ export function Recipes() {
   // ── Data loading ───────────────────────────────────────────────
 
   const loadRecipes = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setRecipesLoading(false); return; }
     setRecipesLoading(true);
     setRecipesError(null);
     const result = await fetchRecipes(householdId);

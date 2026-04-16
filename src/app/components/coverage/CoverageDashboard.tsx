@@ -74,7 +74,7 @@ export function CoverageDashboard({ onApplied, refreshKey = 0 }: CoverageDashboa
 
   // ─── Load data ─────────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
-    if (!householdId) return;
+    if (!householdId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
 
