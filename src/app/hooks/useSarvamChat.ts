@@ -81,7 +81,8 @@ function sanitizeForSarvam(messages: ChatMessage[]): ChatMessage[] {
   return [{ role: "system", content: mergedSystemContent }, ...out];
 }
 
-export function useSarvamChat() {
+export function useSarvamChat(opts?: { systemPrompt?: string }) {
+  const systemPrompt = opts?.systemPrompt ?? HOMEOPS_SYSTEM_PROMPT;
   const { accessToken: authedAccessToken, householdId: authedHouseholdId } = useAuth();
   const [messages, setMessages] = useState<ChatEntry[]>(INITIAL_MESSAGES);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -101,7 +102,7 @@ export function useSarvamChat() {
 
   // Keep a ref to the full conversation for the API (includes system prompt)
   const historyRef = useRef<ChatMessage[]>([
-    { role: "system", content: HOMEOPS_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
   ]);
 
   const memorySummaryRef = useRef<string>("");
@@ -357,7 +358,7 @@ export function useSarvamChat() {
       }
 
       if (!accessToken || !householdId) {
-        historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+        historyRef.current = [{ role: "system", content: systemPrompt }];
         setMessages((prev) => (prev.length > 0 ? prev : INITIAL_MESSAGES));
         if (!accessToken) {
           setError("Chat history isn't loading because you're not logged in (missing access token). Please log in again.");
@@ -452,7 +453,7 @@ export function useSarvamChat() {
       ? `Long-term memory summary (authoritative):\n${memorySummaryRef.current.trim()}`
       : "";
 
-    const ctx: ChatMessage[] = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+    const ctx: ChatMessage[] = [{ role: "system", content: systemPrompt }];
     if (memoryBlock) ctx.push({ role: "system", content: memoryBlock });
     for (const m of res.messages.slice(-MAX_CONTEXT_MESSAGES)) {
       if (m.role !== "system" && m.role !== "user" && m.role !== "assistant") continue;
@@ -577,7 +578,7 @@ export function useSarvamChat() {
     memorySummaryRef.current = trimmedSummary;
 
     const memoryBlock = `Long-term memory summary (authoritative):\n${trimmedSummary}`;
-    historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }, { role: "system", content: memoryBlock }, ...keep];
+    historyRef.current = [{ role: "system", content: systemPrompt }, { role: "system", content: memoryBlock }, ...keep];
 
     // Persist updated summary
     const { accessToken, householdId } = getAgentSetup();
@@ -726,7 +727,7 @@ export function useSarvamChat() {
     abortRef.current?.abort();
     abortRef.current = null;
     setMessages(INITIAL_MESSAGES);
-    historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+    historyRef.current = [{ role: "system", content: systemPrompt }];
     memorySummaryRef.current = "";
     conversationIdRef.current = "";
     setConversationId("");

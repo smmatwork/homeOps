@@ -4,125 +4,61 @@ import {
   Button,
   Paper,
   Stack,
-  Step,
-  StepLabel,
-  Stepper,
+  TextField,
   Typography,
 } from "@mui/material";
-import { SmartToy, Home, CheckCircleOutline } from "@mui/icons-material";
+import { Home, CheckCircleOutline } from "@mui/icons-material";
 import { useNavigate } from "react-router";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { LanguageSwitcher } from "../LanguageSwitcher";
-import { UserProfileStep, USER_PROFILE_TOTAL_SUB_STEPS, type UserProfileFormData } from "./UserProfileStep";
-import { HomeProfileWizard } from "../home-profile/HomeProfileWizard";
-import { useHomeProfileWizard } from "../home-profile/useHomeProfileWizard";
 import { fetchUserProfile, markOnboardingComplete, updateUserProfile } from "../../services/profileService";
 import type { UiLanguage } from "../../i18n";
 
-const STEPS = ["step_welcome", "step_profile", "step_home", "step_agent"] as const;
-
+/**
+ * Simplified onboarding: welcome screen → collect name & language → redirect
+ * to the chat in onboarding mode where the agent drives the full setup.
+ */
 export function OnboardingFlow() {
   const navigate = useNavigate();
-  const { user, accessToken, householdId } = useAuth();
+  const { user } = useAuth();
   const { t, setLang, lang } = useI18n();
 
-  const [activeStep, setActiveStep] = useState(0);
+  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState<"welcome" | "name">("welcome");
 
-  // User profile state
-  const [profileSubStep, setProfileSubStep] = useState(0);
-  const [profileData, setProfileData] = useState<UserProfileFormData>({
-    full_name: "",
-    household_role: null,
-    goals: [],
-    preferred_language: lang as UiLanguage,
-    work_schedule: null,
-  });
-
-  // Load existing profile data
+  // Load existing name from profile or auth metadata
   useEffect(() => {
     if (!user?.id) return;
     (async () => {
       const { data } = await fetchUserProfile(user.id);
-      if (data) {
-        setProfileData((prev) => ({
-          ...prev,
-          full_name: data.full_name ?? prev.full_name,
-          household_role: (data.household_role as any) ?? prev.household_role,
-          goals: data.goals as any ?? prev.goals,
-          preferred_language: (data.preferred_language as UiLanguage) ?? prev.preferred_language,
-          work_schedule: data.work_schedule as any ?? prev.work_schedule,
-        }));
+      if (data?.full_name) {
+        setName(data.full_name);
+        return;
       }
-      // Also use auth metadata for name
-      const metaName = typeof (user.user_metadata as any)?.full_name === "string"
-        ? String((user.user_metadata as any).full_name)
+      const metaName = typeof (user.user_metadata as Record<string, unknown>)?.full_name === "string"
+        ? String((user.user_metadata as Record<string, unknown>).full_name)
         : "";
-      if (metaName && !data?.full_name) {
-        setProfileData((prev) => ({ ...prev, full_name: metaName }));
-      }
+      if (metaName) setName(metaName);
     })();
   }, [user?.id]);
 
-  // Tool state for home profile wizard
-  const [toolBusy, setToolBusy] = useState(false);
-  const [toolError, setToolError] = useState<string | null>(null);
-  const [toolSuccess, setToolSuccess] = useState<string | null>(null);
+  const handleStart = useCallback(() => {
+    setStep("name");
+  }, []);
 
-  const homeProfileHook = useHomeProfileWizard({
-    getAgentSetup: () => ({
-      token: accessToken ?? "",
-      householdId: householdId ?? "",
-    }),
-    memoryScope: "household",
-    appendAssistantMessage: () => {},
-    setToolBusy,
-    setToolError,
-    setToolSuccess,
-  });
-
-  const handleProfileChange = useCallback((patch: Partial<UserProfileFormData>) => {
-    setProfileData((prev) => ({ ...prev, ...patch }));
-    // If language changed, update the UI language
-    if (patch.preferred_language) {
-      setLang(patch.preferred_language);
-    }
-  }, [setLang]);
-
-  const saveProfile = useCallback(async () => {
+  const handleContinue = useCallback(async () => {
     if (!user?.id) return;
     setBusy(true);
     await updateUserProfile(user.id, {
-      full_name: profileData.full_name.trim() || null,
-      household_role: profileData.household_role,
-      goals: profileData.goals,
-      preferred_language: profileData.preferred_language,
-      work_schedule: profileData.work_schedule,
+      full_name: name.trim() || null,
+      preferred_language: lang as UiLanguage,
     });
     setBusy(false);
-  }, [user?.id, profileData]);
-
-  const handleNext = useCallback(async () => {
-    // Save profile when leaving the profile step
-    if (activeStep === 1) {
-      await saveProfile();
-    }
-    setActiveStep((s) => Math.min(STEPS.length - 1, s + 1));
-  }, [activeStep, saveProfile]);
-
-  const handleBack = useCallback(() => {
-    setActiveStep((s) => Math.max(0, s - 1));
-  }, []);
-
-  const handleFinish = useCallback(async () => {
-    if (!user?.id) return;
-    setBusy(true);
-    await saveProfile();
-    await markOnboardingComplete(user.id);
-    setBusy(false);
-    navigate("/", { replace: true });
-  }, [user?.id, saveProfile, navigate]);
+    // Redirect to chat in onboarding mode — the agent takes over from here
+    navigate("/chat?onboarding=true", { replace: true });
+  }, [user?.id, name, lang, navigate]);
 
   const handleSkip = useCallback(async () => {
     if (!user?.id) return;
@@ -150,24 +86,9 @@ export function OnboardingFlow() {
 
       <Paper
         elevation={3}
-        sx={{
-          width: "100%",
-          maxWidth: 640,
-          p: { xs: 3, sm: 4 },
-          borderRadius: 3,
-        }}
+        sx={{ width: "100%", maxWidth: 520, p: { xs: 3, sm: 4 }, borderRadius: 3 }}
       >
-        {/* Stepper */}
-        <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 4 }}>
-          {STEPS.map((key) => (
-            <Step key={key}>
-              <StepLabel>{t(`onboarding.${key}`)}</StepLabel>
-            </Step>
-          ))}
-        </Stepper>
-
-        {/* Step 0: Welcome */}
-        {activeStep === 0 && (
+        {step === "welcome" && (
           <Stack spacing={3} alignItems="center" textAlign="center">
             <Home sx={{ fontSize: 64, color: "primary.main" }} />
             <Typography variant="h4" fontWeight={700}>
@@ -184,109 +105,39 @@ export function OnboardingFlow() {
                 </Stack>
               ))}
             </Stack>
-            <Button variant="contained" size="large" onClick={handleNext}>
+            <Button variant="contained" size="large" onClick={handleStart}>
               {t("onboarding.get_started")}
             </Button>
           </Stack>
         )}
 
-        {/* Step 1: User Profile */}
-        {activeStep === 1 && (
-          <UserProfileStep
-            profile={profileData}
-            onChange={handleProfileChange}
-            subStep={profileSubStep}
-            onSubStepChange={setProfileSubStep}
-          />
-        )}
-
-        {/* Step 2: Home Profile */}
-        {activeStep === 2 && (
-          <Stack spacing={2}>
-            <Typography variant="h6">{t("onboarding.step_home")}</Typography>
-            <Typography variant="body2" color="text.secondary">
-              {t("home_profile.pick_type")}
+        {step === "name" && (
+          <Stack spacing={3}>
+            <Typography variant="h5" fontWeight={700}>
+              {t("onboarding.profile_name_title")}
             </Typography>
-            <HomeProfileWizard
-              embedded
-              open
-              onClose={() => {
-                // When wizard is "closed" in embedded mode, advance to next onboarding step
-                setActiveStep(3);
-              }}
-              draft={homeProfileHook.homeProfileDraft}
-              setDraft={homeProfileHook.setHomeProfileDraft}
-              mode={homeProfileHook.homeProfileMode}
-              setMode={homeProfileHook.setHomeProfileMode}
-              step={homeProfileHook.homeProfileWizardStep}
-              setStep={homeProfileHook.setHomeProfileWizardStep}
-              newSpace={homeProfileHook.homeProfileNewSpace}
-              setNewSpace={homeProfileHook.setHomeProfileNewSpace}
-              busy={homeProfileHook.homeProfileBusy}
-              error={homeProfileHook.homeProfileError}
-              toolBusy={toolBusy}
-              updateRecord={homeProfileHook.updateHomeProfileRecord}
-              goNext={homeProfileHook.goNextHomeProfileStep}
-              goBack={() => {
-                // If we're on the first wizard step, go back to onboarding step 1
-                if (homeProfileHook.homeProfileWizardStep === 0) {
-                  setActiveStep(1);
-                } else {
-                  homeProfileHook.goBackHomeProfileStep();
-                }
-              }}
-              onSave={async () => {
-                const ok = await homeProfileHook.saveHomeProfileDraft();
-                if (ok) setActiveStep(3);
-                return ok;
+            <Typography variant="body2" color="text.secondary">
+              {t("onboarding.name_hint")}
+            </Typography>
+            <TextField
+              label={t("onboarding.your_name")}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              size="small"
+              fullWidth
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && name.trim()) void handleContinue();
               }}
             />
-          </Stack>
-        )}
-
-        {/* Step 3: Meet the Agent */}
-        {activeStep === 3 && (
-          <Stack spacing={3} alignItems="center" textAlign="center">
-            <SmartToy sx={{ fontSize: 64, color: "primary.main" }} />
-            <Typography variant="h5" fontWeight={700}>
-              {t("onboarding.agent_title")}
-            </Typography>
-            <Typography variant="body1" color="text.secondary">
-              {t("onboarding.agent_subtitle")}
-            </Typography>
-            <Stack spacing={1.5} sx={{ maxWidth: 420, width: "100%" }}>
-              {[1, 2, 3, 4].map((n) => (
-                <Paper
-                  key={n}
-                  variant="outlined"
-                  sx={{ p: 1.5, borderRadius: 2, textAlign: "left" }}
-                >
-                  <Typography variant="body2" color="text.secondary" fontStyle="italic">
-                    {t(`onboarding.agent_example_${n}`)}
-                  </Typography>
-                </Paper>
-              ))}
+            <Stack direction="row" justifyContent="space-between">
+              <Button variant="text" onClick={() => setStep("welcome")} disabled={busy}>
+                {t("home_profile.back")}
+              </Button>
+              <Button variant="contained" onClick={handleContinue} disabled={busy || !name.trim()}>
+                {t("onboarding.continue_to_agent")}
+              </Button>
             </Stack>
-            <Button
-              variant="contained"
-              size="large"
-              disabled={busy}
-              onClick={handleFinish}
-            >
-              {t("onboarding.finish")}
-            </Button>
-          </Stack>
-        )}
-
-        {/* Bottom navigation (step 1 only — step 2 has its own via HomeProfileWizard) */}
-        {activeStep === 1 && (
-          <Stack direction="row" justifyContent="space-between" mt={3}>
-            <Button variant="text" onClick={handleBack} disabled={busy}>
-              {t("home_profile.back")}
-            </Button>
-            <Button variant="contained" onClick={handleNext} disabled={busy}>
-              {t("home_profile.next")}
-            </Button>
           </Stack>
         )}
 

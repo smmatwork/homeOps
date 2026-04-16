@@ -549,6 +549,9 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.agent_example_4": "\"What chores are due today?\"",
     "onboarding.finish": "Start using HomeOps",
     "onboarding.skip_all": "Skip for now",
+    "onboarding.name_hint": "This helps your agent personalize the experience.",
+    "onboarding.your_name": "Your name",
+    "onboarding.continue_to_agent": "Continue — meet your agent",
 
     "coverage.title": "Coverage",
     "coverage.subtitle": "See what's covered by helpers, devices, and where the gaps are",
@@ -944,6 +947,9 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.agent_example_4": "\"आज कौन से काम बाकी हैं?\"",
     "onboarding.finish": "HomeOps का उपयोग शुरू करें",
     "onboarding.skip_all": "अभी छोड़ें",
+    "onboarding.name_hint": "यह आपके एजेंट को अनुभव को व्यक्तिगत बनाने में मदद करता है।",
+    "onboarding.your_name": "आपका नाम",
+    "onboarding.continue_to_agent": "जारी रखें — अपने एजेंट से मिलें",
 
     "nav.dashboard": "डैशबोर्ड",
     "nav.home_profile": "घर की प्रोफ़ाइल",
@@ -1682,6 +1688,9 @@ const TRANSLATIONS: Record<UiLanguage, TranslationDict> = {
     "onboarding.agent_example_4": "\"ಇಂದು ಯಾವ ಕೆಲಸಗಳು ಬಾಕಿ ಇವೆ?\"",
     "onboarding.finish": "HomeOps ಬಳಸಲು ಪ್ರಾರಂಭಿಸಿ",
     "onboarding.skip_all": "ಈಗ ಬಿಡಿ",
+    "onboarding.name_hint": "ಇದು ನಿಮ್ಮ ಏಜೆಂಟ್‌ಗೆ ಅನುಭವವನ್ನು ವೈಯಕ್ತೀಕರಿಸಲು ಸಹಾಯ ಮಾಡುತ್ತದೆ.",
+    "onboarding.your_name": "ನಿಮ್ಮ ಹೆಸರು",
+    "onboarding.continue_to_agent": "ಮುಂದುವರಿಸಿ — ನಿಮ್ಮ ಏಜೆಂಟ್ ಅನ್ನು ಭೇಟಿ ಮಾಡಿ",
 
     "nav.dashboard": "ಡ್ಯಾಶ್‌ಬೋರ್ಡ್",
     "nav.home_profile": "ಮನೆ ಪ್ರೊಫೈಲ್",

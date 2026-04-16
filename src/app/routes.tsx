@@ -1,4 +1,4 @@
-import { createBrowserRouter } from "react-router";
+import { createBrowserRouter, useSearchParams } from "react-router";
 import { lazy, Suspense } from "react";
 import { MainLayout } from "./components/layouts/MainLayout";
 import { RequireAuth } from "./auth/RequireAuth";
@@ -183,11 +183,15 @@ export const router = createBrowserRouter([
       },
       {
         path: "chat",
-        Component: () => (
-          <LazyWrapper>
-            <ChatInterface />
-          </LazyWrapper>
-        )
+        Component: () => {
+          const [params] = useSearchParams();
+          const onboarding = params.get("onboarding") === "true";
+          return (
+            <LazyWrapper>
+              <ChatInterface onboarding={onboarding} />
+            </LazyWrapper>
+          );
+        },
       },
       {
         path: "status",

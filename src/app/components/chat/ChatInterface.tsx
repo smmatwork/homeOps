@@ -55,6 +55,7 @@ import { QuickActionsPanel } from "./QuickActionsPanel";
 import { inferSpaceFromText, normalizeChoreTextFromUserUtterance, normalizeSpaceName } from "./chatTextUtils";
 import { buildThreadKey, useClarificationStore } from "../../stores/clarificationThreadStore";
 import { useSarvamChat } from "../../hooks/useSarvamChat";
+import { ONBOARDING_SYSTEM_PROMPT } from "../../services/sarvamApi";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
 import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type ToolCall } from "../../services/agentActions";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
@@ -776,8 +777,9 @@ function TypingIndicator() {
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
-export function ChatInterface(props: { embedded?: boolean } = {}) {
+export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean } = {}) {
   const navigate = useNavigate();
+  const isOnboarding = props.onboarding ?? false;
   const { t, lang: uiLang, setLang: setUiLang } = useI18n();
   const [input, setInput] = useState("");
   const [lang, setLang] = useState<SpeechLang>("en-IN");
@@ -1150,7 +1152,18 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     return { ...tc, args: { ...args, household_id: householdId } };
   }
 
-  const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat();
+  const onboardingPrompt = isOnboarding ? ONBOARDING_SYSTEM_PROMPT : undefined;
+  const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat(onboardingPrompt ? { systemPrompt: onboardingPrompt } : undefined);
+
+  // Auto-trigger the agent greeting when onboarding starts
+  const onboardingSentRef = useRef(false);
+  useEffect(() => {
+    if (isOnboarding && !onboardingSentRef.current && memoryReady) {
+      onboardingSentRef.current = true;
+      // Send a silent trigger so the agent starts the conversation
+      void sendMessage("Hi, I'm new here. Help me set up my home.", { silent: false });
+    }
+  }, [isOnboarding, memoryReady, sendMessage]);
 
   const homeProfileWizardHook = useHomeProfileWizard({
     getAgentSetup: () => {
