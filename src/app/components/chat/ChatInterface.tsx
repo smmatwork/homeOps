@@ -835,6 +835,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
 
   // Auto-detect onboarding mode if prop isn't explicitly set
   useEffect(() => {
+    if (props.startAssignment) return; // skip in assignment mode
     if (props.onboarding !== undefined) return; // explicit prop takes priority
     const hid = authedHouseholdId?.trim();
     const uid = authedUser?.id;
@@ -1217,7 +1218,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
   // Auto-trigger the agent greeting when onboarding starts, with state context
   const onboardingSentRef = useRef(false);
   useEffect(() => {
-    if (isOnboarding && !onboardingSentRef.current && memoryReady) {
+    if (isOnboarding && !onboardingSentRef.current && memoryReady && !props.startAssignment) {
       onboardingSentRef.current = true;
       const hid = authedHouseholdId.trim() || agentHouseholdId.trim();
       const uid = authedUser?.id ?? "";
