@@ -3579,9 +3579,13 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
                   navigate("/chores");
                 }}
                 onSwitchToChat={() => {
-                  // Navigate to a fresh chat without the assign param
-                  // This forces a full remount with clean history
-                  window.location.href = "/chat?assignChat=true";
+                  setAssignmentPanelOpen(false);
+                  setAssignmentNudgeDismissed(true);
+                  clearHistory();
+                  // Use a ref flag to send the prompt after clearHistory settles
+                  assignChatSentRef.current = false;
+                  // Navigate via router (preserves auth session)
+                  navigate("/chat?assignChat=true", { replace: true });
                 }}
               />
             </Box>
