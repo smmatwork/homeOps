@@ -1246,12 +1246,15 @@ def _looks_like_chain_of_thought(text: str) -> bool:
 # ── #2: Deterministic intent classifier ─────────────────────────────────────
 
 INTENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("query",    re.compile(r"\b(how many|count|list|show|what|which|status|report|summary|view|display)\b", re.I)),
-    ("update",   re.compile(r"\b(change|update|edit|modify|rename|replace|set|adjust|remove\s+(the\s+)?(description|title|name|text))\b", re.I)),
-    ("create",   re.compile(r"\b(create|add|new|schedule|plan|set\s*up|insert)\b", re.I)),
-    ("delete",   re.compile(r"\b(delete|remove|erase|clear|drop)\b", re.I)),
-    ("complete", re.compile(r"\b(done|complete|mark\s*(as\s*)?done|finished)\b", re.I)),
-    ("assign",   re.compile(r"\b(assign|reassign|give\s+to|move\s+to|hand\s+over)\b", re.I)),
+    # Most specific first — order matters (first match wins)
+    ("complete",      re.compile(r"\b(done|complete|mark\s*(as\s*)?done|finished|complete\s+chore)\b", re.I)),
+    ("bulk_assign",   re.compile(r"\b(assign\s+(all|my|unassigned)|bulk\s+assign|distribute\s+chores|assign\s+chores\s+to\s+helpers)\b", re.I)),
+    ("assign",        re.compile(r"\b(assign|reassign|give\s+to|move\s+to|hand\s+over|transfer\s+to)\b", re.I)),
+    ("schedule",      re.compile(r"\b(schedule|reschedule|when\s+should|set\s+frequency|change\s+frequency|set\s+day|which\s+day)\b", re.I)),
+    ("update",        re.compile(r"\b(change|update|edit|modify|rename|replace|set|adjust|remove\s+(the\s+)?(description|title|name|text))\b", re.I)),
+    ("delete",        re.compile(r"\b(delete|remove|erase|clear|drop|cancel)\b", re.I)),
+    ("create",        re.compile(r"\b(create|add|new|plan|set\s*up|insert)\b", re.I)),
+    ("query",         re.compile(r"\b(how many|count|list|show|what|which|status|report|summary|view|display|tell\s+me|check)\b", re.I)),
 ]
 
 def classify_intent(text: str) -> str:
@@ -1302,6 +1305,17 @@ def intent_specific_instruction(intent: str) -> str:
         return (
             "\nThe user wants to ASSIGN or REASSIGN a chore to a helper. "
             "Use query.rpc with name='reassign_chore_by_query' or 'assign_or_create_chore'.\n"
+        )
+    if intent == "bulk_assign":
+        return (
+            "\nThe user wants to BULK ASSIGN multiple chores to helpers. "
+            "First use query.rpc with name='list_chores_enriched' to find unassigned chores. "
+            "Then use query.rpc with name='apply_chore_assignments' to assign them in bulk.\n"
+        )
+    if intent == "schedule":
+        return (
+            "\nThe user wants to SCHEDULE or RESCHEDULE chores. "
+            "Use db.update to set due_at and/or metadata.cadence on the relevant chore(s).\n"
         )
     return ""
 
@@ -2188,9 +2202,14 @@ async def _judge_response(
             if obj2 and "pass" in obj2:
                 return obj2
     except Exception as e:
-        return {"pass": True, "reason": f"Judge failed: {str(e)[:100]}", "correction": ""}
+        _logger = logging.getLogger("homeops.agent_service")
+        _logger.warning("LLM-as-Judge failed with exception: %s", str(e)[:200])
+        # On error, return fail with the error so the caller can decide
+        return {"pass": False, "reason": f"Judge error: {str(e)[:100]}", "correction": "Retry or review manually"}
 
-    return {"pass": True, "reason": "Judge could not parse response; allowing through.", "correction": ""}
+    _logger = logging.getLogger("homeops.agent_service")
+    _logger.warning("LLM-as-Judge could not parse response")
+    return {"pass": False, "reason": "Judge could not parse response", "correction": "Review response manually"}
 
 
 SARVAM_BASE_URL = _env("SARVAM_BASE_URL", "https://api.sarvam.ai")
@@ -2716,6 +2735,91 @@ def health() -> dict[str, Any]:
         "ok": True,
         "sarvam": bool(SARVAM_API_KEY),
         "edge": bool(EDGE_BASE_URL),
+    }
+
+
+class DispatchInviteRequest(BaseModel):
+    helper_id: str
+    helper_name: str
+    helper_phone: str | None = None
+    channel_chain: list[str] = ["whatsapp", "sms", "web"]
+    magic_link_url: str
+    household_id: str
+
+
+@app.post("/v1/helpers/dispatch-invite")
+async def dispatch_invite(
+    req: DispatchInviteRequest,
+    x_agent_service_key: str | None = Header(default=None, alias="x-agent-service-key"),
+) -> dict[str, Any]:
+    """Send a helper onboarding magic link via the channel dispatcher."""
+    expected = (AGENT_SERVICE_KEY or "").strip()
+    provided = (x_agent_service_key or "").strip()
+    if not expected or not provided or provided != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from channel_dispatcher import ChannelDispatcher, OutreachIntent
+    from channel_adapters.whatsapp import WhatsAppAdapter
+    from channel_adapters.sms import SmsAdapter
+    from channel_adapters.web import WebAdapter
+
+    adapters = {
+        "whatsapp": WhatsAppAdapter(),
+        "sms": SmsAdapter(),
+        "web": WebAdapter(),
+    }
+
+    async def persist_attempt(attempt: Any) -> None:
+        """Best-effort persist to helper_outreach_attempts via edge."""
+        try:
+            await _edge_execute_tools(
+                {
+                    "household_id": req.household_id,
+                    "tool_call": {
+                        "id": f"outreach_{req.helper_id}_{int(__import__('time').time())}",
+                        "tool": "db.insert",
+                        "args": {
+                            "table": "helper_outreach_attempts",
+                            "record": {
+                                "helper_id": req.helper_id,
+                                "household_id": req.household_id,
+                                "channel": getattr(attempt, "channel", "unknown"),
+                                "status": getattr(attempt, "status", "unknown"),
+                                "intent": "stage2_onboarding",
+                            },
+                        },
+                        "reason": "Persist outreach attempt",
+                    },
+                },
+                user_id=None,
+            )
+        except Exception:
+            pass  # best-effort
+
+    dispatcher = ChannelDispatcher(adapters=adapters, persist_attempt=persist_attempt)
+
+    helper = {
+        "id": req.helper_id,
+        "name": req.helper_name,
+        "phone": req.helper_phone,
+        "channel_preferences": req.channel_chain,
+    }
+
+    invite = {
+        "magic_link_url": req.magic_link_url,
+        "household_id": req.household_id,
+    }
+
+    result = await dispatcher.initiate_outreach(
+        helper=helper,
+        intent=OutreachIntent.STAGE2_ONBOARDING,
+        invite=invite,
+    )
+
+    return {
+        "ok": result.success,
+        "channel": result.final_channel,
+        "attempts": len(result.attempts),
     }
 
 

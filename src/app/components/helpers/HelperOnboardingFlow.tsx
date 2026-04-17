@@ -272,6 +272,28 @@ export function HelperOnboardingFlow({
       }
     }
 
+    // 4. Dispatch the magic link via channel dispatcher (best-effort, non-blocking)
+    try {
+      const agentUrl = (import.meta.env.VITE_AGENT_SERVICE_URL as string | undefined) ?? "http://localhost:8000";
+      void fetch(`${agentUrl}/v1/helpers/dispatch-invite`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-agent-service-key": (import.meta.env.VITE_AGENT_SERVICE_KEY as string | undefined) ?? "",
+        },
+        body: JSON.stringify({
+          helper_id: helperId,
+          helper_name: form.name,
+          helper_phone: form.phone || null,
+          channel_chain: form.channelPreferences,
+          magic_link_url: inviteRes.magicLinkUrl,
+          household_id: householdId,
+        }),
+      });
+    } catch {
+      // Best-effort — the invite is already created, manual sharing still works
+    }
+
     setBusy(false);
     setResult({
       helperId,

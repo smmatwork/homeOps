@@ -172,50 +172,80 @@ function stableHash(s: string): number {
   return Math.abs(hash);
 }
 
+/** Map day suffix to JS Date.getUTCDay() value (0=Sun, 1=Mon, ..., 6=Sat) */
+const DAY_MAP: Record<string, number> = {
+  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+};
+
 export function templateOccursOnDate(
   cadence: Cadence,
   date: Date,
   taskKey: string,
 ): boolean {
   const dow = date.getUTCDay();
+  const cadenceStr = String(cadence);
 
-  switch (cadence) {
-    case "daily":
-      return true;
+  // ── Daily ──────────────────────────────────────────────────────
+  if (cadenceStr === "daily") return true;
 
-    case "every_2_days":
-    case "every_3_days":
-    case "every_4_days":
-    case "every_5_days": {
-      // Use a stable epoch offset so different tasks land on different days.
-      const interval = cadenceIntervalDays(cadence);
-      const epoch = new Date("2026-01-01T00:00:00Z").getTime();
-      const daysSinceEpoch = Math.floor((date.getTime() - epoch) / (24 * 60 * 60 * 1000));
-      const offset = stableHash(taskKey) % interval;
-      return (daysSinceEpoch + offset) % interval === 0;
-    }
-
-    case "weekly": {
-      const targetDow = stableHash(taskKey) % 7;
-      return dow === targetDow;
-    }
-
-    case "biweekly": {
-      const targetDow = stableHash(taskKey) % 7;
-      if (dow !== targetDow) return false;
-      const dayOfMonth = date.getUTCDate();
-      const weekOfMonth = Math.floor((dayOfMonth - 1) / 7);
-      return weekOfMonth === 0 || weekOfMonth === 2;
-    }
-
-    case "monthly": {
-      const targetDom = (stableHash(taskKey) % 28) + 1;
-      return date.getUTCDate() === targetDom;
-    }
-
-    default:
-      return false;
+  // ── Alternate days ─────────────────────────────────────────────
+  if (cadenceStr === "alternate_days") {
+    const epoch = new Date("2026-01-01T00:00:00Z").getTime();
+    const daysSinceEpoch = Math.floor((date.getTime() - epoch) / (24 * 60 * 60 * 1000));
+    const offset = stableHash(taskKey) % 2;
+    return (daysSinceEpoch + offset) % 2 === 0;
   }
+
+  // ── Every N days ───────────────────────────────────────────────
+  if (/^every_\d_days$/.test(cadenceStr)) {
+    const interval = cadenceIntervalDays(cadence);
+    const epoch = new Date("2026-01-01T00:00:00Z").getTime();
+    const daysSinceEpoch = Math.floor((date.getTime() - epoch) / (24 * 60 * 60 * 1000));
+    const offset = stableHash(taskKey) % interval;
+    return (daysSinceEpoch + offset) % interval === 0;
+  }
+
+  // ── Weekly with specific day (weekly_mon, weekly_sat, etc.) ────
+  if (cadenceStr.startsWith("weekly_")) {
+    const daySuffix = cadenceStr.slice(7); // "mon", "sat", etc.
+    const targetDow = DAY_MAP[daySuffix];
+    return targetDow !== undefined ? dow === targetDow : false;
+  }
+
+  // ── Weekly (legacy — use stable hash for day) ──────────────────
+  if (cadenceStr === "weekly") {
+    const targetDow = stableHash(taskKey) % 7;
+    return dow === targetDow;
+  }
+
+  // ── Biweekly with specific day (biweekly_mon, biweekly_sat) ───
+  if (cadenceStr.startsWith("biweekly_")) {
+    const daySuffix = cadenceStr.slice(9);
+    const targetDow = DAY_MAP[daySuffix];
+    if (targetDow === undefined || dow !== targetDow) return false;
+    // Alternate weeks: use ISO week number parity
+    const epoch = new Date("2026-01-01T00:00:00Z").getTime();
+    const weekNum = Math.floor((date.getTime() - epoch) / (7 * 24 * 60 * 60 * 1000));
+    const parity = stableHash(taskKey) % 2;
+    return weekNum % 2 === parity;
+  }
+
+  // ── Biweekly (legacy) ──────────────────────────────────────────
+  if (cadenceStr === "biweekly") {
+    const targetDow = stableHash(taskKey) % 7;
+    if (dow !== targetDow) return false;
+    const dayOfMonth = date.getUTCDate();
+    const weekOfMonth = Math.floor((dayOfMonth - 1) / 7);
+    return weekOfMonth === 0 || weekOfMonth === 2;
+  }
+
+  // ── Monthly ────────────────────────────────────────────────────
+  if (cadenceStr === "monthly") {
+    const targetDom = (stableHash(taskKey) % 28) + 1;
+    return date.getUTCDate() === targetDom;
+  }
+
+  return false;
 }
 
 // ---------------------------------------------------------------------------

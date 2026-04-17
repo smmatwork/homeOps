@@ -158,19 +158,45 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     setRawChores(c);
     setRooms(roomList);
 
-    // Pre-fill specialty prefs from helper type
-    const sp: Record<string, string[]> = {};
-    for (const helper of h) {
-      const tags = inferRoleTags(helper.type || null);
-      let bestKey = "all_cleaning";
-      let bestScore = 0;
-      for (const area of SPECIALTY_AREAS) {
-        const score = area.tags.filter((t) => tags.includes(t)).length;
-        if (score > bestScore) { bestScore = score; bestKey = area.key; }
+    // Load persisted rules if they exist, otherwise infer from helper type
+    const { data: rulesData } = await supabase
+      .from("assignment_rules")
+      .select("template_id, template_params, helper_id")
+      .eq("household_id", householdId);
+
+    const savedRules = (rulesData ?? []) as Array<{ template_id: string; template_params: Record<string, unknown>; helper_id: string }>;
+
+    if (savedRules.length > 0) {
+      // Restore specialty prefs from persisted rules
+      const sp: Record<string, string[]> = {};
+      const fp: Record<string, string> = {};
+      for (const rule of savedRules) {
+        if (rule.template_id.startsWith("specialty_")) {
+          const areaKey = String((rule.template_params as Record<string, unknown>).area_key ?? "");
+          if (!sp[rule.helper_id]) sp[rule.helper_id] = [];
+          if (areaKey && !sp[rule.helper_id].includes(areaKey)) sp[rule.helper_id].push(areaKey);
+        } else if (rule.template_id.startsWith("floor_")) {
+          const floor = String(rule.template_id.slice(6));
+          fp[floor] = rule.helper_id;
+        }
       }
-      sp[helper.id] = [bestKey];
+      if (Object.keys(sp).length > 0) setSpecialtyPrefs(sp);
+      if (Object.keys(fp).length > 0) setFloorPrefs(fp);
+    } else {
+      // Default: infer from helper type
+      const sp: Record<string, string[]> = {};
+      for (const helper of h) {
+        const tags = inferRoleTags(helper.type || null);
+        let bestKey = "all_cleaning";
+        let bestScore = 0;
+        for (const area of SPECIALTY_AREAS) {
+          const score = area.tags.filter((t) => tags.includes(t)).length;
+          if (score > bestScore) { bestScore = score; bestKey = area.key; }
+        }
+        sp[helper.id] = [bestKey];
+      }
+      setSpecialtyPrefs(sp);
     }
-    setSpecialtyPrefs(sp);
   }, [householdId]);
 
   useEffect(() => { void loadData(); }, [loadData]);
@@ -280,6 +306,54 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
       }
       setApplyProgress(i + 1);
     }
+    // Persist assignment preferences as rules for future auto-assignment
+    if (householdId) {
+      try {
+        // Delete existing rules for this household, then insert fresh
+        await supabase.from("assignment_rules").delete().eq("household_id", householdId);
+        const rules: Array<Record<string, unknown>> = [];
+
+        if (Object.keys(specialtyPrefs).length > 0) {
+          // Save specialty preferences
+          for (const [helperId, areaKeys] of Object.entries(specialtyPrefs)) {
+            for (const areaKey of areaKeys) {
+              const area = SPECIALTY_AREAS.find((a) => a.key === areaKey);
+              if (!area) continue;
+              rules.push({
+                household_id: householdId,
+                template_id: `specialty_${areaKey}`,
+                template_params: { area_key: areaKey, area_tags: area.tags },
+                helper_id: helperId,
+                weight: 1.0,
+                source: "elicitation",
+              });
+            }
+          }
+        }
+
+        if (Object.keys(floorPrefs).length > 0) {
+          // Save floor preferences
+          for (const [floorStr, helperId] of Object.entries(floorPrefs)) {
+            if (!helperId) continue;
+            rules.push({
+              household_id: householdId,
+              template_id: `floor_${floorStr}`,
+              template_params: { floor: Number(floorStr), rooms: roomsByFloor[Number(floorStr)] ?? [] },
+              helper_id: helperId,
+              weight: 1.0,
+              source: "elicitation",
+            });
+          }
+        }
+
+        if (rules.length > 0) {
+          await supabase.from("assignment_rules").insert(rules);
+        }
+      } catch {
+        // Non-critical — assignments were already applied
+      }
+    }
+
     setStep("done");
     onComplete(toApply.length);
   };
