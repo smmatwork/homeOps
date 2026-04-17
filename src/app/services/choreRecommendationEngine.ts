@@ -72,6 +72,11 @@ export function cadenceLabel(cadence: Cadence | string): string {
     case "biweekly_mon": return "Alt. week — Mon";
     case "biweekly_sat": return "Alt. week — Sat";
     case "monthly": return "Monthly";
+    case "monthly_1st_sat": return "Monthly — 1st Sat";
+    case "monthly_1st_sun": return "Monthly — 1st Sun";
+    case "monthly_2nd_sat": return "Monthly — 2nd Sat";
+    case "monthly_3rd_sat": return "Monthly — 3rd Sat";
+    case "monthly_last_sat": return "Monthly — Last Sat";
     default: return String(cadence);
   }
 }

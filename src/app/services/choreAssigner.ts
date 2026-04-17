@@ -20,6 +20,8 @@ export interface AssignableHelper {
   dailyCapacityMinutes: number;
   /** Tags like ["cleaning", "kitchen", "outdoor"] */
   roleTags: string[];
+  /** "helper" or "member" — members are household residents */
+  kind?: "helper" | "member";
 }
 
 export interface Assignment {
@@ -121,7 +123,7 @@ function inferChoreCategory(title: string, space: string): string[] {
  * Compute a match score between a helper's role tags and a chore's category tags.
  * Higher = better match.
  */
-function matchScore(helperTags: string[], choreTags: string[]): number {
+function matchScore(helperTags: string[], choreTags: string[], helperType: string | null): number {
   const helperSet = new Set(helperTags);
   let score = 0;
   for (const tag of choreTags) {
@@ -129,6 +131,17 @@ function matchScore(helperTags: string[], choreTags: string[]): number {
   }
   // Bonus for "general" — can do anything
   if (helperSet.has("general")) score += 0.1;
+
+  // Strong bonus: if the helper's type directly matches the chore category
+  // e.g., Cook + kitchen/cooking chores → big boost to ensure cook gets cooking tasks
+  const typeLower = (helperType ?? "").toLowerCase();
+  if (typeLower === "cook" && choreTags.includes("cooking")) score += 5;
+  if (typeLower === "cook" && choreTags.includes("kitchen")) score += 3;
+  if ((typeLower === "maid" || typeLower === "cleaner") && choreTags.includes("cleaning")) score += 2;
+  if (typeLower === "gardener" && choreTags.includes("garden")) score += 5;
+  if (typeLower === "driver" && choreTags.includes("driving")) score += 5;
+  if ((typeLower === "washer" || typeLower === "dhobi") && choreTags.includes("laundry")) score += 5;
+
   return score;
 }
 
@@ -161,7 +174,13 @@ function cadenceLoadFactor(cadence: string): number {
   return 1.0 / 6;
 }
 
-/** Pick a specific day for a weekly/biweekly cadence, distributing across days */
+/** Monthly day options — first Saturday, first Sunday, or specific dates */
+const MONTHLY_SLOTS = [
+  "monthly_1st_sat", "monthly_1st_sun", "monthly_2nd_sat",
+  "monthly_3rd_sat", "monthly_last_sat",
+] as const;
+
+/** Pick a specific day for weekly/biweekly/monthly cadence, distributing across days */
 function assignDay(
   cadence: string,
   helperDayLoads: Map<string, Record<string, number>>,
@@ -170,27 +189,34 @@ function assignDay(
 ): string {
   // If cadence already has a specific day, keep it
   if (/_(mon|tue|wed|thu|fri|sat|sun)$/.test(cadence)) return cadence;
+  if (/monthly_/.test(cadence)) return cadence;
 
-  // For generic "weekly" or "biweekly", find the least-loaded day for this helper
-  const loads = helperDayLoads.get(helperId) ?? {};
+  if (!helperDayLoads.has(helperId)) helperDayLoads.set(helperId, {});
+  const dayLoads = helperDayLoads.get(helperId)!;
+
+  if (cadence === "monthly") {
+    // Distribute monthly chores across different weekends
+    let bestSlot: string = MONTHLY_SLOTS[0];
+    let bestLoad = Infinity;
+    for (const slot of MONTHLY_SLOTS) {
+      const load = dayLoads[slot] ?? 0;
+      if (load < bestLoad) { bestLoad = load; bestSlot = slot; }
+    }
+    dayLoads[bestSlot] = (dayLoads[bestSlot] ?? 0) + mins;
+    return bestSlot;
+  }
+
+  // For generic "weekly" or "biweekly", find the least-loaded day
   const prefix = cadence.startsWith("biweekly") ? "biweekly" : "weekly";
-
   let bestDay = "sat";
   let bestLoad = Infinity;
   for (const day of WEEKDAYS) {
-    const load = loads[`${prefix}_${day}`] ?? 0;
-    if (load < bestLoad) {
-      bestLoad = load;
-      bestDay = day;
-    }
+    const load = dayLoads[`${prefix}_${day}`] ?? 0;
+    if (load < bestLoad) { bestLoad = load; bestDay = day; }
   }
 
-  // Record the load on this day
   const key = `${prefix}_${bestDay}`;
-  if (!helperDayLoads.has(helperId)) helperDayLoads.set(helperId, {});
-  const dayLoads = helperDayLoads.get(helperId)!;
   dayLoads[key] = (dayLoads[key] ?? 0) + mins;
-
   return `${prefix}_${bestDay}`;
 }
 
@@ -249,16 +275,16 @@ export function buildAssignmentPlan(
       const remaining = h.dailyCapacityMinutes - currentLoad;
       if (remaining < effectiveMins) continue; // no capacity
 
-      const score = matchScore(helperTags.get(h.id) ?? [], choreTags);
+      const score = matchScore(helperTags.get(h.id) ?? [], choreTags, h.type);
       if (score > bestScore) {
         bestScore = score;
         bestHelper = h;
       }
     }
 
-    // Pick a specific day for weekly/biweekly chores
+    // Pick a specific day for weekly/biweekly/monthly chores
     let finalCadence = chore.cadence;
-    if (bestHelper && (chore.cadence === "weekly" || chore.cadence === "biweekly")) {
+    if (bestHelper && (chore.cadence === "weekly" || chore.cadence === "biweekly" || chore.cadence === "monthly")) {
       finalCadence = assignDay(chore.cadence, helperDayLoads, bestHelper.id, mins);
     }
 

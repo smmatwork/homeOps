@@ -42,7 +42,7 @@ interface AssignmentPanelProps {
   onSwitchToChat?: () => void;
 }
 
-interface HelperInfo { id: string; name: string; type: string; capacityMinutes: number; }
+interface HelperInfo { id: string; name: string; type: string; capacityMinutes: number; kind: "helper" | "member"; }
 interface RoomInfo { displayName: string; floor: number | null; }
 
 type Step = "pick_pattern" | "by_specialty" | "by_floor" | "assignments" | "applying" | "done";
@@ -61,7 +61,11 @@ const CADENCE_OPTIONS = [
   { value: "weekly_sun", label: "Weekly — Sun" },
   { value: "biweekly_mon", label: "Alternate week — Mon" },
   { value: "biweekly_sat", label: "Alternate week — Sat" },
-  { value: "monthly", label: "Monthly" },
+  { value: "monthly_1st_sat", label: "Monthly — 1st Sat" },
+  { value: "monthly_1st_sun", label: "Monthly — 1st Sun" },
+  { value: "monthly_2nd_sat", label: "Monthly — 2nd Sat" },
+  { value: "monthly_3rd_sat", label: "Monthly — 3rd Sat" },
+  { value: "monthly_last_sat", label: "Monthly — Last Sat" },
 ] as const;
 
 /** Map legacy cadence values to the new day-specific format */
@@ -70,6 +74,7 @@ function normalizeCadence(raw: string): string {
     case "weekly": return "weekly_sat";
     case "biweekly": return "biweekly_sat";
     case "every_2_days": return "alternate_days";
+    case "monthly": return "monthly_1st_sat";
     default: return CADENCE_OPTIONS.some((o) => o.value === raw) ? raw : "weekly_sat";
   }
 }
@@ -111,11 +116,12 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
     if (!householdId) { setLoading(false); return; }
     setLoading(true);
 
-    const [helpersRes, choresRes, profileRes] = await Promise.all([
+    const [helpersRes, choresRes, profileRes, membersRes] = await Promise.all([
       supabase.from("helpers").select("id,name,type,daily_capacity_minutes").eq("household_id", householdId),
       supabase.from("chores").select("id,title,metadata,helper_id,status")
         .eq("household_id", householdId).is("helper_id", null).is("deleted_at", null).neq("status", "completed"),
       supabase.from("home_profiles").select("spaces").eq("household_id", householdId).maybeSingle(),
+      supabase.from("household_people").select("id,display_name,person_type").eq("household_id", householdId),
     ]);
 
     setLoading(false);
@@ -128,7 +134,21 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
       id: String(r.id), name: String(r.name),
       type: String(r.type ?? "General"),
       capacityMinutes: Number(r.daily_capacity_minutes ?? 120),
+      kind: "helper" as const,
     }));
+
+    // Add household members (adults only) as potential assignees
+    const members: HelperInfo[] = ((membersRes.data ?? []) as Array<Record<string, unknown>>)
+      .filter((m) => String(m.person_type) === "adult")
+      .map((m) => ({
+        id: `member_${m.id}`,
+        name: `${String(m.display_name)} (Self)`,
+        type: "Household member",
+        capacityMinutes: 60, // default 1hr/day for household members
+        kind: "member" as const,
+      }));
+
+    const allHelpers = [...h, ...members];
 
     const c: AssignableChore[] = (choresRes.data ?? []).map((r: Record<string, unknown>) => {
       const meta = (r.metadata ?? {}) as Record<string, unknown>;
@@ -156,7 +176,7 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
       return { displayName: "", floor: null };
     }).filter((r: RoomInfo) => r.displayName) : [];
 
-    setHelpers(h);
+    setHelpers(allHelpers);
     setRawChores(c);
     setRooms(roomList);
 
