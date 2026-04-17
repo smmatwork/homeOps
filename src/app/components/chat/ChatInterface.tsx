@@ -3549,21 +3549,22 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
             </Paper>
           )}
 
-          {/* Assignment panel — full form for reviewing helpers and assigning chores */}
+          {/* Assignment panel — takes over the full chat area when open */}
           {assignmentPanelOpen && (
-            <Box sx={{ mx: 2, mt: 1 }}>
+            <Box sx={{ flex: 1, overflowY: "auto", px: 2, py: 2, minHeight: 0 }}>
               <AssignmentPanel
                 onDismiss={() => { setAssignmentPanelOpen(false); setAssignmentNudgeDismissed(true); }}
                 onComplete={(count) => {
                   setAssignmentPanelOpen(false);
                   setAssignmentNudgeDismissed(true);
                   setUnassignedChoreCount((prev) => Math.max(0, prev - count));
+                  navigate("/chores");
                 }}
               />
             </Box>
           )}
 
-          {/* Messages area */}
+          {/* Messages area — hidden when assignment panel is open */}
           <Box
             ref={messagesScrollRef}
             sx={{
@@ -3572,6 +3573,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
               px: 2,
               py: 2,
               minHeight: 0,
+              display: assignmentPanelOpen ? "none" : undefined,
               "&::-webkit-scrollbar": { width: 4 },
               "&::-webkit-scrollbar-track": { bgcolor: "transparent" },
               "&::-webkit-scrollbar-thumb": {
@@ -4409,8 +4411,8 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
             <div ref={messagesEndRef} />
           </Box>
 
-          {/* Quick commands — collapsible, hidden during onboarding */}
-          {onboardingResolved === false && (
+          {/* Quick commands — hidden during onboarding and assignment */}
+          {onboardingResolved === false && !assignmentPanelOpen && (
             <Box px={1} pb={0.5}>
               <Button
                 size="small"
@@ -4444,19 +4446,21 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
             </Box>
           )}
 
-          {/* Input */}
-          <ChatInput
-            value={input}
-            onChange={setInput}
-            onSend={handleSend}
-            isListening={isListening}
-            isTranscribing={isTranscribing}
-            onMicToggle={toggleMic}
-            voiceSupported={voiceSupported}
-            lang={lang}
-            transliterationMode={lang === "hi-IN" ? "hi" : lang === "kn-IN" ? "kn" : "off"}
-            disabled={!!chatError}
-          />
+          {/* Input — hidden when assignment panel is open */}
+          {!assignmentPanelOpen && (
+            <ChatInput
+              value={input}
+              onChange={setInput}
+              onSend={handleSend}
+              isListening={isListening}
+              isTranscribing={isTranscribing}
+              onMicToggle={toggleMic}
+              voiceSupported={voiceSupported}
+              lang={lang}
+              transliterationMode={lang === "hi-IN" ? "hi" : lang === "kn-IN" ? "kn" : "off"}
+              disabled={!!chatError}
+            />
+          )}
         </Paper>
 
         {/* Quick commands panel (desktop / non-embedded, hidden during onboarding or while detecting) */}
