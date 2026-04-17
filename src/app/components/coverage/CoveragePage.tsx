@@ -4,6 +4,7 @@ import { Home as HomeIcon, Refresh } from "@mui/icons-material";
 import { Link as RouterLink } from "react-router";
 import { useI18n } from "../../i18n";
 import { CoverageDashboard } from "./CoverageDashboard";
+import { HelperCapacityCard } from "./HelperCapacityCard";
 
 /**
  * Coverage page — single-purpose audit view.
@@ -56,7 +57,10 @@ export function CoveragePage() {
         </Stack>
       </Stack>
 
-      <CoverageDashboard refreshKey={refreshKey} onApplied={handleRefresh} />
+      <Stack spacing={3}>
+        <HelperCapacityCard />
+        <CoverageDashboard refreshKey={refreshKey} onApplied={handleRefresh} />
+      </Stack>
     </Box>
   );
 }
