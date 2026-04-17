@@ -855,7 +855,9 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
 
   // Count unassigned chores for the assignment nudge
   useEffect(() => {
-    const hid = (authedHouseholdId || "").trim();
+    // Try auth-based household first, fall back to manual agent setup
+    const hid = (authedHouseholdId || "").trim()
+      || (() => { try { return localStorage.getItem("homeops.agent.household_id") ?? ""; } catch { return ""; } })().trim();
     if (!hid) return;
     let cancelled = false;
     void (async () => {
