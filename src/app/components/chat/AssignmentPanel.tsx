@@ -42,7 +42,16 @@ interface AssignmentPanelProps {
   onSwitchToChat?: () => void;
 }
 
-interface HelperInfo { id: string; name: string; type: string; capacityMinutes: number; kind: "helper" | "member"; }
+interface HelperInfo {
+  id: string;
+  name: string;
+  type: string;
+  capacityMinutes: number;
+  kind: "helper" | "member";
+  workDays: string[]; // ["mon","tue","wed","thu","fri"]
+  startTime: string;  // "10:30"
+  endTime: string;    // "12:30"
+}
 interface RoomInfo { displayName: string; floor: number | null; }
 
 type Step = "pick_pattern" | "by_specialty" | "by_floor" | "assignments" | "applying" | "done";
@@ -117,7 +126,7 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
     setLoading(true);
 
     const [helpersRes, choresRes, profileRes, membersRes] = await Promise.all([
-      supabase.from("helpers").select("id,name,type,daily_capacity_minutes").eq("household_id", householdId),
+      supabase.from("helpers").select("id,name,type,daily_capacity_minutes,metadata").eq("household_id", householdId),
       supabase.from("chores").select("id,title,metadata,helper_id,status")
         .eq("household_id", householdId).is("helper_id", null).is("deleted_at", null).neq("status", "completed"),
       supabase.from("home_profiles").select("spaces").eq("household_id", householdId).maybeSingle(),
@@ -130,12 +139,33 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
       return;
     }
 
-    const h: HelperInfo[] = (helpersRes.data ?? []).map((r: Record<string, unknown>) => ({
-      id: String(r.id), name: String(r.name),
-      type: String(r.type ?? "General"),
-      capacityMinutes: Number(r.daily_capacity_minutes ?? 120),
-      kind: "helper" as const,
-    }));
+    const h: HelperInfo[] = (helpersRes.data ?? []).map((r: Record<string, unknown>) => {
+      const meta = (r.metadata ?? {}) as Record<string, unknown>;
+      const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
+      const days = (schedule.days ?? {}) as Record<string, boolean>;
+      const workDays = Object.entries(days).filter(([, v]) => v).map(([k]) => k);
+      const startTime = typeof schedule.start === "string" ? schedule.start : "";
+      const endTime = typeof schedule.end === "string" ? schedule.end : "";
+
+      // Compute actual capacity from schedule if available
+      let capacityMinutes = Number(r.daily_capacity_minutes ?? 120);
+      if (startTime && endTime) {
+        const [sh, sm] = startTime.split(":").map(Number);
+        const [eh, em] = endTime.split(":").map(Number);
+        const scheduleMins = (eh * 60 + em) - (sh * 60 + sm);
+        if (scheduleMins > 0) capacityMinutes = scheduleMins;
+      }
+
+      return {
+        id: String(r.id), name: String(r.name),
+        type: String(r.type ?? "General"),
+        capacityMinutes,
+        kind: "helper" as const,
+        workDays,
+        startTime,
+        endTime,
+      };
+    });
 
     // Add household members (adults only) as potential assignees
     const members: HelperInfo[] = ((membersRes.data ?? []) as Array<Record<string, unknown>>)
@@ -144,8 +174,11 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
         id: `member_${m.id}`,
         name: `${String(m.display_name)} (Self)`,
         type: "Household member",
-        capacityMinutes: 60, // default 1hr/day for household members
+        capacityMinutes: 60,
         kind: "member" as const,
+        workDays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        startTime: "",
+        endTime: "",
       }));
 
     const allHelpers = [...h, ...members];
@@ -256,6 +289,7 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
         id: h.id, name: h.name, type: h.type || null,
         dailyCapacityMinutes: h.capacityMinutes,
         roleTags: tags.length > 0 ? [...new Set(tags)] : inferRoleTags(h.type || null),
+        workDays: h.workDays,
       };
     });
     const result = buildAssignmentPlan(rawChores, assignableHelpers);
@@ -525,10 +559,17 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
           {helpers.map((h) => (
             <Card key={h.id} variant="outlined">
               <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Stack direction="row" spacing={1} alignItems="center" mb={1}>
+                <Stack direction="row" spacing={1} alignItems="center" mb={0.5}>
                   <Typography variant="subtitle2" fontWeight={700}>{h.name}</Typography>
                   <Chip size="small" label={h.type} variant="outlined" sx={{ fontSize: 11 }} />
+                  <Chip size="small" label={`${h.capacityMinutes} min/day`} variant="outlined" sx={{ fontSize: 10 }} />
                 </Stack>
+                {h.workDays.length > 0 && (
+                  <Typography variant="caption" color="text.secondary" mb={1} display="block">
+                    {h.workDays.map((d) => d.charAt(0).toUpperCase() + d.slice(1, 3)).join(", ")}
+                    {h.startTime && h.endTime ? ` · ${h.startTime}–${h.endTime}` : ""}
+                  </Typography>
+                )}
                 <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
                   {SPECIALTY_AREAS.map((area) => {
                     const selected = (specialtyPrefs[h.id] ?? []).includes(area.key);

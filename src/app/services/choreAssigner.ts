@@ -22,6 +22,8 @@ export interface AssignableHelper {
   roleTags: string[];
   /** "helper" or "member" — members are household residents */
   kind?: "helper" | "member";
+  /** Days the helper works, e.g., ["mon","tue","wed","thu","fri"] */
+  workDays?: string[];
 }
 
 export interface Assignment {
@@ -274,6 +276,14 @@ export function buildAssignmentPlan(
       const currentLoad = effectiveDailyLoad.get(h.id) ?? 0;
       const remaining = h.dailyCapacityMinutes - currentLoad;
       if (remaining < effectiveMins) continue; // no capacity
+
+      // Check if the helper works on the day this chore is scheduled
+      if (h.workDays && h.workDays.length > 0) {
+        const choreDay = chore.cadence.match(/_(mon|tue|wed|thu|fri|sat|sun)$/)?.[1];
+        if (choreDay && !h.workDays.includes(choreDay)) continue; // doesn't work this day
+        // For daily chores, helper must work at least some days
+        if (chore.cadence === "daily" && h.workDays.length === 0) continue;
+      }
 
       const score = matchScore(helperTags.get(h.id) ?? [], choreTags, h.type);
       if (score > bestScore) {
