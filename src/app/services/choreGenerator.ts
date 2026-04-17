@@ -10,6 +10,28 @@ export interface GeneratedChore {
   cadence: string;
   category: string;
   estimatedMinutes: number;
+  /** 1=low, 2=medium, 3=high — used by agent for reassignment priority */
+  priority: number;
+}
+
+type ChoreBuilder = Omit<GeneratedChore, "priority">;
+
+/**
+ * Priority rules:
+ * 3 (high) — daily hygiene/kitchen tasks, cooking, pet care
+ * 2 (medium) — weekly cleaning, bathroom, laundry
+ * 1 (low) — monthly maintenance, organizing, outdoor non-essential
+ */
+function inferPriority(cadence: string, category: string): number {
+  // Daily cooking and hygiene are critical
+  if (category === "kitchen" && cadence === "daily") return 3;
+  if (category === "pet_care") return 3;
+  if (category === "bathroom" || category === "laundry") return 2;
+  if (cadence === "daily") return 2;
+  if (cadence.startsWith("weekly")) return 2;
+  if (category === "organizing" || category === "maintenance") return 1;
+  if (cadence === "monthly" || cadence.startsWith("monthly")) return 1;
+  return 1;
 }
 
 interface GeneratorInput {
@@ -189,7 +211,7 @@ const DEFAULT_ROOM_CHORES = [
  * Generate a comprehensive chore list for a household.
  */
 export function generateChoreRecommendations(input: GeneratorInput): GeneratedChore[] {
-  const chores: GeneratedChore[] = [];
+  const chores: ChoreBuilder[] = [];
   const { roomNames, hasKids, hasPets, featureKeys = [] } = input;
 
   // ── Room-specific chores ───────────────────────────────────────
@@ -277,5 +299,9 @@ export function generateChoreRecommendations(input: GeneratorInput): GeneratedCh
     chores.push({ title: "Pet walk / exercise", space: "General", cadence: "daily", category: "pet_care", estimatedMinutes: 30 });
   }
 
-  return chores;
+  // Compute priority for all chores based on cadence + category
+  return chores.map((c) => ({
+    ...c,
+    priority: inferPriority(c.cadence, c.category),
+  }));
 }

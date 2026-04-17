@@ -796,6 +796,26 @@ export function Helpers() {
     if (!token || !hid || !helper) return;
 
     setDeleteBusy(true);
+
+    // 1. Count chores assigned to this helper
+    const { count: assignedCount } = await supabase
+      .from("chores")
+      .select("id", { count: "exact", head: true })
+      .eq("household_id", hid)
+      .eq("helper_id", helper.id)
+      .is("deleted_at", null);
+
+    // 2. Unassign all chores from this helper
+    if (assignedCount && assignedCount > 0) {
+      await supabase
+        .from("chores")
+        .update({ helper_id: null })
+        .eq("household_id", hid)
+        .eq("helper_id", helper.id)
+        .is("deleted_at", null);
+    }
+
+    // 3. Delete the helper
     const res = await executeToolCall({
       accessToken: token,
       householdId: hid,
@@ -813,10 +833,22 @@ export function Helpers() {
       return;
     }
 
+    // 4. Clean up assignment rules for this helper
+    await supabase
+      .from("assignment_rules")
+      .delete()
+      .eq("household_id", hid)
+      .eq("helper_id", helper.id);
+
     setHelpers((prev) => prev.filter((h) => h.id !== helper.id));
     setDeleteOpen(false);
     setDeleteHelperRow(null);
-    showSnack("success", t("helpers.helper_deleted"));
+
+    if (assignedCount && assignedCount > 0) {
+      showSnack("info", `${helper.name} deleted. ${assignedCount} chore${assignedCount === 1 ? "" : "s"} are now unassigned — reassign them from the Chores page.`);
+    } else {
+      showSnack("success", t("helpers.helper_deleted"));
+    }
   };
 
   return (

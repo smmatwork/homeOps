@@ -208,7 +208,7 @@ export function OnboardingPanel({
                     record: {
                       title: c.title,
                       status: "pending",
-                      priority: 1,
+                      priority: typeof c.priority === "number" ? c.priority : 1,
                       metadata: {
                         space: c.space,
                         cadence: c.cadence,
