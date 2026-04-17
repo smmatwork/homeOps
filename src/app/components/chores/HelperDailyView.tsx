@@ -18,6 +18,7 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
+import { ExpandMore, ExpandLess } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
@@ -299,21 +300,34 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     );
   }
 
+  const [collapsedHelpers, setCollapsedHelpers] = useState<Set<string>>(new Set());
+
+  const toggleHelper = (id: string) => {
+    setCollapsedHelpers((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
   return (
     <Stack spacing={3}>
       {helperGroups.map((group) => {
         const progressPct = group.totalCount > 0 ? Math.round((group.completedCount / group.totalCount) * 100) : 0;
+        const isCollapsed = collapsedHelpers.has(group.helperId);
 
         return (
           <Box key={group.helperId}>
-            {/* Helper group header — matches the Task view group style */}
+            {/* Collapsible helper group header */}
             <Stack
               direction="row"
               justifyContent="space-between"
               alignItems="center"
-              sx={{ mb: 1.5, px: 0.5 }}
+              sx={{ mb: isCollapsed ? 0 : 1.5, px: 0.5, cursor: "pointer", "&:hover": { bgcolor: "action.hover" }, borderRadius: 1, py: 0.5 }}
+              onClick={() => toggleHelper(group.helperId)}
             >
-              <Stack direction="row" spacing={1} alignItems="baseline">
+              <Stack direction="row" spacing={1} alignItems="center">
+                {isCollapsed ? <ExpandMore fontSize="small" color="action" /> : <ExpandLess fontSize="small" color="action" />}
                 <Typography variant="subtitle1" fontWeight={700}>
                   {group.helperName}
                 </Typography>
@@ -329,8 +343,8 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
               />
             </Stack>
 
-            {/* Tasks grouped by cadence */}
-            {group.cadenceGroups.map(({ cadence, chores: cadChores }) => (
+            {/* Tasks grouped by cadence — collapsible */}
+            {!isCollapsed && group.cadenceGroups.map(({ cadence, chores: cadChores }) => (
               <Box key={cadence} mb={2}>
                 <Typography
                   variant="caption"

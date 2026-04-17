@@ -18,7 +18,7 @@ import {
   ToggleButtonGroup,
   Typography,
 } from "@mui/material";
-import { ChecklistRtl, Close, DeleteOutline } from "@mui/icons-material";
+import { ChecklistRtl, Close, DeleteOutline, ExpandMore, ExpandLess } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
 import { ChoreCard, type ChoreRow, getMetaStrings } from "./ChoreCard";
 import { cadenceLabel } from "../../services/choreRecommendationEngine";
@@ -70,6 +70,7 @@ export function ChoreListView(props: ChoreListViewProps) {
   const [tab, setTab] = useState<StatusTab>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [groupBy, setGroupBy] = useState<GroupBy>("space");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [filterSpace, setFilterSpace] = useState<string>(spaceFilter ?? "");
   const [filterCategory, setFilterCategory] = useState<string>("");
   const [filterCadence, setFilterCadence] = useState<string>(cadenceFilter ?? "");
@@ -168,40 +169,56 @@ export function ChoreListView(props: ChoreListViewProps) {
 
   /* ---------- render ---------- */
 
+  const toggleGroup = (label: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      next.has(label) ? next.delete(label) : next.add(label);
+      return next;
+    });
+  };
+
   const renderGroup = (label: string, rows: ChoreRow[]) => {
     if (rows.length === 0) return null;
     const completedCount = rows.filter((c) => c.status === "completed" || c.status === "done").length;
     const progressPct = rows.length > 0 ? Math.round((completedCount / rows.length) * 100) : 0;
+    const isCollapsed = collapsedGroups.has(label);
 
     return (
       <Box key={label}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1, px: 0.5 }}>
-          <Stack direction="row" spacing={1} alignItems="baseline">
+        <Stack
+          direction="row" justifyContent="space-between" alignItems="center"
+          sx={{ mb: isCollapsed ? 0 : 1, px: 0.5, cursor: "pointer", "&:hover": { bgcolor: "action.hover" }, borderRadius: 1, py: 0.5 }}
+          onClick={() => toggleGroup(label)}
+        >
+          <Stack direction="row" spacing={1} alignItems="center">
+            {isCollapsed ? <ExpandMore fontSize="small" color="action" /> : <ExpandLess fontSize="small" color="action" />}
             <Typography variant="subtitle1" fontWeight={700}>{label}</Typography>
             <Typography variant="caption" color="text.secondary">{completedCount}/{rows.length}</Typography>
           </Stack>
           <Chip label={`${progressPct}%`} size="small" color={progressPct === 100 ? "success" : progressPct > 50 ? "primary" : "default"} />
         </Stack>
-        <Stack spacing={1}>
-          {rows.map((chore) => {
-            const helper = helpers.find((h) => h.id === chore.helper_id);
-            return (
-              <ChoreCard
-                key={chore.id}
-                chore={chore}
-                helperName={helper?.name ?? ""}
-                isOnLeave={helperOnLeave(chore.helper_id, chore.due_at)}
-                selected={selected.has(chore.id)}
-                disabled={busy}
-                onSelect={() => toggle(chore.id)}
-                onEdit={() => onEdit(chore)}
-                onDelete={() => onDelete(chore)}
-                onRestore={() => onRestore(chore)}
-                onReportNotDone={() => onReportNotDone(chore)}
-              />
-            );
-          })}
-        </Stack>
+        {!isCollapsed && (
+          <Stack spacing={1}>
+            {rows.map((chore) => {
+              const helper = helpers.find((h) => h.id === chore.helper_id);
+              return (
+                <ChoreCard
+                  key={chore.id}
+                  chore={chore}
+                  helperName={helper?.name ?? ""}
+                  isOnLeave={helperOnLeave(chore.helper_id, chore.due_at)}
+                  selected={selected.has(chore.id)}
+                  disabled={busy}
+                  onSelect={() => toggle(chore.id)}
+                  onEdit={() => onEdit(chore)}
+                  onDelete={() => onDelete(chore)}
+                  onRestore={() => onRestore(chore)}
+                  onReportNotDone={() => onReportNotDone(chore)}
+                />
+              );
+            })}
+          </Stack>
+        )}
       </Box>
     );
   };
