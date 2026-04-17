@@ -2314,7 +2314,7 @@ export function Chores() {
                 {chores.filter((c) => !c.helper_id && c.status !== "completed").length} chores not yet assigned to helpers
               </Typography>
             </Box>
-            <Button size="small" variant="contained" onClick={() => navigate("/chat")}>
+            <Button size="small" variant="contained" onClick={() => navigate("/chat?assign=true")}>
               Assign now
             </Button>
           </Stack>

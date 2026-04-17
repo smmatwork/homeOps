@@ -779,7 +779,7 @@ function TypingIndicator() {
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
-export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean } = {}) {
+export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean; startAssignment?: boolean } = {}) {
   const navigate = useNavigate();
   const [autoDetectedOnboarding, setAutoDetectedOnboarding] = useState<boolean | null>(null);
   // null = still detecting, true = onboarding, false = normal
@@ -889,7 +889,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean 
   const [coverageExperimentOpen, setCoverageExperimentOpen] = useState(false);
   const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState(true);
   const [assignmentNudgeDismissed, setAssignmentNudgeDismissed] = useState(false);
-  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
+  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(props.startAssignment ?? false);
   const [unassignedChoreCount, setUnassignedChoreCount] = useState(0);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
