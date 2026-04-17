@@ -21,7 +21,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { CheckCircle, Person, Layers, Chat, EditNote } from "@mui/icons-material";
+import { CheckCircle, Person, Layers, EditNote } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
@@ -38,8 +38,6 @@ import { useI18n } from "../../i18n";
 interface AssignmentPanelProps {
   onDismiss: () => void;
   onComplete: (count: number) => void;
-  /** Called when user picks "Other" pattern — hands off to the chat agent */
-  onSwitchToChat?: () => void;
 }
 
 interface HelperInfo {
@@ -97,7 +95,7 @@ const SPECIALTY_AREAS = [
   { key: "laundry", label: "Laundry & ironing", tags: ["laundry", "washing", "ironing"] },
 ];
 
-export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: AssignmentPanelProps) {
+export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps) {
   const { householdId, accessToken } = useAuth();
   const { lang } = useI18n();
   const [step, setStep] = useState<Step>("pick_pattern");
@@ -535,29 +533,9 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
               </CardContent>
             </Card>
 
-            <Card
-              variant="outlined"
-              sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
-              onClick={() => {
-                if (onSwitchToChat) {
-                  onSwitchToChat();
-                } else {
-                  onDismiss();
-                }
-              }}
-            >
-              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Stack direction="row" spacing={1.5} alignItems="center">
-                  <Chat color="primary" />
-                  <Box>
-                    <Typography variant="subtitle2" fontWeight={700}>Other — describe your pattern</Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      Tell the agent how your household works. e.g., "Roopa does ground floor mornings, Bhimappa does first floor afternoons, Pallab only cooks."
-                    </Typography>
-                  </Box>
-                </Stack>
-              </CardContent>
-            </Card>
+            {/* "Other" conversational option removed — the form-based patterns
+                (specialty, floor, direct) are more reliable than the LLM-based
+                conversational flow which has routing and result-display issues. */}
           </Stack>
 
           <Button variant="text" size="small" onClick={onDismiss} sx={{ alignSelf: "flex-start", color: "text.secondary" }}>
