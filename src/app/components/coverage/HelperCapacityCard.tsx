@@ -29,10 +29,14 @@ interface HelperCapacity {
   startTime: string;
   endTime: string;
   assignedChores: number;
-  dailyLoadMinutes: number; // effective daily minutes from assigned chores
-  unassignedHighPriority: number; // P3 chores without a helper
+  dailyLoadMinutes: number;
+  unassignedHighPriority: number;
   utilizationPct: number;
-  status: "healthy" | "over" | "under" | "idle";
+  status: "healthy" | "over" | "under" | "idle" | "on_leave";
+  /** Upcoming leave periods */
+  upcomingLeave: Array<{ startAt: string; endAt: string; reason: string | null }>;
+  /** Number of assigned chores affected by upcoming leave */
+  choresDuringLeave: number;
 }
 
 interface CapacitySummary {
@@ -55,7 +59,7 @@ function cadenceLoadFactor(cadence: string): number {
   return 1.0 / 6;
 }
 
-export function HelperCapacityCard() {
+export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) {
   const { householdId } = useAuth();
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<CapacitySummary | null>(null);
@@ -64,15 +68,24 @@ export function HelperCapacityCard() {
     if (!householdId) { setLoading(false); return; }
     setLoading(true);
 
-    const [helpersRes, choresRes] = await Promise.all([
+    const nowIso = new Date().toISOString();
+    const futureIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // next 30 days
+
+    const [helpersRes, choresRes, leaveRes] = await Promise.all([
       supabase.from("helpers").select("id,name,type,daily_capacity_minutes,metadata").eq("household_id", householdId),
       supabase.from("chores").select("id,helper_id,priority,metadata").eq("household_id", householdId).is("deleted_at", null).neq("status", "completed"),
+      supabase.from("member_time_off").select("helper_id,start_at,end_at,reason")
+        .eq("household_id", householdId)
+        .eq("member_kind", "helper")
+        .gte("end_at", nowIso)
+        .lte("start_at", futureIso),
     ]);
 
     setLoading(false);
     if (helpersRes.error || choresRes.error) return;
 
     const chores = (choresRes.data ?? []) as Array<Record<string, unknown>>;
+    const leaveData = (leaveRes.data ?? []) as Array<Record<string, unknown>>;
     const alerts: string[] = [];
 
     // Compute per-helper capacity
@@ -102,8 +115,27 @@ export function HelperCapacityCard() {
       }, 0);
 
       const utilizationPct = capacityMinutes > 0 ? Math.round((dailyLoad / capacityMinutes) * 100) : 0;
+
+      // Check for upcoming leave
+      const upcomingLeave = leaveData
+        .filter((l) => String(l.helper_id) === helperId)
+        .map((l) => ({
+          startAt: String(l.start_at),
+          endAt: String(l.end_at),
+          reason: l.reason ? String(l.reason) : null,
+        }));
+
+      // Is currently on leave?
+      const now = new Date();
+      const isCurrentlyOnLeave = upcomingLeave.some((l) => {
+        const start = new Date(l.startAt);
+        const end = new Date(l.endAt);
+        return now >= start && now < end;
+      });
+
       let status: HelperCapacity["status"] = "healthy";
-      if (assigned.length === 0) status = "idle";
+      if (isCurrentlyOnLeave) status = "on_leave";
+      else if (assigned.length === 0) status = "idle";
       else if (utilizationPct > 100) status = "over";
       else if (utilizationPct < 40) status = "under";
 
@@ -120,6 +152,8 @@ export function HelperCapacityCard() {
         unassignedHighPriority: 0,
         utilizationPct,
         status,
+        upcomingLeave,
+        choresDuringLeave: isCurrentlyOnLeave ? assigned.length : 0,
       };
     });
 
@@ -129,14 +163,32 @@ export function HelperCapacityCard() {
 
     // Generate alerts
     for (const h of helperCapacities) {
-      if (h.status === "over") {
+      if (h.status === "on_leave") {
+        alerts.push(`🔴 ${h.name} (${h.type}) is currently on leave — ${h.assignedChores} chore${h.assignedChores === 1 ? "" : "s"} need temporary coverage.`);
+      } else if (h.status === "over") {
         alerts.push(`${h.name} (${h.type}) is over capacity at ${h.utilizationPct}% — ${h.dailyLoadMinutes} min assigned vs ${h.capacityMinutes} min available.`);
-      }
-      if (h.status === "idle") {
+      } else if (h.status === "idle") {
         alerts.push(`${h.name} (${h.type}) has no chores assigned — consider assigning tasks or adjusting their schedule.`);
-      }
-      if (h.status === "under" && h.assignedChores > 0) {
+      } else if (h.status === "under" && h.assignedChores > 0) {
         alerts.push(`${h.name} (${h.type}) is at ${h.utilizationPct}% utilization — has spare capacity of ${h.capacityMinutes - h.dailyLoadMinutes} min/day.`);
+      }
+
+      // Upcoming leave warning
+      for (const leave of h.upcomingLeave) {
+        const start = new Date(leave.startAt);
+        const end = new Date(leave.endAt);
+        const now = new Date();
+        if (start > now) {
+          const daysUntil = Math.ceil((start.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+          const leaveDays = Math.ceil((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+          if (daysUntil <= 7 && h.assignedChores > 0) {
+            alerts.push(
+              `⚠️ ${h.name} goes on leave in ${daysUntil} day${daysUntil === 1 ? "" : "s"} (${leaveDays} day${leaveDays === 1 ? "" : "s"})` +
+              ` — ${h.assignedChores} chore${h.assignedChores === 1 ? "" : "s"} will need coverage.` +
+              (leave.reason ? ` Reason: ${leave.reason}` : ""),
+            );
+          }
+        }
       }
     }
     if (unassigned.length > 5) {
@@ -151,7 +203,7 @@ export function HelperCapacityCard() {
     });
   }, [householdId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, refreshKey]);
 
   if (loading) {
     return <Card variant="outlined"><CardContent><Box display="flex" justifyContent="center" py={2}><CircularProgress size={20} /></Box></CardContent></Card>;
@@ -162,6 +214,7 @@ export function HelperCapacityCard() {
   const statusColor = (s: HelperCapacity["status"]) => {
     switch (s) {
       case "over": return "error";
+      case "on_leave": return "error";
       case "under": return "warning";
       case "idle": return "default";
       default: return "success";
@@ -171,6 +224,7 @@ export function HelperCapacityCard() {
   const statusLabel = (s: HelperCapacity["status"]) => {
     switch (s) {
       case "over": return "Over capacity";
+      case "on_leave": return "On leave";
       case "under": return "Under-utilized";
       case "idle": return "No tasks";
       default: return "Healthy";
@@ -217,6 +271,18 @@ export function HelperCapacityCard() {
                   {h.startTime && h.endTime ? ` · ${h.startTime}–${h.endTime}` : ""}
                 </Typography>
               )}
+              {h.upcomingLeave.length > 0 && h.upcomingLeave.map((leave, i) => {
+                const start = new Date(leave.startAt);
+                const end = new Date(leave.endAt);
+                const now = new Date();
+                const isCurrent = now >= start && now < end;
+                return (
+                  <Typography key={i} variant="caption" color={isCurrent ? "error.main" : "warning.main"} display="block" mt={0.25}>
+                    {isCurrent ? "On leave" : "Upcoming leave"}: {start.toLocaleDateString()} — {end.toLocaleDateString()}
+                    {leave.reason ? ` (${leave.reason})` : ""}
+                  </Typography>
+                );
+              })}
             </Box>
           ))}
 

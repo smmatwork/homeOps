@@ -58,7 +58,7 @@ export function CoveragePage() {
       </Stack>
 
       <Stack spacing={3}>
-        <HelperCapacityCard />
+        <HelperCapacityCard refreshKey={refreshKey} />
         <CoverageDashboard refreshKey={refreshKey} onApplied={handleRefresh} />
       </Stack>
     </Box>
