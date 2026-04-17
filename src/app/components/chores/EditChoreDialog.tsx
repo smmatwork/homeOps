@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Box,
   Button,
   Dialog,
   DialogActions,
@@ -8,6 +9,7 @@ import {
   MenuItem,
   Stack,
   TextField,
+  Typography,
 } from "@mui/material";
 import { useI18n } from "../../i18n";
 import type { ChoreRow } from "./ChoreCard";
@@ -32,6 +34,8 @@ interface EditChoreDialogProps {
     cadence: string;
     category: string;
   }) => void;
+  /** Called when user splits a chore into sub-tasks */
+  onSplit?: (original: ChoreRow, subTasks: Array<{ title: string; space: string; cadence: string; category: string }>) => void;
 }
 
 const STATUS_OPTIONS = ["pending", "in-progress", "completed"] as const;
@@ -83,9 +87,12 @@ export function EditChoreDialog({
   busy,
   helperOnLeave,
   onSave,
+  onSplit,
 }: EditChoreDialogProps) {
   const { t } = useI18n();
   const [form, setForm] = useState(EMPTY_FORM);
+  const [splitMode, setSplitMode] = useState(false);
+  const [splitTasks, setSplitTasks] = useState<Array<{ title: string }>>([{ title: "" }, { title: "" }]);
 
   useEffect(() => {
     if (!chore) return;
@@ -169,13 +176,67 @@ export function EditChoreDialog({
               <MenuItem key={c.value} value={c.value}>{c.label}</MenuItem>
             ))}
           </TextField>
+
+          {/* Split into sub-tasks */}
+          {onSplit && !splitMode && (
+            <Button size="small" variant="text" onClick={() => setSplitMode(true)} sx={{ alignSelf: "flex-start" }}>
+              Split into sub-tasks
+            </Button>
+          )}
+          {splitMode && (
+            <Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 1 }}>
+              <Typography variant="caption" fontWeight={600} mb={1} display="block">
+                Break "{form.title}" into sub-tasks:
+              </Typography>
+              <Stack spacing={0.75}>
+                {splitTasks.map((st, i) => (
+                  <Stack key={i} direction="row" spacing={0.5} alignItems="center">
+                    <TextField
+                      size="small" fullWidth variant="standard"
+                      placeholder={`Sub-task ${i + 1}`}
+                      value={st.title}
+                      onChange={(e) => setSplitTasks((prev) => prev.map((s, j) => j === i ? { title: e.target.value } : s))}
+                      InputProps={{ sx: { fontSize: 13 } }}
+                    />
+                    {splitTasks.length > 2 && (
+                      <Button size="small" sx={{ minWidth: 0, p: 0 }} onClick={() => setSplitTasks((prev) => prev.filter((_, j) => j !== i))}>✕</Button>
+                    )}
+                  </Stack>
+                ))}
+              </Stack>
+              <Stack direction="row" spacing={1} mt={1}>
+                <Button size="small" onClick={() => setSplitTasks((prev) => [...prev, { title: "" }])}>+ Add</Button>
+                <Button size="small" variant="text" onClick={() => setSplitMode(false)}>Cancel split</Button>
+              </Stack>
+            </Box>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={busy}>{t("common.cancel")}</Button>
-        <Button variant="contained" onClick={handleSave} disabled={busy || !form.title.trim()}>
-          {t("common.save")}
-        </Button>
+        {splitMode && onSplit && chore ? (
+          <Button
+            variant="contained" color="secondary"
+            disabled={busy || splitTasks.filter((s) => s.title.trim()).length < 2}
+            onClick={() => {
+              const subs = splitTasks.filter((s) => s.title.trim()).map((s) => ({
+                title: s.title.trim(),
+                space: form.space,
+                cadence: form.cadence,
+                category: form.category,
+              }));
+              onSplit(chore, subs);
+              setSplitMode(false);
+              onClose();
+            }}
+          >
+            Split into {splitTasks.filter((s) => s.title.trim()).length} tasks
+          </Button>
+        ) : (
+          <Button variant="contained" onClick={handleSave} disabled={busy || !form.title.trim()}>
+            {t("common.save")}
+          </Button>
+        )}
       </DialogActions>
     </Dialog>
   );

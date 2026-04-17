@@ -49,7 +49,52 @@ type RoomRule = {
   chores: Array<{ suffix: string; cadence: string; category: string; minutes: number }>;
 };
 
+// IMPORTANT: Order matters — first match wins.
+// Outdoor/balcony/terrace rules come BEFORE bedroom/living to handle
+// names like "Balcony-Outside Master Bedroom" correctly.
 const ROOM_RULES: RoomRule[] = [
+  // ── Outdoor spaces (must be before bedroom/living) ──────────
+  {
+    pattern: /^balcony|^baclony/i, // anchor to start of name
+    chores: [
+      { suffix: "sweep and mop", cadence: "weekly_sat", category: "outdoor", minutes: 15 },
+      { suffix: "railing wipe and glass clean", cadence: "biweekly_sat", category: "cleaning", minutes: 15 },
+      { suffix: "water plants", cadence: "daily", category: "outdoor", minutes: 10 },
+    ],
+  },
+  {
+    pattern: /^terrace|^deck/i,
+    chores: [
+      { suffix: "sweep", cadence: "weekly_sat", category: "outdoor", minutes: 20 },
+      { suffix: "cobweb removal and drain check", cadence: "monthly", category: "outdoor", minutes: 20 },
+      { suffix: "furniture wipe", cadence: "weekly_sat", category: "outdoor", minutes: 10 },
+    ],
+  },
+  {
+    pattern: /^garden|^lawn|^courtyard|^central court/i,
+    chores: [
+      { suffix: "water plants", cadence: "daily", category: "outdoor", minutes: 15 },
+      { suffix: "weed removal and trim", cadence: "weekly_sat", category: "outdoor", minutes: 30 },
+      { suffix: "lawn mowing", cadence: "biweekly_sat", category: "outdoor", minutes: 30 },
+      { suffix: "sweep pathways", cadence: "daily", category: "outdoor", minutes: 10 },
+    ],
+  },
+  {
+    pattern: /^verandah|^patio|^outside|^entrance|^foyer/i,
+    chores: [
+      { suffix: "sweep and mop", cadence: "daily", category: "cleaning", minutes: 10 },
+      { suffix: "furniture and fixture wipe", cadence: "weekly_sat", category: "cleaning", minutes: 10 },
+    ],
+  },
+  {
+    pattern: /^garage|^parking|^car\s*porch/i,
+    chores: [
+      { suffix: "sweep", cadence: "weekly_sat", category: "outdoor", minutes: 15 },
+      { suffix: "cobweb removal", cadence: "monthly", category: "cleaning", minutes: 10 },
+      { suffix: "car wash / wipe", cadence: "weekly_sun", category: "outdoor", minutes: 20 },
+    ],
+  },
+  // ── Indoor spaces ───────────────────────────────────────────
   {
     pattern: /kitchen/i,
     chores: [
@@ -70,7 +115,7 @@ const ROOM_RULES: RoomRule[] = [
     ],
   },
   {
-    pattern: /bedroom|master|kids\s*bed|guest\s*bed|parent/i,
+    pattern: /bedroom|master bed|kids\s*bed|guest\s*bed|parent.*bed/i,
     chores: [
       { suffix: "bed making", cadence: "daily", category: "cleaning", minutes: 5 },
       { suffix: "sweep and mop floor", cadence: "daily", category: "cleaning", minutes: 15 },
@@ -97,31 +142,7 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "sweep and mop floor", cadence: "daily", category: "cleaning", minutes: 10 },
     ],
   },
-  {
-    pattern: /balcony/i,
-    chores: [
-      { suffix: "sweep and mop", cadence: "weekly_sat", category: "outdoor", minutes: 15 },
-      { suffix: "railing wipe and glass clean", cadence: "biweekly_sat", category: "cleaning", minutes: 15 },
-      { suffix: "water plants", cadence: "daily", category: "outdoor", minutes: 10 },
-    ],
-  },
-  {
-    pattern: /terrace|deck/i,
-    chores: [
-      { suffix: "sweep", cadence: "weekly_sat", category: "outdoor", minutes: 20 },
-      { suffix: "cobweb removal and drain check", cadence: "monthly", category: "outdoor", minutes: 20 },
-      { suffix: "furniture wipe", cadence: "weekly_sat", category: "outdoor", minutes: 10 },
-    ],
-  },
-  {
-    pattern: /garden|lawn|courtyard/i,
-    chores: [
-      { suffix: "water plants", cadence: "daily", category: "outdoor", minutes: 15 },
-      { suffix: "weed removal and trim", cadence: "weekly_sat", category: "outdoor", minutes: 30 },
-      { suffix: "lawn mowing", cadence: "biweekly_sat", category: "outdoor", minutes: 30 },
-      { suffix: "sweep pathways", cadence: "daily", category: "outdoor", minutes: 10 },
-    ],
-  },
+  // balcony, terrace, garden rules are at the top of the array (before bedroom)
   {
     pattern: /utility|laundry/i,
     chores: [
@@ -136,14 +157,7 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "deep clean (brass, idols, lamps)", cadence: "weekly_fri", category: "cleaning", minutes: 20 },
     ],
   },
-  {
-    pattern: /garage|parking|car\s*porch/i,
-    chores: [
-      { suffix: "sweep", cadence: "weekly_sat", category: "outdoor", minutes: 15 },
-      { suffix: "cobweb removal", cadence: "monthly", category: "cleaning", minutes: 10 },
-      { suffix: "car wash / wipe", cadence: "weekly_sun", category: "outdoor", minutes: 20 },
-    ],
-  },
+  // garage rules are at the top of the array
   {
     pattern: /study|office|library|home\s*office/i,
     chores: [
@@ -166,13 +180,7 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "railing and banister wipe", cadence: "weekly_sat", category: "cleaning", minutes: 10 },
     ],
   },
-  {
-    pattern: /verandah|patio|outside|entrance/i,
-    chores: [
-      { suffix: "sweep and mop", cadence: "daily", category: "cleaning", minutes: 10 },
-      { suffix: "furniture and fixture wipe", cadence: "weekly_sat", category: "cleaning", minutes: 10 },
-    ],
-  },
+  // verandah/entrance rules are at the top of the array (before bedroom)
   {
     pattern: /theater|entertainment|media|gym|music/i,
     chores: [
@@ -214,8 +222,17 @@ export function generateChoreRecommendations(input: GeneratorInput): GeneratedCh
   const chores: ChoreBuilder[] = [];
   const { roomNames, hasKids, hasPets, featureKeys = [] } = input;
 
+  // Deduplicate room names (case-insensitive) — keep first occurrence
+  const seenRooms = new Set<string>();
+  const uniqueRooms = roomNames.filter((r) => {
+    const key = r.toLowerCase().trim();
+    if (seenRooms.has(key)) return false;
+    seenRooms.add(key);
+    return true;
+  });
+
   // ── Room-specific chores ───────────────────────────────────────
-  for (const room of roomNames) {
+  for (const room of uniqueRooms) {
     let matched = false;
     for (const rule of ROOM_RULES) {
       if (rule.pattern.test(room)) {
@@ -299,8 +316,17 @@ export function generateChoreRecommendations(input: GeneratorInput): GeneratedCh
     chores.push({ title: "Pet walk / exercise", space: "General", cadence: "daily", category: "pet_care", estimatedMinutes: 30 });
   }
 
+  // Deduplicate: same title (case-insensitive) = keep first only
+  const seen = new Set<string>();
+  const deduped = chores.filter((c) => {
+    const key = c.title.toLowerCase().trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   // Compute priority for all chores based on cadence + category
-  return chores.map((c) => ({
+  return deduped.map((c) => ({
     ...c,
     priority: inferPriority(c.cadence, c.category),
   }));
