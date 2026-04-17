@@ -21,7 +21,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { CheckCircle, Person, Layers } from "@mui/icons-material";
+import { CheckCircle, Person, Layers, Chat } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
@@ -38,6 +38,8 @@ import { useI18n } from "../../i18n";
 interface AssignmentPanelProps {
   onDismiss: () => void;
   onComplete: (count: number) => void;
+  /** Called when user picks "Other" pattern — hands off to the chat agent */
+  onSwitchToChat?: () => void;
 }
 
 interface HelperInfo { id: string; name: string; type: string; capacityMinutes: number; }
@@ -81,7 +83,7 @@ const SPECIALTY_AREAS = [
   { key: "laundry", label: "Laundry & ironing", tags: ["laundry", "washing", "ironing"] },
 ];
 
-export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps) {
+export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: AssignmentPanelProps) {
   const { householdId, accessToken } = useAuth();
   const { lang } = useI18n();
   const [step, setStep] = useState<Step>("pick_pattern");
@@ -448,6 +450,29 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
                       {floors.length > 1
                         ? `Your home has ${floors.length} floors. Assign one helper per floor.`
                         : "Your home has a single floor — this pattern works with multi-floor homes."}
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+            <Card
+              variant="outlined"
+              sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
+              onClick={() => {
+                if (onSwitchToChat) {
+                  onSwitchToChat();
+                } else {
+                  onDismiss();
+                }
+              }}
+            >
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <Chat color="primary" />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>Other — describe your pattern</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Tell the agent how your household works. e.g., "Roopa does ground floor mornings, Bhimappa does first floor afternoons, Pallab only cooks."
                     </Typography>
                   </Box>
                 </Stack>

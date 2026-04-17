@@ -3560,6 +3560,16 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
                   setUnassignedChoreCount((prev) => Math.max(0, prev - count));
                   navigate("/chores");
                 }}
+                onSwitchToChat={() => {
+                  setAssignmentPanelOpen(false);
+                  setAssignmentNudgeDismissed(true);
+                  void sendMessage(
+                    "I have unassigned chores and helpers. Help me assign them. " +
+                    "Ask me about my preferences — which helper does what, any specific room assignments, " +
+                    "time-of-day preferences, or any other pattern. Then suggest assignments based on my answers.",
+                    { silent: true },
+                  );
+                }}
               />
             </Box>
           )}
