@@ -21,7 +21,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { CheckCircle, Person, Layers, Chat } from "@mui/icons-material";
+import { CheckCircle, Person, Layers, Chat, EditNote } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
@@ -509,6 +509,32 @@ export function AssignmentPanel({ onDismiss, onComplete, onSwitchToChat }: Assig
                 </Stack>
               </CardContent>
             </Card>
+            <Card
+              variant="outlined"
+              sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
+              onClick={() => {
+                // Go straight to assignments with no pre-assignment — all chores unassigned
+                const map: Record<string, { helperId: string | null; cadence: string }> = {};
+                for (const c of rawChores) {
+                  map[c.id] = { helperId: null, cadence: normalizeCadence(c.cadence) };
+                }
+                setAssignments(map);
+                setStep("assignments");
+              }}
+            >
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <EditNote color="primary" />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>Direct assignment</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Manually pick a helper for each chore yourself. No auto-suggestion — full control.
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+
             <Card
               variant="outlined"
               sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
