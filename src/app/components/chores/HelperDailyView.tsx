@@ -270,6 +270,9 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     void load();
   }, [householdId, accessToken, load]);
 
+  // All hooks must be before early returns
+  const [collapsedHelpers, setCollapsedHelpers] = useState<Set<string>>(new Set());
+
   if (loading) {
     return (
       <Box display="flex" justifyContent="center" py={4}>
@@ -299,8 +302,6 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
       </Card>
     );
   }
-
-  const [collapsedHelpers, setCollapsedHelpers] = useState<Set<string>>(new Set());
 
   const toggleHelper = (id: string) => {
     setCollapsedHelpers((prev) => {
