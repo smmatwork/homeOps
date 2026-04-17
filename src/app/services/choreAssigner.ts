@@ -145,35 +145,91 @@ function defaultMinutes(cadence: string): number {
   }
 }
 
+/** Days of the week for distributing weekly chores */
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat"] as const;
+
+/** What fraction of daily capacity does this cadence consume? */
+function cadenceLoadFactor(cadence: string): number {
+  if (cadence === "daily" || cadence === "alternate_days") return 1.0;
+  if (cadence.startsWith("weekly")) return 1.0 / 6; // spreads across ~6 working days
+  if (cadence.startsWith("biweekly")) return 1.0 / 12;
+  if (cadence === "monthly") return 1.0 / 26; // ~26 working days/month
+  if (/every_\d_days/.test(cadence)) {
+    const n = parseInt(cadence.split("_")[1], 10) || 3;
+    return 1.0 / n;
+  }
+  return 1.0 / 6;
+}
+
+/** Pick a specific day for a weekly/biweekly cadence, distributing across days */
+function assignDay(
+  cadence: string,
+  helperDayLoads: Map<string, Record<string, number>>,
+  helperId: string,
+  mins: number,
+): string {
+  // If cadence already has a specific day, keep it
+  if (/_(mon|tue|wed|thu|fri|sat|sun)$/.test(cadence)) return cadence;
+
+  // For generic "weekly" or "biweekly", find the least-loaded day for this helper
+  const loads = helperDayLoads.get(helperId) ?? {};
+  const prefix = cadence.startsWith("biweekly") ? "biweekly" : "weekly";
+
+  let bestDay = "sat";
+  let bestLoad = Infinity;
+  for (const day of WEEKDAYS) {
+    const load = loads[`${prefix}_${day}`] ?? 0;
+    if (load < bestLoad) {
+      bestLoad = load;
+      bestDay = day;
+    }
+  }
+
+  // Record the load on this day
+  const key = `${prefix}_${bestDay}`;
+  if (!helperDayLoads.has(helperId)) helperDayLoads.set(helperId, {});
+  const dayLoads = helperDayLoads.get(helperId)!;
+  dayLoads[key] = (dayLoads[key] ?? 0) + mins;
+
+  return `${prefix}_${bestDay}`;
+}
+
 /**
  * Build an assignment plan: match chores to helpers based on role,
- * capacity, and chore requirements. Uses a greedy best-fit algorithm.
+ * capacity, schedule, and estimated duration. Distributes weekly/monthly
+ * chores across different days to avoid overloading any single day.
  */
 export function buildAssignmentPlan(
   chores: AssignableChore[],
   helpers: AssignableHelper[],
 ): AssignmentPlan {
-  // Pre-compute helper tags (include inferred tags from type)
+  // Pre-compute helper tags
   const helperTags = new Map<string, string[]>();
   for (const h of helpers) {
     const tags = h.roleTags.length > 0 ? h.roleTags : inferRoleTags(h.type);
     helperTags.set(h.id, tags);
   }
 
-  // Track remaining capacity per helper (daily equivalent)
-  const remainingCapacity = new Map<string, number>();
+  // Track effective daily load per helper (accounting for cadence frequency)
+  const effectiveDailyLoad = new Map<string, number>();
   for (const h of helpers) {
-    remainingCapacity.set(h.id, h.dailyCapacityMinutes);
+    effectiveDailyLoad.set(h.id, 0);
   }
+
+  // Track per-day loads for distributing weekly/biweekly chores
+  const helperDayLoads = new Map<string, Record<string, number>>();
 
   const assignments: Assignment[] = [];
 
-  // Sort chores: daily first (highest frequency = most important to assign),
-  // then by estimated minutes descending (bigger tasks first for bin-packing)
-  const cadenceOrder: Record<string, number> = { daily: 0, weekly: 1, biweekly: 2, monthly: 3 };
+  // Sort: daily first, then by estimated minutes desc (bin-packing)
+  const cadenceOrder: Record<string, number> = {
+    daily: 0, alternate_days: 1,
+    every_2_days: 1, every_3_days: 2, every_4_days: 2, every_5_days: 2,
+    weekly: 3, biweekly: 4, monthly: 5,
+  };
   const sorted = [...chores].sort((a, b) => {
-    const ca = cadenceOrder[a.cadence] ?? 4;
-    const cb = cadenceOrder[b.cadence] ?? 4;
+    const ca = cadenceOrder[a.cadence.split("_")[0]] ?? (cadenceOrder[a.cadence] ?? 4);
+    const cb = cadenceOrder[b.cadence.split("_")[0]] ?? (cadenceOrder[b.cadence] ?? 4);
     if (ca !== cb) return ca - cb;
     return b.estimatedMinutes - a.estimatedMinutes;
   });
@@ -181,14 +237,17 @@ export function buildAssignmentPlan(
   for (const chore of sorted) {
     const choreTags = inferChoreCategory(chore.title, chore.space);
     const mins = chore.estimatedMinutes || defaultMinutes(chore.cadence);
+    const loadFactor = cadenceLoadFactor(chore.cadence);
+    const effectiveMins = mins * loadFactor; // daily equivalent load
 
     // Find best matching helper with capacity
     let bestHelper: AssignableHelper | null = null;
     let bestScore = -1;
 
     for (const h of helpers) {
-      const remaining = remainingCapacity.get(h.id) ?? 0;
-      if (remaining < mins) continue; // no capacity
+      const currentLoad = effectiveDailyLoad.get(h.id) ?? 0;
+      const remaining = h.dailyCapacityMinutes - currentLoad;
+      if (remaining < effectiveMins) continue; // no capacity
 
       const score = matchScore(helperTags.get(h.id) ?? [], choreTags);
       if (score > bestScore) {
@@ -197,13 +256,19 @@ export function buildAssignmentPlan(
       }
     }
 
+    // Pick a specific day for weekly/biweekly chores
+    let finalCadence = chore.cadence;
+    if (bestHelper && (chore.cadence === "weekly" || chore.cadence === "biweekly")) {
+      finalCadence = assignDay(chore.cadence, helperDayLoads, bestHelper.id, mins);
+    }
+
     if (bestHelper) {
-      remainingCapacity.set(bestHelper.id, (remainingCapacity.get(bestHelper.id) ?? 0) - mins);
+      effectiveDailyLoad.set(bestHelper.id, (effectiveDailyLoad.get(bestHelper.id) ?? 0) + effectiveMins);
       assignments.push({
         choreId: chore.id,
         choreTitle: chore.title,
         space: chore.space,
-        cadence: chore.cadence,
+        cadence: finalCadence,
         estimatedMinutes: mins,
         helperId: bestHelper.id,
         helperName: bestHelper.name,
@@ -238,12 +303,14 @@ export function buildAssignmentPlan(
 
   const byHelper = helpers.map((h) => {
     const hChores = byHelperMap.get(h.id) ?? [];
-    const totalMinutes = hChores.reduce((s, c) => s + c.estimatedMinutes, 0);
+    // Effective daily load = sum of (minutes * cadence frequency factor)
+    const dailyLoad = effectiveDailyLoad.get(h.id) ?? 0;
+    const totalMinutes = Math.round(dailyLoad); // daily equivalent
     return {
       helper: h,
       chores: hChores,
       totalMinutes,
-      capacityUsedPct: h.dailyCapacityMinutes > 0 ? Math.round((totalMinutes / h.dailyCapacityMinutes) * 100) : 0,
+      capacityUsedPct: h.dailyCapacityMinutes > 0 ? Math.round((dailyLoad / h.dailyCapacityMinutes) * 100) : 0,
     };
   });
 
