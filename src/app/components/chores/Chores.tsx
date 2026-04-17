@@ -48,7 +48,7 @@ import { agentCreate } from "../../services/agentApi";
 import { executeToolCall } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
 import { normalizeSpacesToRooms } from "../../config/homeProfileTemplates";
-import { Link as RouterLink } from "react-router";
+import { Link as RouterLink, useNavigate } from "react-router";
 import { HealthAndSafety, Sync } from "@mui/icons-material";
 import { useSyncSchedule } from "../../hooks/useSyncSchedule";
 import { SyncResultsDrawer } from "./SyncResultsDrawer";
@@ -57,7 +57,6 @@ import { CreateChoreDialog } from "./CreateChoreDialog";
 import { EditChoreDialog } from "./EditChoreDialog";
 import { ChoreListView } from "./ChoreListView";
 import { CoverageDashboard } from "../coverage/CoverageDashboard";
-import { AssignmentPanel } from "../chat/AssignmentPanel";
 
 type ChoreRow = {
   id: string;
@@ -192,6 +191,7 @@ function startOfLocalWeekMonday(date: Date): Date {
 }
 
 export function Chores() {
+  const navigate = useNavigate();
   const { t } = useI18n();
   const scheduleSync = useSyncSchedule();
   const [syncDrawerOpen, setSyncDrawerOpen] = useState(false);
@@ -201,7 +201,6 @@ export function Chores() {
   const [coverageRefreshKey, setCoverageRefreshKey] = useState(0);
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
   const [cadenceFilter, setCadenceFilter] = useState<string | null>(null);
-  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -2307,7 +2306,7 @@ export function Chores() {
       {loadError && <Alert severity="error" sx={{ mb: 2 }}>{loadError}</Alert>}
 
       {/* Assignment nudge — show when many chores are unassigned */}
-      {!assignmentPanelOpen && chores.filter((c) => !c.helper_id && c.status !== "completed").length > 5 && (
+      {chores.filter((c) => !c.helper_id && c.status !== "completed").length > 5 && (
         <Paper variant="outlined" sx={{ px: 2, py: 1, mb: 2, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
           <Stack direction="row" spacing={1.5} alignItems="center">
             <Box flex={1}>
@@ -2315,35 +2314,11 @@ export function Chores() {
                 {chores.filter((c) => !c.helper_id && c.status !== "completed").length} chores not yet assigned to helpers
               </Typography>
             </Box>
-            <Button size="small" variant="contained" onClick={() => setAssignmentPanelOpen(true)}>
+            <Button size="small" variant="contained" onClick={() => navigate("/chat")}>
               Assign now
             </Button>
           </Stack>
         </Paper>
-      )}
-
-      {/* Assignment panel */}
-      {assignmentPanelOpen && (
-        <Box mb={2}>
-          <AssignmentPanel
-            onDismiss={() => setAssignmentPanelOpen(false)}
-            onComplete={() => {
-              setAssignmentPanelOpen(false);
-              // Refresh chores list
-              void (async () => {
-                const hid = householdId.trim();
-                if (!hid) return;
-                const { data } = await supabase
-                  .from("chores")
-                  .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,deleted_at,created_at")
-                  .eq("household_id", hid)
-                  .is("deleted_at", null)
-                  .order("created_at", { ascending: false });
-                if (data) setChores(data as ChoreRow[]);
-              })();
-            }}
-          />
-        </Box>
       )}
 
       {busy && chores.length === 0 ? (
