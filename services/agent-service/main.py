@@ -1003,6 +1003,12 @@ def _is_helper_intent(messages: list[dict[str, Any]]) -> bool:
         if ("how many" in s) or ("count" in s) or ("number of" in s) or ("total" in s):
             return False
 
+    # Assignment prompts should go to the chore orchestrator, not the helper agent
+    assign_phrases = ("assign chores", "assign them", "assign my", "unassigned chores", "help me assign",
+                      "assign tasks", "distribute chores", "assignment pattern", "assignment preference")
+    if any(p in s for p in assign_phrases):
+        return False
+
     helper_terms = ("helper", "helpers", "cleaner", "cleaners", "maid", "househelp", "house help")
     helper_ops = ("time off", "leave", "vacation", "availability", "feedback", "rating", "reward", "bonus", "assign", "reassign", "unassign")
     if any(t in s for t in helper_terms):

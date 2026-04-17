@@ -187,10 +187,9 @@ export const router = createBrowserRouter([
           const [params] = useSearchParams();
           const onboarding = params.get("onboarding") === "true";
           const assign = params.get("assign") === "true";
-          const assignChat = params.get("assignChat") === "true";
           return (
             <LazyWrapper>
-              <ChatInterface onboarding={onboarding} startAssignment={assign} startAssignmentChat={assignChat} />
+              <ChatInterface onboarding={onboarding} startAssignment={assign} />
             </LazyWrapper>
           );
         },

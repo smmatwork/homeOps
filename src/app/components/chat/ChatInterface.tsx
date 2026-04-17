@@ -779,7 +779,7 @@ function TypingIndicator() {
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
-export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean; startAssignment?: boolean; startAssignmentChat?: boolean } = {}) {
+export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean; startAssignment?: boolean } = {}) {
   const navigate = useNavigate();
   const [autoDetectedOnboarding, setAutoDetectedOnboarding] = useState<boolean | null>(null);
   // null = still detecting, true = onboarding, false = normal
@@ -835,7 +835,7 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
 
   // Auto-detect onboarding mode if prop isn't explicitly set
   useEffect(() => {
-    if (props.startAssignment || props.startAssignmentChat) return; // skip in assignment mode
+    if (props.startAssignment) return; // skip in assignment mode
     if (props.onboarding !== undefined) return; // explicit prop takes priority
     const hid = authedHouseholdId?.trim();
     const uid = authedUser?.id;
@@ -1238,23 +1238,6 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
       }
     }
   }, [isOnboarding, memoryReady, sendMessage, authedHouseholdId, agentHouseholdId, authedUser?.id]);
-
-  // Auto-send assignment prompt when arriving via ?assignChat=true
-  const assignChatSentRef = useRef(false);
-  useEffect(() => {
-    if (props.startAssignmentChat && !assignChatSentRef.current && memoryReady) {
-      assignChatSentRef.current = true;
-      clearHistory();
-      setTimeout(() => {
-        void sendMessage(
-          "I have unassigned chores and helpers. Help me assign them. " +
-          "Ask me about my preferences — which helper does what, any specific room assignments, " +
-          "time-of-day preferences, or any other pattern. Then suggest assignments based on my answers.",
-          { silent: true },
-        );
-      }, 200);
-    }
-  }, [props.startAssignmentChat, memoryReady, sendMessage, clearHistory]);
 
   const homeProfileWizardHook = useHomeProfileWizard({
     getAgentSetup: () => {
@@ -3581,11 +3564,13 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
                 onSwitchToChat={() => {
                   setAssignmentPanelOpen(false);
                   setAssignmentNudgeDismissed(true);
-                  clearHistory();
-                  // Use a ref flag to send the prompt after clearHistory settles
-                  assignChatSentRef.current = false;
-                  // Navigate via router (preserves auth session)
-                  navigate("/chat?assignChat=true", { replace: true });
+                  void sendMessage(
+                    "I have unassigned chores and helpers. Help me assign chores to the right helpers. " +
+                    "Ask me about my assignment preferences — which helper handles which type of work, " +
+                    "any room-specific assignments, time preferences, or other patterns. " +
+                    "Then suggest the assignments based on my answers.",
+                    { silent: true },
+                  );
                 }}
               />
             </Box>
