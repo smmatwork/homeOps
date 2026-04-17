@@ -3564,12 +3564,17 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
                 onSwitchToChat={() => {
                   setAssignmentPanelOpen(false);
                   setAssignmentNudgeDismissed(true);
-                  void sendMessage(
-                    "I have unassigned chores and helpers. Help me assign them. " +
-                    "Ask me about my preferences — which helper does what, any specific room assignments, " +
-                    "time-of-day preferences, or any other pattern. Then suggest assignments based on my answers.",
-                    { silent: true },
-                  );
+                  // Clear old chat history so the user starts fresh
+                  clearHistory();
+                  // Send the assignment prompt after a tick (to let clearHistory settle)
+                  setTimeout(() => {
+                    void sendMessage(
+                      "I have unassigned chores and helpers. Help me assign them. " +
+                      "Ask me about my preferences — which helper does what, any specific room assignments, " +
+                      "time-of-day preferences, or any other pattern. Then suggest assignments based on my answers.",
+                      { silent: true },
+                    );
+                  }, 100);
                 }}
               />
             </Box>
