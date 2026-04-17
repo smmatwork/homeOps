@@ -81,6 +81,9 @@ export function MessageBubble({ role, content, timestamp, streaming }: MessageBu
     withoutThink = withoutThink
       .split("\n")
       .filter((line) => !/^\s*No rows found in\s+[a-z_]+\.?\s*$/i.test(line))
+      // Hide raw RPC/tool call results
+      .filter((line) => !/^\s*RPC\s+\w+\s+result\s*:/i.test(line))
+      .filter((line) => !/^\s*\{"action"\s*:\s*"(none_found|error|already_)/i.test(line))
       .join("\n");
 
     withoutThink = withoutThink.trim();
