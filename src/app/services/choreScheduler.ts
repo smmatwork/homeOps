@@ -68,6 +68,8 @@ export interface ExistingChore {
   dueAt: string | null;
   status: string;
   helperId: string | null;
+  /** Person assigned (for user-only households). */
+  assigneePersonId?: string | null;
   metadata: Record<string, unknown> | null;
 }
 
@@ -77,6 +79,8 @@ export interface HelperInfo {
   capacityMinutes: number;
   /** Average feedback rating (null if no feedback). */
   averageRating: number | null;
+  /** "helper" (default) or "person" — persons are household members. */
+  kind?: "helper" | "person";
 }
 
 export interface TimeOffPeriod {
@@ -112,6 +116,8 @@ export interface ChoreMutation {
   estimatedMinutes: number | null;
   dueAt: string;
   helperId: string | null;
+  /** Person assigned (for user-only households). */
+  assigneePersonId?: string | null;
   status: "scheduled" | "assigned";
   metadata: Record<string, unknown>;
 }
@@ -379,10 +385,12 @@ export function scheduleChores(input: SchedulerInput): SchedulerOutput {
         const existKey = `${task.key}::${dk}`;
         if (existingKeys.has(existKey)) continue;
 
-        const helperId = pickHelper(room, task, date, helpers, timeOff, dayHelperLoad);
+        const assigneeId = pickHelper(room, task, date, helpers, timeOff, dayHelperLoad);
+        const assignee = assigneeId ? helpers.find((h) => h.id === assigneeId) : null;
+        const isPerson = assignee?.kind === "person";
 
-        if (helperId) {
-          dayHelperLoad.set(helperId, (dayHelperLoad.get(helperId) ?? 0) + task.estimatedMinutes);
+        if (assigneeId) {
+          dayHelperLoad.set(assigneeId, (dayHelperLoad.get(assigneeId) ?? 0) + task.estimatedMinutes);
         }
 
         mutations.push({
@@ -395,8 +403,9 @@ export function scheduleChores(input: SchedulerInput): SchedulerOutput {
           priority: task.priority,
           estimatedMinutes: task.estimatedMinutes,
           dueAt: computeDueAt(date),
-          helperId,
-          status: helperId ? "assigned" : "scheduled",
+          helperId: isPerson ? null : assigneeId,
+          assigneePersonId: isPerson ? assigneeId : null,
+          status: assigneeId ? "assigned" : "scheduled",
           metadata: {
             template_id: room.id,
             template_task_key: task.key,

@@ -24,6 +24,7 @@ from .voice import VoiceAdapter
 from .web import WebMagicLinkAdapter
 from .whatsapp import (
     WhatsAppFormAdapter,
+    WhatsAppProxyAdapter,
     WhatsAppTapAdapter,
     WhatsAppVoiceAdapter,
 )
@@ -44,6 +45,7 @@ def build_default_registry(**overrides) -> dict[str, object]:
         "whatsapp_voice": WhatsAppVoiceAdapter(),
         "whatsapp_tap": WhatsAppTapAdapter(),
         "whatsapp_form": WhatsAppFormAdapter(),
+        "whatsapp_proxy": WhatsAppProxyAdapter(),
         "web": WebMagicLinkAdapter(),
         "sms": SMSAdapter(),
     }
@@ -58,6 +60,7 @@ __all__ = [
     "VoiceAdapter",
     "WebMagicLinkAdapter",
     "WhatsAppFormAdapter",
+    "WhatsAppProxyAdapter",
     "WhatsAppTapAdapter",
     "WhatsAppVoiceAdapter",
     "build_default_registry",

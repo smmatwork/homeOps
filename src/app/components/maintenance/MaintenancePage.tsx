@@ -12,8 +12,11 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
+  LinearProgress,
   Snackbar,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Typography,
 } from "@mui/material";
@@ -23,8 +26,11 @@ import {
   CheckCircle,
   ChevronLeft,
   ChevronRight,
+  History,
   Schedule,
+  ShoppingCart,
   SkipNext,
+  TrendingUp,
   Warning,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
@@ -33,7 +39,12 @@ import {
   fetchMaintenancePlan,
   fetchHomeFeatures,
   generateMaintenancePlan,
+  fetchMaintenanceCostSummary,
+  fetchServiceHistory,
+  createProcurementFromMaintenance,
   type MaintenancePlanEntry,
+  type CostSummary,
+  type ServiceHistoryEntry,
 } from "../../services/maintenanceApi";
 import { supabase } from "../../services/supabaseClient";
 
@@ -67,6 +78,16 @@ export function MaintenancePage() {
   const [generating, setGenerating] = useState(false);
   const [snack, setSnack] = useState<string | null>(null);
 
+  const [tab, setTab] = useState(0);
+
+  // Cost tracking state
+  const [costSummary, setCostSummary] = useState<CostSummary | null>(null);
+  const [loadingCost, setLoadingCost] = useState(false);
+
+  // Service history state
+  const [history, setHistory] = useState<ServiceHistoryEntry[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   const [doneDialog, setDoneDialog] = useState<MaintenancePlanEntry | null>(null);
   const [scheduleDialog, setScheduleDialog] = useState<MaintenancePlanEntry | null>(null);
   const [actualCost, setActualCost] = useState("");
@@ -85,6 +106,34 @@ export function MaintenancePage() {
   }, [householdId, year]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const loadCostSummary = useCallback(async () => {
+    if (!householdId) return;
+    setLoadingCost(true);
+    const res = await fetchMaintenanceCostSummary(householdId, year);
+    setLoadingCost(false);
+    if (!res.error) setCostSummary(res.summary);
+  }, [householdId, year]);
+
+  const loadHistory = useCallback(async () => {
+    if (!householdId) return;
+    setLoadingHistory(true);
+    const res = await fetchServiceHistory(householdId, { limit: 50 });
+    setLoadingHistory(false);
+    if (!res.error) setHistory(res.history);
+  }, [householdId]);
+
+  useEffect(() => { if (tab === 1) void loadCostSummary(); }, [tab, loadCostSummary]);
+  useEffect(() => { if (tab === 2) void loadHistory(); }, [tab, loadHistory]);
+
+  const handleCreateProcurement = async (planEntryId: string) => {
+    if (!householdId) return;
+    setBusy(true);
+    const res = await createProcurementFromMaintenance(householdId, planEntryId);
+    setBusy(false);
+    if (res.ok) setSnack(`Created ${res.itemCount} procurement item(s)`);
+    else setError("error" in res ? res.error : "Failed");
+  };
 
   const handleGenerate = async () => {
     if (!householdId) return;
@@ -181,6 +230,12 @@ export function MaintenancePage() {
         </Button>
       </Stack>
 
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
+        <Tab icon={<CalendarMonth />} iconPosition="start" label={t("maintenance.tab_calendar")} />
+        <Tab icon={<TrendingUp />} iconPosition="start" label={t("maintenance.tab_costs")} />
+        <Tab icon={<History />} iconPosition="start" label={t("maintenance.tab_history")} />
+      </Tabs>
+
       <Stack direction="row" alignItems="center" justifyContent="center" spacing={2} mb={3}>
         <IconButton onClick={() => setYear((y) => y - 1)}>
           <ChevronLeft />
@@ -195,7 +250,143 @@ export function MaintenancePage() {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      {loading ? (
+      {/* ── Tab 1: Cost Tracking ─────────────────────────────────── */}
+      {tab === 1 && (
+        loadingCost ? (
+          <Box display="flex" justifyContent="center" py={4}><CircularProgress /></Box>
+        ) : !costSummary ? (
+          <Typography color="text.secondary" textAlign="center" py={4}>
+            {t("maintenance.no_cost_data")}
+          </Typography>
+        ) : (
+          <Stack spacing={3}>
+            {/* Summary cards */}
+            <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap={2}>
+              <Card variant="outlined">
+                <CardContent>
+                  <Typography variant="caption" color="text.secondary">{t("maintenance.estimated_range")}</Typography>
+                  <Typography variant="h6" fontWeight={600}>
+                    ₹{costSummary.totalEstimatedMin.toLocaleString()} - ₹{costSummary.totalEstimatedMax.toLocaleString()}
+                  </Typography>
+                </CardContent>
+              </Card>
+              <Card variant="outlined">
+                <CardContent>
+                  <Typography variant="caption" color="text.secondary">{t("maintenance.actual_spent")}</Typography>
+                  <Typography variant="h6" fontWeight={600} color={costSummary.totalActual > costSummary.totalEstimatedMax ? "error.main" : "success.main"}>
+                    ₹{costSummary.totalActual.toLocaleString()}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Box>
+
+            {/* By category */}
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} gutterBottom>{t("maintenance.by_category")}</Typography>
+              <Stack spacing={1}>
+                {Object.entries(costSummary.byCategory).map(([cat, data]) => (
+                  <Card key={cat} variant="outlined">
+                    <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                      <Stack direction="row" justifyContent="space-between" alignItems="center">
+                        <Typography variant="body2" fontWeight={500} sx={{ textTransform: "capitalize" }}>
+                          {cat.replace(/_/g, " ")} ({data.count} {t("maintenance.items")})
+                        </Typography>
+                        <Stack direction="row" spacing={2}>
+                          <Typography variant="body2" color="text.secondary">
+                            Est: ₹{data.estimatedMin.toLocaleString()}-₹{data.estimatedMax.toLocaleString()}
+                          </Typography>
+                          <Typography variant="body2" fontWeight={600} color={data.actual > data.estimatedMax ? "error.main" : "success.main"}>
+                            Actual: ₹{data.actual.toLocaleString()}
+                          </Typography>
+                        </Stack>
+                      </Stack>
+                      {data.estimatedMax > 0 && (
+                        <LinearProgress
+                          variant="determinate"
+                          value={Math.min((data.actual / data.estimatedMax) * 100, 100)}
+                          color={data.actual > data.estimatedMax ? "error" : "primary"}
+                          sx={{ mt: 1, height: 6, borderRadius: 3 }}
+                        />
+                      )}
+                    </CardContent>
+                  </Card>
+                ))}
+              </Stack>
+            </Box>
+
+            {/* By vendor */}
+            {Object.keys(costSummary.byVendor).length > 0 && (
+              <Box>
+                <Typography variant="subtitle1" fontWeight={600} gutterBottom>{t("maintenance.by_vendor")}</Typography>
+                <Stack spacing={1}>
+                  {Object.entries(costSummary.byVendor).map(([name, data]) => (
+                    <Card key={name} variant="outlined">
+                      <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                        <Stack direction="row" justifyContent="space-between">
+                          <Typography variant="body2" fontWeight={500}>{data.vendorName}</Typography>
+                          <Typography variant="body2">
+                            {data.count} {t("maintenance.jobs")} · ₹{data.actual.toLocaleString()}
+                          </Typography>
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </Stack>
+              </Box>
+            )}
+          </Stack>
+        )
+      )}
+
+      {/* ── Tab 2: Service History ───────────────────────────────── */}
+      {tab === 2 && (
+        loadingHistory ? (
+          <Box display="flex" justifyContent="center" py={4}><CircularProgress /></Box>
+        ) : history.length === 0 ? (
+          <Card variant="outlined">
+            <CardContent sx={{ textAlign: "center", py: 6 }}>
+              <History sx={{ fontSize: 64, color: "text.disabled", mb: 2 }} />
+              <Typography color="text.secondary">{t("maintenance.no_history")}</Typography>
+            </CardContent>
+          </Card>
+        ) : (
+          <Stack spacing={1}>
+            {history.map((entry) => (
+              <Card key={entry.id} variant="outlined">
+                <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center">
+                    <Stack spacing={0.25}>
+                      <Typography variant="body1" fontWeight={500}>{entry.title}</Typography>
+                      <Stack direction="row" spacing={2}>
+                        <Typography variant="caption" color="text.secondary">
+                          {entry.completedDate}
+                        </Typography>
+                        <Chip size="small" label={entry.category.replace(/_/g, " ")} variant="outlined" />
+                        {entry.vendorName && (
+                          <Typography variant="caption" color="text.secondary">
+                            {entry.vendorName}
+                          </Typography>
+                        )}
+                      </Stack>
+                    </Stack>
+                    {entry.actualCost != null && (
+                      <Typography variant="body2" fontWeight={600}>₹{entry.actualCost.toLocaleString()}</Typography>
+                    )}
+                  </Stack>
+                  {entry.notes && (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                      {entry.notes}
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </Stack>
+        )
+      )}
+
+      {/* ── Tab 0: Calendar ──────────────────────────────────────── */}
+      {tab === 0 && (loading ? (
         <Box display="flex" justifyContent="center" py={4}>
           <CircularProgress />
         </Box>
@@ -311,6 +502,16 @@ export function MaintenancePage() {
                                 <IconButton size="small" onClick={() => void handleSkip(item)} title="Skip">
                                   <SkipNext fontSize="small" />
                                 </IconButton>
+                                {procurement && procurement.length > 0 && (
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => void handleCreateProcurement(item.id)}
+                                    title={t("maintenance.create_procurement")}
+                                    disabled={busy}
+                                  >
+                                    <ShoppingCart fontSize="small" />
+                                  </IconButton>
+                                )}
                               </Stack>
                             )}
                           </Stack>
@@ -323,7 +524,7 @@ export function MaintenancePage() {
             </Box>
           ))}
         </Stack>
-      )}
+      ))}
 
       <Dialog open={!!scheduleDialog} onClose={() => setScheduleDialog(null)} maxWidth="xs" fullWidth>
         <DialogTitle>Schedule: {scheduleDialog?.title}</DialogTitle>

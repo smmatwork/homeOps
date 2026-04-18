@@ -452,6 +452,485 @@ export async function generateMaintenancePlan(
   return { ok: true, count: rows.length };
 }
 
+// ─── Maintenance → Chore Bridge ─────────────────────────────────
+
+/**
+ * Convert scheduled maintenance plan entries into chore-compatible objects
+ * so they appear in daily/weekly views alongside regular chores.
+ */
+export interface MaintenanceChore {
+  planEntryId: string;
+  title: string;
+  dueAt: string;
+  estimatedMinutes: number;
+  vendorName: string | null;
+  category: string;
+  status: string;
+  costEstimate: { min: number | null; max: number | null };
+}
+
+export async function fetchMaintenanceChoreDue(
+  householdId: string,
+  fromDate: string,
+  toDate: string,
+): Promise<{ chores: MaintenanceChore[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("maintenance_plan")
+    .select("*, maintenance_templates(*), vendors(*)")
+    .eq("household_id", householdId)
+    .in("status", ["scheduled", "in_progress", "overdue"])
+    .gte("scheduled_date", fromDate)
+    .lte("scheduled_date", toDate)
+    .order("scheduled_date");
+
+  if (error) return { chores: [], error: error.message };
+
+  const chores: MaintenanceChore[] = (data ?? []).map((r: Record<string, unknown>) => {
+    const tpl = r.maintenance_templates as Record<string, unknown> | null;
+    const vendor = r.vendors as Record<string, unknown> | null;
+    return {
+      planEntryId: String(r.id),
+      title: String(r.title),
+      dueAt: String(r.scheduled_date),
+      estimatedMinutes: typeof tpl?.estimated_duration_minutes === "number" ? tpl.estimated_duration_minutes : 60,
+      vendorName: vendor?.name ? String(vendor.name) : null,
+      category: tpl?.service_key ? String(tpl.service_key) : "maintenance",
+      status: String(r.status),
+      costEstimate: {
+        min: typeof tpl?.estimated_cost_min === "number" ? tpl.estimated_cost_min : null,
+        max: typeof tpl?.estimated_cost_max === "number" ? tpl.estimated_cost_max : null,
+      },
+    };
+  });
+
+  return { chores, error: null };
+}
+
+// ─── Maintenance Cost Tracking ──────────────────────────────────
+
+export interface CostSummary {
+  totalEstimatedMin: number;
+  totalEstimatedMax: number;
+  totalActual: number;
+  byCategory: Record<string, { estimatedMin: number; estimatedMax: number; actual: number; count: number }>;
+  byVendor: Record<string, { vendorName: string; actual: number; count: number }>;
+  byMonth: Record<number, { estimated: number; actual: number; count: number }>;
+}
+
+export async function fetchMaintenanceCostSummary(
+  householdId: string,
+  year: number,
+): Promise<{ summary: CostSummary; error: string | null }> {
+  const { data, error } = await supabase
+    .from("maintenance_plan")
+    .select("*, maintenance_templates(estimated_cost_min, estimated_cost_max, service_catalog(category)), vendors(name)")
+    .eq("household_id", householdId)
+    .eq("target_year", year);
+
+  if (error) return { summary: emptyCostSummary(), error: error.message };
+
+  const summary = emptyCostSummary();
+
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const tpl = r.maintenance_templates as Record<string, unknown> | null;
+    const catalog = tpl?.service_catalog as Record<string, unknown> | null;
+    const vendor = r.vendors as Record<string, unknown> | null;
+    const category = catalog?.category ? String(catalog.category) : "other";
+    const costMin = typeof tpl?.estimated_cost_min === "number" ? tpl.estimated_cost_min : 0;
+    const costMax = typeof tpl?.estimated_cost_max === "number" ? tpl.estimated_cost_max : 0;
+    const actual = typeof r.actual_cost === "number" ? r.actual_cost : 0;
+    const month = typeof r.target_month === "number" ? r.target_month : 0;
+
+    summary.totalEstimatedMin += costMin;
+    summary.totalEstimatedMax += costMax;
+    summary.totalActual += actual;
+
+    if (!summary.byCategory[category]) {
+      summary.byCategory[category] = { estimatedMin: 0, estimatedMax: 0, actual: 0, count: 0 };
+    }
+    summary.byCategory[category].estimatedMin += costMin;
+    summary.byCategory[category].estimatedMax += costMax;
+    summary.byCategory[category].actual += actual;
+    summary.byCategory[category].count += 1;
+
+    if (vendor?.name) {
+      const vName = String(vendor.name);
+      if (!summary.byVendor[vName]) {
+        summary.byVendor[vName] = { vendorName: vName, actual: 0, count: 0 };
+      }
+      summary.byVendor[vName].actual += actual;
+      summary.byVendor[vName].count += 1;
+    }
+
+    if (month > 0) {
+      if (!summary.byMonth[month]) {
+        summary.byMonth[month] = { estimated: 0, actual: 0, count: 0 };
+      }
+      summary.byMonth[month].estimated += (costMin + costMax) / 2;
+      summary.byMonth[month].actual += actual;
+      summary.byMonth[month].count += 1;
+    }
+  }
+
+  return { summary, error: null };
+}
+
+function emptyCostSummary(): CostSummary {
+  return { totalEstimatedMin: 0, totalEstimatedMax: 0, totalActual: 0, byCategory: {}, byVendor: {}, byMonth: {} };
+}
+
+// ─── Service History Log ────────────────────────────────────────
+
+export interface ServiceHistoryEntry {
+  id: string;
+  title: string;
+  completedDate: string;
+  actualCost: number | null;
+  vendorName: string | null;
+  category: string;
+  notes: string | null;
+}
+
+export async function fetchServiceHistory(
+  householdId: string,
+  filters?: { vendorId?: string; category?: string; limit?: number },
+): Promise<{ history: ServiceHistoryEntry[]; error: string | null }> {
+  let query = supabase
+    .from("maintenance_plan")
+    .select("*, maintenance_templates(*, service_catalog(category)), vendors(name)")
+    .eq("household_id", householdId)
+    .eq("status", "done")
+    .order("completed_date", { ascending: false });
+
+  if (filters?.vendorId) query = query.eq("vendor_id", filters.vendorId);
+  if (filters?.limit) query = query.limit(filters.limit);
+
+  const { data, error } = await query;
+  if (error) return { history: [], error: error.message };
+
+  const history: ServiceHistoryEntry[] = (data ?? [])
+    .filter((r: Record<string, unknown>) => {
+      if (!filters?.category) return true;
+      const cat = (r.maintenance_templates as Record<string, unknown> | null)
+        ?.service_catalog as Record<string, unknown> | null;
+      return cat?.category === filters.category;
+    })
+    .map((r: Record<string, unknown>) => {
+      const tpl = r.maintenance_templates as Record<string, unknown> | null;
+      const catalog = tpl?.service_catalog as Record<string, unknown> | null;
+      const vendor = r.vendors as Record<string, unknown> | null;
+      return {
+        id: String(r.id),
+        title: String(r.title),
+        completedDate: r.completed_date ? String(r.completed_date) : "",
+        actualCost: typeof r.actual_cost === "number" ? r.actual_cost : null,
+        vendorName: vendor?.name ? String(vendor.name) : null,
+        category: catalog?.category ? String(catalog.category) : "other",
+        notes: r.notes ? String(r.notes) : null,
+      };
+    });
+
+  return { history, error: null };
+}
+
+// ─── Vendor Performance Metrics ─────────────────────────────────
+
+export interface VendorPerformance {
+  vendorId: string;
+  vendorName: string;
+  totalJobs: number;
+  completedJobs: number;
+  completionRate: number;
+  avgCostVsEstimate: number | null;
+  totalSpent: number;
+  categories: string[];
+}
+
+export async function fetchVendorPerformance(
+  householdId: string,
+): Promise<{ metrics: VendorPerformance[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("maintenance_plan")
+    .select("*, maintenance_templates(estimated_cost_min, estimated_cost_max, service_catalog(category)), vendors(id, name)")
+    .eq("household_id", householdId)
+    .not("vendor_id", "is", null);
+
+  if (error) return { metrics: [], error: error.message };
+
+  const byVendor = new Map<string, {
+    vendorName: string; total: number; completed: number;
+    costRatios: number[]; totalSpent: number; categories: Set<string>;
+  }>();
+
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const vendor = r.vendors as Record<string, unknown> | null;
+    if (!vendor?.id) continue;
+    const vid = String(vendor.id);
+    const vname = String(vendor.name ?? "");
+
+    if (!byVendor.has(vid)) {
+      byVendor.set(vid, { vendorName: vname, total: 0, completed: 0, costRatios: [], totalSpent: 0, categories: new Set() });
+    }
+    const v = byVendor.get(vid)!;
+    v.total += 1;
+
+    const tpl = r.maintenance_templates as Record<string, unknown> | null;
+    const catalog = tpl?.service_catalog as Record<string, unknown> | null;
+    if (catalog?.category) v.categories.add(String(catalog.category));
+
+    if (String(r.status) === "done") {
+      v.completed += 1;
+      const actual = typeof r.actual_cost === "number" ? r.actual_cost : 0;
+      v.totalSpent += actual;
+      const estMin = typeof tpl?.estimated_cost_min === "number" ? tpl.estimated_cost_min : 0;
+      const estMax = typeof tpl?.estimated_cost_max === "number" ? tpl.estimated_cost_max : 0;
+      const estMid = (estMin + estMax) / 2;
+      if (estMid > 0 && actual > 0) {
+        v.costRatios.push(actual / estMid);
+      }
+    }
+  }
+
+  const metrics: VendorPerformance[] = [];
+  for (const [vendorId, v] of byVendor) {
+    metrics.push({
+      vendorId,
+      vendorName: v.vendorName,
+      totalJobs: v.total,
+      completedJobs: v.completed,
+      completionRate: v.total > 0 ? Math.round((v.completed / v.total) * 100) : 0,
+      avgCostVsEstimate: v.costRatios.length > 0
+        ? Math.round((v.costRatios.reduce((a, b) => a + b, 0) / v.costRatios.length) * 100) / 100
+        : null,
+      totalSpent: v.totalSpent,
+      categories: [...v.categories],
+    });
+  }
+
+  return { metrics, error: null };
+}
+
+// ─── Procurement Integration ────────────────────────────────────
+
+export async function createProcurementFromMaintenance(
+  householdId: string,
+  planEntryId: string,
+): Promise<{ ok: true; itemCount: number } | { ok: false; error: string }> {
+  const { data, error } = await supabase
+    .from("maintenance_plan")
+    .select("*, maintenance_templates(procurement_items, title)")
+    .eq("id", planEntryId)
+    .eq("household_id", householdId)
+    .single();
+
+  if (error) return { ok: false, error: error.message };
+  const tpl = data.maintenance_templates as Record<string, unknown> | null;
+  const items = Array.isArray(tpl?.procurement_items)
+    ? tpl.procurement_items as Array<{ name: string; est_cost?: number }>
+    : [];
+
+  if (items.length === 0) return { ok: true, itemCount: 0 };
+
+  const { data: list, error: listErr } = await supabase
+    .from("procurement_lists")
+    .insert({
+      household_id: householdId,
+      title: `Supplies for: ${String(tpl?.title ?? data.title)}`,
+      list_type: "maintenance",
+      status: "active",
+    })
+    .select()
+    .single();
+
+  if (listErr) return { ok: false, error: listErr.message };
+
+  const rows = items.map((item) => ({
+    list_id: list.id,
+    household_id: householdId,
+    item_name: item.name,
+    category: "maintenance",
+    quantity: 1,
+    estimated_cost: item.est_cost ?? null,
+    source_type: "maintenance",
+    source_id: planEntryId,
+    status: "pending",
+  }));
+
+  const { error: insErr } = await supabase.from("procurement_items").insert(rows);
+  if (insErr) return { ok: false, error: insErr.message };
+
+  return { ok: true, itemCount: rows.length };
+}
+
+// ─── Consumable Tracking ────────────────────────────────────────
+
+export interface ConsumableItem {
+  id: string;
+  name: string;
+  category: string;
+  currentLevel: number;
+  lowStockThreshold: number;
+  unit: string | null;
+  lastRestockedAt: string | null;
+  avgConsumptionDays: number | null;
+  linkedChoreTypes: string[];
+  notes: string | null;
+}
+
+export async function fetchConsumables(
+  householdId: string,
+): Promise<{ items: ConsumableItem[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("pantry_items")
+    .select("*")
+    .eq("household_id", householdId)
+    .in("category", ["cleaning", "maintenance", "household"])
+    .order("name");
+
+  if (error) return { items: [], error: error.message };
+
+  const items: ConsumableItem[] = (data ?? []).map((r: Record<string, unknown>) => ({
+    id: String(r.id),
+    name: String(r.name),
+    category: String(r.category ?? "household"),
+    currentLevel: typeof r.current_level === "number" ? r.current_level : 100,
+    lowStockThreshold: typeof r.low_stock_threshold === "number" ? r.low_stock_threshold : 20,
+    unit: r.unit ? String(r.unit) : null,
+    lastRestockedAt: r.last_restocked_at ? String(r.last_restocked_at) : null,
+    avgConsumptionDays: typeof r.avg_consumption_days === "number" ? r.avg_consumption_days : null,
+    linkedChoreTypes: Array.isArray(r.linked_chore_types) ? r.linked_chore_types as string[] : [],
+    notes: r.notes ? String(r.notes) : null,
+  }));
+
+  return { items, error: null };
+}
+
+export async function upsertConsumable(
+  householdId: string,
+  item: Omit<ConsumableItem, "id"> & { id?: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const row: Record<string, unknown> = {
+    household_id: householdId,
+    name: item.name,
+    category: item.category,
+    current_level: item.currentLevel,
+    low_stock_threshold: item.lowStockThreshold,
+    unit: item.unit,
+    last_restocked_at: item.lastRestockedAt,
+    avg_consumption_days: item.avgConsumptionDays,
+    linked_chore_types: item.linkedChoreTypes,
+    notes: item.notes,
+  };
+
+  if (item.id) {
+    const { error } = await supabase.from("pantry_items").update(row).eq("id", item.id);
+    if (error) return { ok: false, error: error.message };
+  } else {
+    const { error } = await supabase.from("pantry_items").insert(row);
+    if (error) return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
+export async function restockConsumable(
+  itemId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await supabase
+    .from("pantry_items")
+    .update({ current_level: 100, last_restocked_at: new Date().toISOString() })
+    .eq("id", itemId);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+// ─── Reorder Reminders ──────────────────────────────────────────
+
+export interface ReorderAlert {
+  itemId: string;
+  itemName: string;
+  category: string;
+  currentLevel: number;
+  threshold: number;
+  estimatedDaysLeft: number | null;
+}
+
+export async function fetchReorderAlerts(
+  householdId: string,
+): Promise<{ alerts: ReorderAlert[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("pantry_items")
+    .select("*")
+    .eq("household_id", householdId)
+    .in("category", ["cleaning", "maintenance", "household"]);
+
+  if (error) return { alerts: [], error: error.message };
+
+  const alerts: ReorderAlert[] = [];
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const level = typeof r.current_level === "number" ? r.current_level : 100;
+    const threshold = typeof r.low_stock_threshold === "number" ? r.low_stock_threshold : 20;
+    if (level <= threshold) {
+      const avgDays = typeof r.avg_consumption_days === "number" ? r.avg_consumption_days : null;
+      alerts.push({
+        itemId: String(r.id),
+        itemName: String(r.name),
+        category: String(r.category ?? "household"),
+        currentLevel: level,
+        threshold,
+        estimatedDaysLeft: avgDays && level > 0 ? Math.round((level / 100) * avgDays) : null,
+      });
+    }
+  }
+
+  return { alerts, error: null };
+}
+
+// ─── Feature Warranty Tracking ──────────────────────────────────
+
+export interface WarrantyAlert {
+  featureKey: string;
+  featureLabel: string;
+  warrantyUntil: string;
+  daysRemaining: number;
+  brand: string | null;
+  model: string | null;
+}
+
+export async function fetchWarrantyAlerts(
+  householdId: string,
+): Promise<{ alerts: WarrantyAlert[]; error: string | null }> {
+  const { data, error } = await supabase
+    .from("home_features")
+    .select("*")
+    .eq("household_id", householdId)
+    .not("warranty_until", "is", null);
+
+  if (error) return { alerts: [], error: error.message };
+
+  const now = new Date();
+  const alerts: WarrantyAlert[] = [];
+
+  for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const warrantyStr = String(r.warranty_until);
+    const warrantyDate = new Date(warrantyStr);
+    const daysRemaining = Math.ceil((warrantyDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+
+    if (daysRemaining <= 90) {
+      alerts.push({
+        featureKey: String(r.feature_key),
+        featureLabel: String(r.feature_key).replace(/_/g, " "),
+        warrantyUntil: warrantyStr,
+        daysRemaining,
+        brand: r.brand ? String(r.brand) : null,
+        model: r.model ? String(r.model) : null,
+      });
+    }
+  }
+
+  alerts.sort((a, b) => a.daysRemaining - b.daysRemaining);
+  return { alerts, error: null };
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function mapVendorRow(r: Record<string, unknown>): Vendor {

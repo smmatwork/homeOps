@@ -34,6 +34,10 @@ export interface Assignment {
   estimatedMinutes: number;
   helperId: string | null;
   helperName: string | null;
+  /** If the assignee is a household person instead of a helper. */
+  assigneePersonId?: string | null;
+  /** "helper" or "person" */
+  assigneeKind?: "helper" | "person";
   reason: string;
 }
 
@@ -117,6 +121,18 @@ function inferChoreCategory(title: string, space: string): string[] {
   if (/ac.*filter|mattress|flip/.test(text)) tags.push("cleaning", "fixtures");
   // Shoe rack
   if (/shoe.*rack/.test(text)) tags.push("cleaning", "general");
+  // Bicycle maintenance
+  if (/bicycle|bike.*chain|tyre.*pressure/.test(text)) tags.push("maintenance", "outdoor");
+  // Cushion care
+  if (/cushion.*air|cushion.*clean/.test(text)) tags.push("outdoor", "cleaning");
+  // CCTV / security
+  if (/cctv|camera.*lens/.test(text)) tags.push("maintenance", "general");
+  // Washing machine
+  if (/washing\s*machine.*drum|hot\s*cycle/.test(text)) tags.push("maintenance", "laundry");
+  // Wood floor
+  if (/wood.*floor.*polish|floor.*condition/.test(text)) tags.push("maintenance", "cleaning");
+  // Carpet deep clean
+  if (/carpet.*deep.*clean/.test(text)) tags.push("cleaning", "general");
 
   return tags.length > 0 ? tags : ["general"];
 }
@@ -299,6 +315,7 @@ export function buildAssignmentPlan(
     }
 
     if (bestHelper) {
+      const isPerson = bestHelper.kind === "member";
       effectiveDailyLoad.set(bestHelper.id, (effectiveDailyLoad.get(bestHelper.id) ?? 0) + effectiveMins);
       assignments.push({
         choreId: chore.id,
@@ -306,8 +323,10 @@ export function buildAssignmentPlan(
         space: chore.space,
         cadence: finalCadence,
         estimatedMinutes: mins,
-        helperId: bestHelper.id,
+        helperId: isPerson ? null : bestHelper.id,
         helperName: bestHelper.name,
+        assigneePersonId: isPerson ? bestHelper.id : null,
+        assigneeKind: isPerson ? "person" : "helper",
         reason: bestScore > 0 ? `Matched by role (${choreTags.slice(0, 2).join(", ")})` : "Best available capacity",
       });
     } else {
@@ -319,7 +338,8 @@ export function buildAssignmentPlan(
         estimatedMinutes: mins,
         helperId: null,
         helperName: null,
-        reason: "No helper with matching role/capacity",
+        assigneeKind: undefined,
+        reason: "No helper or member with matching role/capacity",
       });
     }
   }
@@ -351,4 +371,340 @@ export function buildAssignmentPlan(
   });
 
   return { assignments, byHelper, unassigned };
+}
+
+/**
+ * Detect and resolve assignment conflicts for user-only households.
+ *
+ * When chores are distributed among household members (not professional helpers),
+ * members have limited daily capacity. This function:
+ * 1. Detects over-allocation: a member has more daily-equivalent minutes than capacity
+ * 2. Redistributes: moves excess chores to less-loaded members
+ * 3. Reports: returns a list of conflicts that couldn't be auto-resolved
+ */
+export interface ConflictReport {
+  resolved: Array<{
+    choreId: string;
+    choreTitle: string;
+    fromMemberId: string;
+    fromMemberName: string;
+    toMemberId: string;
+    toMemberName: string;
+    reason: string;
+  }>;
+  unresolved: Array<{
+    choreId: string;
+    choreTitle: string;
+    memberId: string;
+    memberName: string;
+    reason: string;
+  }>;
+}
+
+// ─── Capacity-Aware Schedule Adjustment ─────────────────────────
+
+export interface CapacityAdjustment {
+  choreId: string;
+  choreTitle: string;
+  originalHelperId: string;
+  originalHelperName: string;
+  action: "defer" | "reassign" | "flag";
+  newHelperId?: string;
+  newHelperName?: string;
+  reason: string;
+}
+
+/**
+ * Adjust a generated schedule based on available helper capacity.
+ * Identifies over-allocated helpers and either defers, reassigns, or
+ * flags chores that exceed capacity on a given day.
+ */
+export function adjustScheduleForCapacity(
+  assignments: Assignment[],
+  helpers: AssignableHelper[],
+  timeOff: Array<{ helperId: string; startAt: string; endAt: string }>,
+  targetDate: Date,
+): CapacityAdjustment[] {
+  const adjustments: CapacityAdjustment[] = [];
+  const helperMap = new Map(helpers.map((h) => [h.id, h]));
+
+  // Compute load per helper for the target date
+  const helperLoad = new Map<string, number>();
+  const helperChores = new Map<string, Assignment[]>();
+  for (const a of assignments) {
+    const hid = a.helperId ?? a.assigneePersonId;
+    if (!hid) continue;
+    const factor = cadenceLoadFactor(a.cadence);
+    helperLoad.set(hid, (helperLoad.get(hid) ?? 0) + a.estimatedMinutes * factor);
+    if (!helperChores.has(hid)) helperChores.set(hid, []);
+    helperChores.get(hid)!.push(a);
+  }
+
+  // Check time-off exclusions
+  const dateMs = targetDate.getTime();
+  const onLeave = new Set<string>();
+  for (const to of timeOff) {
+    if (new Date(to.startAt).getTime() <= dateMs && dateMs < new Date(to.endAt).getTime()) {
+      onLeave.add(to.helperId);
+    }
+  }
+
+  for (const [hid, load] of helperLoad) {
+    const helper = helperMap.get(hid);
+    if (!helper) continue;
+
+    // If helper is on leave, reassign all their chores
+    if (onLeave.has(hid)) {
+      for (const chore of helperChores.get(hid) ?? []) {
+        const replacement = findReplacementHelper(chore, hid, helpers, helperLoad, onLeave);
+        adjustments.push({
+          choreId: chore.choreId,
+          choreTitle: chore.choreTitle,
+          originalHelperId: hid,
+          originalHelperName: helper.name,
+          action: replacement ? "reassign" : "flag",
+          newHelperId: replacement?.id,
+          newHelperName: replacement?.name,
+          reason: replacement
+            ? `${helper.name} on leave — reassigned to ${replacement.name}`
+            : `${helper.name} on leave — no replacement available`,
+        });
+      }
+      continue;
+    }
+
+    // If over capacity, shed lowest-priority chores
+    if (load > helper.dailyCapacityMinutes) {
+      const excess = load - helper.dailyCapacityMinutes;
+      let shed = 0;
+      const chores = (helperChores.get(hid) ?? [])
+        .sort((a, b) => a.estimatedMinutes - b.estimatedMinutes);
+
+      for (const chore of chores) {
+        if (shed >= excess) break;
+        const factor = cadenceLoadFactor(chore.cadence);
+        const replacement = findReplacementHelper(chore, hid, helpers, helperLoad, onLeave);
+        adjustments.push({
+          choreId: chore.choreId,
+          choreTitle: chore.choreTitle,
+          originalHelperId: hid,
+          originalHelperName: helper.name,
+          action: replacement ? "reassign" : "defer",
+          newHelperId: replacement?.id,
+          newHelperName: replacement?.name,
+          reason: replacement
+            ? `${helper.name} over capacity — reassigned to ${replacement.name}`
+            : `${helper.name} over capacity — deferred to next available slot`,
+        });
+        shed += chore.estimatedMinutes * factor;
+      }
+    }
+  }
+
+  return adjustments;
+}
+
+function findReplacementHelper(
+  chore: Assignment,
+  excludeId: string,
+  helpers: AssignableHelper[],
+  currentLoads: Map<string, number>,
+  onLeave: Set<string>,
+): AssignableHelper | null {
+  const choreTags = inferChoreCategory(chore.choreTitle, chore.space);
+  let best: AssignableHelper | null = null;
+  let bestScore = -1;
+
+  for (const h of helpers) {
+    if (h.id === excludeId || onLeave.has(h.id)) continue;
+    const load = currentLoads.get(h.id) ?? 0;
+    const factor = cadenceLoadFactor(chore.cadence);
+    if (load + chore.estimatedMinutes * factor > h.dailyCapacityMinutes) continue;
+
+    const tags = h.roleTags.length > 0 ? h.roleTags : inferRoleTags(h.type);
+    const score = matchScore(tags, choreTags, h.type);
+    if (score > bestScore) {
+      bestScore = score;
+      best = h;
+    }
+  }
+  return best;
+}
+
+// ─── Optimal Schedule Recommendation ────────────────────────────
+
+export interface ScheduleRecommendation {
+  choreId: string;
+  choreTitle: string;
+  recommendedHelperId: string;
+  recommendedHelperName: string;
+  recommendedCadence: string;
+  score: number;
+  reason: string;
+}
+
+/**
+ * Recommend the optimal schedule for a set of chores considering
+ * helper capacity, role fit, and existing load distribution.
+ * Returns a sorted list of recommendations (highest score first).
+ */
+export function recommendOptimalSchedule(
+  chores: AssignableChore[],
+  helpers: AssignableHelper[],
+): ScheduleRecommendation[] {
+  const recommendations: ScheduleRecommendation[] = [];
+
+  // Build current plan to understand load
+  const plan = buildAssignmentPlan(chores, helpers);
+  const usedCapacity = new Map<string, number>();
+  for (const bh of plan.byHelper) {
+    usedCapacity.set(bh.helper.id, bh.totalMinutes);
+  }
+
+  for (const chore of chores) {
+    const choreTags = inferChoreCategory(chore.title, chore.space);
+    const mins = chore.estimatedMinutes || defaultMinutes(chore.cadence);
+
+    // Score each helper
+    const scored: Array<{ helper: AssignableHelper; score: number; reason: string }> = [];
+
+    for (const h of helpers) {
+      const tags = h.roleTags.length > 0 ? h.roleTags : inferRoleTags(h.type);
+      const roleScore = matchScore(tags, choreTags, h.type);
+      const load = usedCapacity.get(h.id) ?? 0;
+      const remaining = h.dailyCapacityMinutes - load;
+      if (remaining < mins * cadenceLoadFactor(chore.cadence)) continue;
+
+      // Capacity score: prefer helpers with more headroom (0-5 scale)
+      const capacityScore = h.dailyCapacityMinutes > 0
+        ? (remaining / h.dailyCapacityMinutes) * 5
+        : 0;
+
+      // Work-day fit
+      let dayFitScore = 1;
+      if (h.workDays && h.workDays.length > 0) {
+        const choreDay = chore.cadence.match(/_(mon|tue|wed|thu|fri|sat|sun)$/)?.[1];
+        if (choreDay && h.workDays.includes(choreDay)) dayFitScore = 2;
+        else if (choreDay && !h.workDays.includes(choreDay)) dayFitScore = 0;
+      }
+
+      const totalScore = roleScore * 3 + capacityScore + dayFitScore;
+      const reasons: string[] = [];
+      if (roleScore > 2) reasons.push("strong role match");
+      else if (roleScore > 0) reasons.push("partial role match");
+      if (capacityScore > 3) reasons.push("ample capacity");
+      if (dayFitScore === 2) reasons.push("works on scheduled day");
+
+      scored.push({
+        helper: h,
+        score: Math.round(totalScore * 100) / 100,
+        reason: reasons.length > 0 ? reasons.join(", ") : "available",
+      });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    if (best) {
+      recommendations.push({
+        choreId: chore.id,
+        choreTitle: chore.title,
+        recommendedHelperId: best.helper.id,
+        recommendedHelperName: best.helper.name,
+        recommendedCadence: chore.cadence,
+        score: best.score,
+        reason: best.reason,
+      });
+    }
+  }
+
+  recommendations.sort((a, b) => b.score - a.score);
+  return recommendations;
+}
+
+// ─── Multi-User Conflict Resolution ───────���────────────────────
+
+export function resolveMultiUserConflicts(
+  assignments: Assignment[],
+  members: AssignableHelper[],
+): ConflictReport {
+  const report: ConflictReport = { resolved: [], unresolved: [] };
+  if (members.length <= 1) return report;
+
+  // Only process person assignments
+  const personAssignments = assignments.filter((a) => a.assigneeKind === "person" && a.assigneePersonId);
+  if (personAssignments.length === 0) return report;
+
+  // Compute daily-equivalent load per member
+  const memberLoad = new Map<string, number>();
+  for (const m of members) memberLoad.set(m.id, 0);
+  for (const a of personAssignments) {
+    const pid = a.assigneePersonId!;
+    const factor = cadenceLoadFactor(a.cadence);
+    memberLoad.set(pid, (memberLoad.get(pid) ?? 0) + a.estimatedMinutes * factor);
+  }
+
+  // Find over-loaded members
+  for (const member of members) {
+    if (member.kind !== "member") continue;
+    const load = memberLoad.get(member.id) ?? 0;
+    if (load <= member.dailyCapacityMinutes) continue;
+
+    // This member is over-loaded — find chores to move
+    const excess = load - member.dailyCapacityMinutes;
+    let moved = 0;
+
+    // Sort this member's chores: lowest priority first (move the least important)
+    const memberChores = personAssignments
+      .filter((a) => a.assigneePersonId === member.id)
+      .sort((a, b) => a.estimatedMinutes - b.estimatedMinutes);
+
+    for (const chore of memberChores) {
+      if (moved >= excess) break;
+
+      // Find least-loaded other member with capacity
+      let bestTarget: AssignableHelper | null = null;
+      let bestLoadDelta = Infinity;
+      for (const other of members) {
+        if (other.id === member.id || other.kind !== "member") continue;
+        const otherLoad = memberLoad.get(other.id) ?? 0;
+        const factor = cadenceLoadFactor(chore.cadence);
+        const addedLoad = chore.estimatedMinutes * factor;
+        if (otherLoad + addedLoad > other.dailyCapacityMinutes) continue;
+        if (otherLoad < bestLoadDelta) {
+          bestLoadDelta = otherLoad;
+          bestTarget = other;
+        }
+      }
+
+      if (bestTarget) {
+        const factor = cadenceLoadFactor(chore.cadence);
+        const addedLoad = chore.estimatedMinutes * factor;
+        // Move the chore
+        chore.assigneePersonId = bestTarget.id;
+        chore.helperName = bestTarget.name;
+        memberLoad.set(member.id, (memberLoad.get(member.id) ?? 0) - addedLoad);
+        memberLoad.set(bestTarget.id, (memberLoad.get(bestTarget.id) ?? 0) + addedLoad);
+        moved += addedLoad;
+        report.resolved.push({
+          choreId: chore.choreId,
+          choreTitle: chore.choreTitle,
+          fromMemberId: member.id,
+          fromMemberName: member.name,
+          toMemberId: bestTarget.id,
+          toMemberName: bestTarget.name,
+          reason: `${member.name} over capacity — moved to ${bestTarget.name}`,
+        });
+      } else {
+        report.unresolved.push({
+          choreId: chore.choreId,
+          choreTitle: chore.choreTitle,
+          memberId: member.id,
+          memberName: member.name,
+          reason: "All members at capacity — cannot redistribute",
+        });
+      }
+    }
+  }
+
+  return report;
 }
