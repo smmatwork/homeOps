@@ -55,6 +55,7 @@ import { SyncResultsDrawer } from "./SyncResultsDrawer";
 import { HelperDailyView } from "./HelperDailyView";
 import { CreateChoreDialog } from "./CreateChoreDialog";
 import { EditChoreDialog } from "./EditChoreDialog";
+import { HelperCapacityCard } from "../coverage/HelperCapacityCard";
 import { ChoreListView } from "./ChoreListView";
 import { CoverageDashboard } from "../coverage/CoverageDashboard";
 
@@ -197,7 +198,7 @@ export function Chores() {
   const [syncDrawerOpen, setSyncDrawerOpen] = useState(false);
   const [view, setView] = useState<"all" | "pending" | "in-progress" | "completed">("all");
   const [mode, setMode] = useState<"coverage" | "list" | "daily">("daily");
-  const [coverageSubMode, setCoverageSubMode] = useState<"audit" | "matrix">("audit");
+  const [coverageSubMode, setCoverageSubMode] = useState<"audit" | "matrix" | "utilization">("audit");
   const [coverageRefreshKey, setCoverageRefreshKey] = useState(0);
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
   const [cadenceFilter, setCadenceFilter] = useState<string | null>(null);
@@ -411,6 +412,78 @@ export function Chores() {
           // ignore
         }
       }
+    } catch (e) {
+      showSnack("error", e instanceof Error ? e.message : t("common.unknown_error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSplitChore = async (
+    original: ChoreRow,
+    subTasks: Array<{ title: string; space: string; cadence: string; category: string }>,
+  ) => {
+    const token = accessToken.trim();
+    const hid = householdId.trim();
+    if (!token || !hid) {
+      showSnack("error", t("common.missing_session"));
+      return;
+    }
+
+    setBusy(true);
+    try {
+      // Create each sub-task as an independent chore
+      for (const sub of subTasks) {
+        const res = await agentCreate({
+          accessToken: token,
+          table: "chores",
+          record: {
+            household_id: hid,
+            title: sub.title,
+            description: original.description || null,
+            status: "pending",
+            priority: original.priority,
+            due_at: original.due_at,
+            helper_id: null,
+            metadata: {
+              space: sub.space || null,
+              cadence: sub.cadence || null,
+              category: sub.category || null,
+              split_from: original.id,
+            },
+          },
+          reason: `Split from "${original.title}"`,
+        });
+        if (!res.ok) {
+          showSnack("error", "error" in res ? res.error : t("common.create_failed"));
+          return;
+        }
+      }
+
+      // Soft-delete the original
+      await executeToolCall({
+        accessToken: token,
+        householdId: hid,
+        scope: "household",
+        toolCall: {
+          id: `chores_split_delete_${original.id}_${Date.now()}`,
+          tool: "db.delete",
+          args: { table: "chores", id: original.id },
+          reason: `Split "${original.title}" into ${subTasks.length} tasks`,
+        },
+      });
+
+      // Refresh
+      const { data: refreshed } = await supabase
+        .from("chores")
+        .select(CHORE_SELECT)
+        .eq("household_id", hid)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false });
+      if (refreshed) setChores(refreshed as ChoreRow[]);
+
+      setEditOpen(false);
+      showSnack("success", `Split "${original.title}" into ${subTasks.length} independent tasks`);
     } catch (e) {
       showSnack("error", e instanceof Error ? e.message : t("common.unknown_error"));
     } finally {
@@ -2289,7 +2362,7 @@ export function Chores() {
         ) : null}
 
         {mode === "coverage" ? (
-          <Button variant="outlined" size="small" onClick={enterDailyMode}>
+          <Button variant="outlined" size="small" onClick={() => setCoverageSubMode("utilization")}>
             {t("chores.helper_view")}
           </Button>
         ) : (
@@ -2381,13 +2454,16 @@ export function Chores() {
                 >
                   <ToggleButton value="audit">{t("coverage.audit_view")}</ToggleButton>
                   <ToggleButton value="matrix">{t("coverage.matrix_view")}</ToggleButton>
+                  <ToggleButton value="utilization">{t("coverage.utilization_view")}</ToggleButton>
                 </ToggleButtonGroup>
                 <Button size="small" variant="outlined" onClick={() => buildAutoFillRecommendations()} disabled={busy || coverage.spaces.length === 0}>
                   {t("chores.autofill_missing")}
                 </Button>
               </Stack>
 
-              {coverageSubMode === "audit" ? (
+              {coverageSubMode === "utilization" ? (
+                <HelperCapacityCard refreshKey={coverageRefreshKey} />
+              ) : coverageSubMode === "audit" ? (
                 <CoverageDashboard
                   refreshKey={coverageRefreshKey}
                   onApplied={() => setCoverageRefreshKey((k) => k + 1)}
@@ -2498,6 +2574,7 @@ export function Chores() {
           setEditCadence(data.cadence);
           await saveEdit();
         }}
+        onSplit={handleSplitChore}
       />
 
       {/* Delete confirmation */}

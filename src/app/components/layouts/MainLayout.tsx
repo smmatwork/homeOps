@@ -23,6 +23,8 @@ import {
   Toolbar,
   Typography,
   AppBar,
+  Fab,
+  Zoom,
 } from "@mui/material";
 import {
   Home,
@@ -46,6 +48,8 @@ import {
   Event as EventIcon,
   Handyman,
   CalendarMonth,
+  FamilyRestroom,
+  SmartToy,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
@@ -74,11 +78,11 @@ const NAV_ITEMS = [
   { key: "nav.recipes", path: "/recipes", icon: MenuBook, roles: ["household", "admin"] },
   { key: "nav.services", path: "/services", icon: Handyman, roles: ["household", "admin"] },
   { key: "nav.maintenance", path: "/maintenance", icon: CalendarMonth, roles: ["household", "admin"] },
+  { key: "nav.members", path: "/members", icon: FamilyRestroom, roles: ["household", "admin"] },
   { key: "nav.helpers", path: "/helpers", icon: People, roles: ["household", "admin"] },
   { key: "nav.alerts", path: "/alerts", icon: NotificationsNone, roles: ["household", "admin", "support"] },
   { key: "nav.automations", path: "/automations", icon: BuildCircle, roles: ["household", "admin"] },
   { key: "nav.signals", path: "/signals", icon: Timeline, roles: ["household", "admin"] },
-  { key: "nav.chat", path: "/chat", icon: Chat, roles: ["household", "admin"] },
   { key: "nav.status", path: "/status", icon: CheckBox, roles: ["household", "admin", "support"] },
   { key: "nav.tests", path: "/tests", icon: Science, roles: ["admin", "owner"] },
   { key: "nav.admin", path: "/admin", icon: Settings, roles: ["admin"] },
@@ -549,19 +553,28 @@ export function MainLayout() {
               {t("replan.button")}
             </Button>
           )}
-          {location.pathname.startsWith("/chat") ? null : (
-            <Button
-              variant="outlined"
-              startIcon={<Chat fontSize="small" />}
-              onClick={openChatDrawer}
-              sx={{ textTransform: "none" }}
-            >
-              {t("layout.chat")}
-            </Button>
-          )}
         </Box>
         <Outlet />
       </Box>
+
+      {/* Floating AI Agent FAB */}
+      {!location.pathname.startsWith("/chat") && (
+        <Zoom in>
+          <Fab
+            color="primary"
+            onClick={openChatDrawer}
+            sx={{
+              position: "fixed",
+              bottom: 24,
+              right: 24,
+              zIndex: (theme) => theme.zIndex.drawer - 1,
+            }}
+            aria-label={t("layout.ai_agent")}
+          >
+            <SmartToy />
+          </Fab>
+        </Zoom>
+      )}
 
       <ProposalsDrawer open={proposalsOpen} onClose={() => setProposalsOpen(false)} />
 
@@ -571,24 +584,30 @@ export function MainLayout() {
         onClose={() => setChatOpen(false)}
         PaperProps={{
           sx: {
-            width: { xs: "100%", sm: 520 },
+            width: { xs: "100%", sm: 440 },
             maxWidth: "100vw",
             display: "flex",
             flexDirection: "column",
           },
         }}
       >
-        <Box sx={{ p: 1, borderBottom: "1px solid", borderColor: "divider" }}>
-          <Box display="flex" alignItems="center" justifyContent="space-between">
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 2, py: 1.25, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}
+        >
+          <Stack direction="row" spacing={1} alignItems="center">
+            <SmartToy sx={{ fontSize: 22, color: "primary.main" }} />
             <Typography variant="subtitle1" fontWeight={700}>
-              {t("layout.chat_assistant")}
+              {t("layout.ai_agent")}
             </Typography>
-            <Button variant="outlined" onClick={() => setChatOpen(false)} sx={{ textTransform: "none" }}>
-              {t("common.close")}
-            </Button>
-          </Box>
-        </Box>
-        <Box sx={{ flex: 1, overflow: "auto" }}>
+          </Stack>
+          <IconButton size="small" onClick={() => setChatOpen(false)} aria-label={t("common.close")}>
+            <span style={{ fontSize: 18 }}>&times;</span>
+          </IconButton>
+        </Stack>
+        <Box sx={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
           <ChatInterface embedded />
         </Box>
       </Drawer>

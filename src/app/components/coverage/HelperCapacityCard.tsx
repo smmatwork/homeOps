@@ -8,6 +8,7 @@ import { useEffect, useState, useCallback } from "react";
 import {
   Alert,
   Box,
+  Button,
   Card,
   CardContent,
   CardHeader,
@@ -17,8 +18,10 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
+import { Balance } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
+import { WorkloadOptimizer } from "./WorkloadOptimizer";
 
 interface HelperCapacity {
   id: string;
@@ -63,6 +66,7 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
   const { householdId } = useAuth();
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<CapacitySummary | null>(null);
+  const [showRebalance, setShowRebalance] = useState(false);
 
   const load = useCallback(async () => {
     if (!householdId) { setLoading(false); return; }
@@ -211,6 +215,19 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
 
   if (!summary || summary.helpers.length === 0) return null;
 
+  if (showRebalance) {
+    return (
+      <WorkloadOptimizer
+        onDone={() => {
+          setShowRebalance(false);
+          void load();
+        }}
+      />
+    );
+  }
+
+  const hasOverloaded = summary.helpers.some((h) => h.status === "over");
+
   const statusColor = (s: HelperCapacity["status"]) => {
     switch (s) {
       case "over": return "error";
@@ -236,6 +253,17 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
       <CardHeader
         title={<Typography variant="h6" fontWeight={600}>Helper Capacity</Typography>}
         subheader="Daily workload vs available hours per helper"
+        action={
+          <Button
+            variant="contained"
+            color={hasOverloaded ? "warning" : "primary"}
+            startIcon={<Balance />}
+            onClick={() => setShowRebalance(true)}
+            size="small"
+          >
+            {hasOverloaded ? "Optimize workload" : "Optimize & redistribute"}
+          </Button>
+        }
       />
       <CardContent>
         <Stack spacing={2}>
@@ -297,6 +325,8 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
               </Typography>
             </Box>
           )}
+
+          {/* Rebalance button */}
         </Stack>
       </CardContent>
     </Card>

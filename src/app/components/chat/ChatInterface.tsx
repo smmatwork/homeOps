@@ -3211,76 +3211,129 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
 
   return (
     <Stack sx={{ height: "100%", overflow: "hidden" }}>
-      {/* ── Page header ──────────────────────────────────────────────────── */}
-      <Stack
-        direction="row"
-        justifyContent="space-between"
-        alignItems="flex-end"
-        sx={{ mb: 2.5, flexShrink: 0 }}
-      >
-        <Box>
-          <Typography variant="h5" fontWeight={700} lineHeight={1.2}>
-            Chat Assistant
-          </Typography>
-          <Typography variant="body2" color="text.secondary" mt={0.25}>
-            Use natural language to manage your household
-          </Typography>
-        </Box>
+      {/* ── Page header (hidden when embedded in drawer) ─────────────────── */}
+      {!props.embedded && (
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="flex-end"
+          sx={{ mb: 2.5, flexShrink: 0 }}
+        >
+          <Box>
+            <Typography variant="h5" fontWeight={700} lineHeight={1.2}>
+              AI Agent
+            </Typography>
+            <Typography variant="body2" color="text.secondary" mt={0.25}>
+              Use natural language to manage your household
+            </Typography>
+          </Box>
 
-        <Stack direction="row" spacing={1.5} alignItems="center">
-          <FormControl size="small" sx={{ minWidth: 150 }}>
-            <InputLabel>Memory</InputLabel>
-            <Select
-              value={memoryScope}
-              label="Memory"
-              onChange={(e) => setMemoryScope(e.target.value === "household" ? "household" : "user")}
-            >
-              <MenuItem value="user">Personal</MenuItem>
-              <MenuItem value="household">Household</MenuItem>
-            </Select>
-          </FormControl>
-
-          {/* Language / STT picker */}
-          <ToggleButtonGroup
-            value={lang}
-            exclusive
-            onChange={handleLangChange}
-            size="small"
-            aria-label="Speech recognition language"
-            sx={{ height: 32 }}
-          >
-            {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
-              <ToggleButton
-                key={l}
-                value={l}
-                aria-label={l}
-                sx={{ px: 1.5, fontSize: "0.72rem", fontWeight: 600, lineHeight: 1 }}
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Memory</InputLabel>
+              <Select
+                value={memoryScope}
+                label="Memory"
+                onChange={(e) => setMemoryScope(e.target.value === "household" ? "household" : "user")}
               >
-                {LANG_LABELS[l]}
-              </ToggleButton>
-            ))}
-          </ToggleButtonGroup>
+                <MenuItem value="user">Personal</MenuItem>
+                <MenuItem value="household">Household</MenuItem>
+              </Select>
+            </FormControl>
 
-          <Button
-            size="small"
-            variant="outlined"
-            disabled={isStreaming}
-            onClick={() => setClearChatConfirmOpen(true)}
-            sx={{ textTransform: "none" }}
-          >
-            Clear Chat
-          </Button>
+            {/* Language / STT picker */}
+            <ToggleButtonGroup
+              value={lang}
+              exclusive
+              onChange={handleLangChange}
+              size="small"
+              aria-label="Speech recognition language"
+              sx={{ height: 32 }}
+            >
+              {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
+                <ToggleButton
+                  key={l}
+                  value={l}
+                  aria-label={l}
+                  sx={{ px: 1.5, fontSize: "0.72rem", fontWeight: 600, lineHeight: 1 }}
+                >
+                  {LANG_LABELS[l]}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
 
-          <Button
-            size="small"
-            variant={showSemanticDebug ? "contained" : "outlined"}
-            onClick={() => setShowSemanticDebug((prev) => !prev)}
-            sx={{ textTransform: "none" }}
-          >
-            Debug
-          </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={isStreaming}
+              onClick={() => setClearChatConfirmOpen(true)}
+              sx={{ textTransform: "none" }}
+            >
+              Clear Chat
+            </Button>
+
+            <Button
+              size="small"
+              variant={showSemanticDebug ? "contained" : "outlined"}
+              onClick={() => setShowSemanticDebug((prev) => !prev)}
+              sx={{ textTransform: "none" }}
+            >
+              Debug
+            </Button>
+          </Stack>
         </Stack>
-      </Stack>
+      )}
+
+      {/* ── Embedded toolbar (compact controls for drawer mode) ──────────── */}
+      {props.embedded && (
+        <Stack
+          direction="row"
+          spacing={0.75}
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 1.5, py: 0.5, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0, bgcolor: "grey.50" }}
+        >
+          <Button
+            size="small"
+            variant={drawerQuickCommandsOpen ? "contained" : "text"}
+            onClick={() => setDrawerQuickCommandsOpen((v) => !v)}
+            startIcon={drawerQuickCommandsOpen ? <ExpandLess sx={{ fontSize: 14 }} /> : <Bolt sx={{ fontSize: 14 }} />}
+            sx={{ textTransform: "none", fontSize: "0.72rem", minWidth: 0, px: 1 }}
+          >
+            Quick actions
+          </Button>
+
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <ToggleButtonGroup
+              value={lang}
+              exclusive
+              onChange={handleLangChange}
+              size="small"
+              sx={{ height: 26 }}
+            >
+              {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
+                <ToggleButton
+                  key={l}
+                  value={l}
+                  sx={{ px: 0.75, fontSize: "0.6rem", fontWeight: 600 }}
+                >
+                  {LANG_LABELS[l]}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+
+            <Button
+              size="small"
+              variant="text"
+              disabled={isStreaming}
+              onClick={() => setClearChatConfirmOpen(true)}
+              sx={{ textTransform: "none", fontSize: "0.7rem", minWidth: 0, px: 0.5, color: "text.secondary" }}
+            >
+              Clear
+            </Button>
+          </Stack>
+        </Stack>
+      )}
 
       {/* ── API key / error banners ───────────────────────────────────────── */}
       <Collapse in={!hasKey}>
@@ -3389,71 +3442,57 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
             borderRadius: "12px",
           }}
         >
-          {/* Chat header */}
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={1.5}
-            sx={{
-              px: 2,
-              py: 1.5,
-              borderBottom: "1px solid",
-              borderColor: "divider",
-              flexShrink: 0,
-            }}
-          >
-            <Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main" }}>
-              <SmartToy sx={{ fontSize: 19 }} />
-            </Avatar>
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="subtitle1" fontWeight={600} lineHeight={1.2}>
-                Home Assistant
-              </Typography>
-              <Stack direction="row" alignItems="center" spacing={0.5}>
-                <Typography variant="caption" color="text.secondary">
-                  Powered by Sarvam AI
-                </Typography>
-                {sttMode === "sarvam" && voiceSupported && (
-                  <Tooltip title="Using Sarvam Saaras v3 for voice transcription">
-                    <GraphicEq sx={{ fontSize: 13, color: "primary.main" }} />
-                  </Tooltip>
-                )}
-              </Stack>
-            </Box>
-            <Chip
-              label={hasKey ? "AI Connected" : "Demo Mode"}
-              size="small"
-              color={hasKey ? "success" : "default"}
-              variant="outlined"
-              sx={{ fontSize: "0.7rem", height: 22 }}
-            />
-
-            {props.embedded ? (
-              <Tooltip title={drawerQuickCommandsOpen ? "Hide quick commands" : "Show quick commands"}>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={() => setDrawerQuickCommandsOpen((v) => !v)}
-                  aria-label={drawerQuickCommandsOpen ? "Hide quick commands" : "Show quick commands"}
-                  startIcon={drawerQuickCommandsOpen ? <ExpandLess fontSize="small" /> : <Bolt fontSize="small" />}
-                  sx={{ textTransform: "none", px: 1, minWidth: 0, ml: 0.5 }}
-                >
-                  Quick commands
-                </Button>
-              </Tooltip>
-            ) : null}
-
-            <IconButton
-              size="small"
-              onClick={(e) => openAccountMenu(e.currentTarget)}
-              sx={{ ml: 0.5 }}
-              aria-label="Account"
+          {/* Chat header — hidden when embedded (drawer has its own header) */}
+          {!props.embedded && (
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={1.5}
+              sx={{
+                px: 2,
+                py: 1.5,
+                borderBottom: "1px solid",
+                borderColor: "divider",
+                flexShrink: 0,
+              }}
             >
-              <Avatar sx={{ width: 28, height: 28, bgcolor: "grey.200", color: "text.primary" }}>
-                <Person sx={{ fontSize: 18 }} />
+              <Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main" }}>
+                <SmartToy sx={{ fontSize: 19 }} />
               </Avatar>
-            </IconButton>
-          </Stack>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="subtitle1" fontWeight={600} lineHeight={1.2}>
+                  AI Agent
+                </Typography>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <Typography variant="caption" color="text.secondary">
+                    Powered by Sarvam AI
+                  </Typography>
+                  {sttMode === "sarvam" && voiceSupported && (
+                    <Tooltip title="Using Sarvam Saaras v3 for voice transcription">
+                      <GraphicEq sx={{ fontSize: 13, color: "primary.main" }} />
+                    </Tooltip>
+                  )}
+                </Stack>
+              </Box>
+              <Chip
+                label={hasKey ? "AI Connected" : "Demo Mode"}
+                size="small"
+                color={hasKey ? "success" : "default"}
+                variant="outlined"
+                sx={{ fontSize: "0.7rem", height: 22 }}
+              />
+              <IconButton
+                size="small"
+                onClick={(e) => openAccountMenu(e.currentTarget)}
+                sx={{ ml: 0.5 }}
+                aria-label="Account"
+              >
+                <Avatar sx={{ width: 28, height: 28, bgcolor: "grey.200", color: "text.primary" }}>
+                  <Person sx={{ fontSize: 18 }} />
+                </Avatar>
+              </IconButton>
+            </Stack>
+          )}
 
           {props.embedded ? (
             <Collapse in={drawerQuickCommandsOpen} timeout="auto" unmountOnExit>

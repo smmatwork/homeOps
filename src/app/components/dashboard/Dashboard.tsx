@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import {
   Box,
   Button,
@@ -36,6 +36,7 @@ import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
+import { WeeklyPlanCard } from "./WeeklyPlanCard";
 
 type ChoreRow = {
   id: string;
@@ -84,6 +85,7 @@ function isoFromDatetimeLocal(value: string): string | null {
 export function Dashboard() {
   const { accessToken, householdId, user } = useAuth();
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [chores, setChores] = useState<ChoreRow[]>([]);
   const [helpers, setHelpers] = useState<HelperRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -328,16 +330,8 @@ export function Dashboard() {
               <Button
                 variant="contained"
                 size="small"
-                href="/chat"
-                onClick={(e) => {
-                  e.preventDefault();
-                  window.location.href = "/chat";
-                  // The agent will be prompted via the chat
-                  setTimeout(() => {
-                    window.dispatchEvent(new CustomEvent("homeops:chat-send", {
-                      detail: { message: "Help me assign my unassigned chores to helpers based on their roles and schedules." }
-                    }));
-                  }, 1000);
+                onClick={() => {
+                  navigate("/chat?assign=true");
                 }}
                 sx={{ whiteSpace: "nowrap" }}
               >
@@ -347,6 +341,11 @@ export function Dashboard() {
           </CardContent>
         </Card>
       )}
+
+      {/* Weekly Plan — single-tap approval for the upcoming week */}
+      <Box mb={3}>
+        <WeeklyPlanCard />
+      </Box>
 
       {/* Stats */}
       <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(220px, 1fr))" gap={2} mb={3}>

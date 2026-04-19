@@ -330,6 +330,11 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
   };
 
   const loadMemory = useCallback(async (scope: ChatScope) => {
+    // Don't reload while a clear is being processed — it would restore the old messages
+    if (clearPendingRef.current) {
+      setMemoryReady(true);
+      return;
+    }
     setMemoryReady(false);
     setError(null);
     let { accessToken, householdId } = getAgentSetup();
@@ -727,6 +732,10 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
     void maybeSummarizeAndTrim();
   }, [isStreaming, broadcastChatSync]);
 
+  // After a clear, suppress the next sync-triggered reload so old messages
+  // don't flash back before the server processes the deletion.
+  const clearPendingRef = useRef(false);
+
   const clearHistory = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -737,10 +746,21 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
     setConversationId("");
     setError(null);
     setIsStreaming(false);
+    clearPendingRef.current = true;
 
     const { accessToken, householdId } = getAgentSetup();
     if (accessToken && householdId) {
-      void clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
+      (async () => {
+        const res = await clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
+        if (res.ok) {
+          conversationIdRef.current = res.conversationId;
+          setConversationId(res.conversationId);
+        }
+        // Allow reloads again after the server has processed the clear
+        clearPendingRef.current = false;
+      })();
+    } else {
+      clearPendingRef.current = false;
     }
   }, []);
 

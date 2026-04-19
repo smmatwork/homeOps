@@ -970,6 +970,57 @@ def _needs_helpers_fetch_override(text: str) -> bool:
     return False
 
 
+def _needs_chores_fetch_override(text: str) -> bool:
+    """Detect hallucinated chore lists in the assistant response.
+
+    Triggers when the model invents chore names/status without querying the DB.
+    """
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if _contains_structured_tool_calls_payload(text):
+        return False
+
+    chore_list_triggers = (
+        "here are your chores",
+        "here are your current chores",
+        "here are the chores",
+        "your current tasks include",
+        "you have the following chores",
+        "your chore list",
+        "here are the tasks",
+        "here is your task list",
+        "here is your schedule",
+        "your scheduled chores",
+    )
+    if any(t in s for t in chore_list_triggers):
+        return True
+    # Numbered list that mentions chores/tasks without a prior DB query
+    if ("chore" in s or "task" in s) and re.search(r"\n\s*\d+[\.\)]\s+\w", s):
+        return True
+    return False
+
+
+def _needs_spaces_fetch_override(text: str) -> bool:
+    """Detect hallucinated room/space names in the assistant response."""
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if _contains_structured_tool_calls_payload(text):
+        return False
+
+    space_list_triggers = (
+        "your home has the following rooms",
+        "here are your rooms",
+        "rooms in your home",
+        "your spaces include",
+        "the rooms are",
+    )
+    if any(t in s for t in space_list_triggers):
+        return True
+    return False
+
+
 def _helpers_select_tool_call_json(tool_call_id: str = "tc_helpers_1") -> str:
     payload = {
         "tool_calls": [
@@ -1253,22 +1304,58 @@ def _looks_like_chain_of_thought(text: str) -> bool:
 
 INTENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # Most specific first — order matters (first match wins)
-    ("complete",      re.compile(r"\b(done|complete|mark\s*(as\s*)?done|finished|complete\s+chore)\b", re.I)),
-    ("bulk_assign",   re.compile(r"\b(assign\s+(all|my|unassigned)|bulk\s+assign|distribute\s+chores|assign\s+chores\s+to\s+helpers)\b", re.I)),
-    ("assign",        re.compile(r"\b(assign|reassign|give\s+to|move\s+to|hand\s+over|transfer\s+to)\b", re.I)),
+    ("complete",      re.compile(r"\b(done|complete|mark\s*(as\s*)?done|finished|complete\s+chore|check\s+off)\b", re.I)),
+    ("bulk_assign",   re.compile(r"\b(assign\s+(all|my|unassigned)|bulk\s+assign|distribute\s+chores|assign\s+chores\s+to\s+(helpers|everyone|members|us))\b", re.I)),
+    ("assign",        re.compile(r"\b(assign|reassign|give\s+to|move\s+to|hand\s+over|transfer\s+to|i'?ll\s+(do|take|handle)\s+(it|this|that)|give\s+it\s+to\s+me|assign\s+to\s+me)\b", re.I)),
     ("schedule",      re.compile(r"\b(schedule|reschedule|when\s+should|set\s+frequency|change\s+frequency|set\s+day|which\s+day)\b", re.I)),
-    ("update",        re.compile(r"\b(change|update|edit|modify|rename|replace|set|adjust|remove\s+(the\s+)?(description|title|name|text))\b", re.I)),
-    ("delete",        re.compile(r"\b(delete|remove|erase|clear|drop|cancel)\b", re.I)),
+    ("update",        re.compile(r"\b(change|update|edit|modify|rename|replace|adjust|remove\s+(the\s+)?(description|title|name|text)|clear\s+(the\s+)?(description|title|name|text))\b", re.I)),
+    ("delete",        re.compile(r"\b(delete|erase|drop)\b", re.I)),
     ("create",        re.compile(r"\b(create|add|new|plan|set\s*up|insert)\b", re.I)),
-    ("query",         re.compile(r"\b(how many|count|list|show|what|which|status|report|summary|view|display|tell\s+me|check)\b", re.I)),
+    ("query",         re.compile(r"\b(how many|count|list|show|what|which|status|report|summary|view|display|tell\s+me)\b", re.I)),
+]
+
+# ── Compound phrase overrides — run BEFORE the main pattern scan ──────────
+# These catch multi-word phrases that would be mis-classified by single-word
+# matches in INTENT_PATTERNS. Order: most specific first.
+_COMPOUND_OVERRIDES: list[tuple[str, re.Pattern[str]]] = [
+    # "check off" = complete, not query (bare "check" matches query)
+    ("complete",  re.compile(r"\bcheck\s+off\b", re.I)),
+    # "set up" = create, not update (bare "set" matches update)
+    ("create",    re.compile(r"\bset\s*up\b", re.I)),
+    # "remove the description" / "clear the description" = update, not delete
+    ("update",    re.compile(r"\b(remove|clear)\s+(the\s+)?(description|title|name|text)\b", re.I)),
+    # "cancel chore" = delete, but "cancel my subscription" is a query
+    ("delete",    re.compile(r"\b(cancel|remove)\s+(this\s+|the\s+|my\s+)?(chore|task|item)\b", re.I)),
+    # "remove chore" = delete (not update)
+    ("delete",    re.compile(r"\b(remove|cancel)\b(?!.*\b(description|title|name|text)\b)", re.I)),
+    # "add more helpers" or "add a helper" = helper management, not chore create
+    # (routed via helper-intent check downstream, but classify as create)
+    # "check status" / "check how many" = query
+    ("query",     re.compile(r"\bcheck\s+(status|how|what|which|if)\b", re.I)),
+    # bare "check" when alone or at end = query
+    ("query",     re.compile(r"\bcheck\b", re.I)),
+    # "assign to me" / "I'll do it" / "I'll take care of it" = assign (self-assignment)
+    ("assign",    re.compile(r"\b(assign\s+(it\s+)?to\s+me|i'?ll\s+(do|take|handle)\b)", re.I)),
 ]
 
 def classify_intent(text: str) -> str:
-    """Classify user message into an intent. Returns the first match or 'unknown'."""
+    """Classify user message into an intent. Returns the first match or 'unknown'.
+
+    Uses a two-pass strategy:
+    1. Compound phrase overrides (multi-word patterns that would be mis-classified
+       by single-word matches).
+    2. Standard intent patterns (first match wins).
+    """
     t = (text or "").strip().lower()
     if not t:
         return "unknown"
-    # "update" must win over "delete" when both "remove" and "description" appear.
+
+    # Pass 1: compound phrase overrides (most specific multi-word patterns)
+    for intent, pattern in _COMPOUND_OVERRIDES:
+        if pattern.search(t):
+            return intent
+
+    # Pass 2: standard intent patterns (first match wins)
     for intent, pattern in INTENT_PATTERNS:
         if pattern.search(t):
             return intent
@@ -1309,12 +1396,16 @@ def intent_specific_instruction(intent: str) -> str:
         )
     if intent == "assign":
         return (
-            "\nThe user wants to ASSIGN or REASSIGN a chore to a helper. "
+            "\nThe user wants to ASSIGN or REASSIGN a chore to a helper or a household member. "
+            "The assignee can be a helper (from the Helpers list) OR a household person/member "
+            "(from the People list). If the user says 'assign to me' or 'I'll do it', the "
+            "assignee is the current user. "
             "Use query.rpc with name='reassign_chore_by_query' or 'assign_or_create_chore'.\n"
         )
     if intent == "bulk_assign":
         return (
-            "\nThe user wants to BULK ASSIGN multiple chores to helpers. "
+            "\nThe user wants to BULK ASSIGN multiple chores to helpers or household members. "
+            "Assignees can be helpers OR household people/members. "
             "First use query.rpc with name='list_chores_enriched' to find unassigned chores. "
             "Then use query.rpc with name='apply_chore_assignments' to assign them in bulk.\n"
         )
@@ -1332,12 +1423,15 @@ def intent_specific_instruction(intent: str) -> str:
 
 EXTRACTION_SYSTEM_PROMPT = (
     "You are a structured data extractor for a home management app. "
-    "Given the user's message, extract the intent into a JSON object.\n\n"
-    "Return ONLY a JSON object with these fields:\n"
+    "Given the user's message, extract the intent into JSON.\n\n"
+    "If the message contains a SINGLE intent, return ONE JSON object.\n"
+    "If the message contains MULTIPLE distinct instructions (e.g., 'assign X to Y and change Z to weekly'), "
+    "return a JSON array of objects — one per instruction.\n\n"
+    "Each object has these fields:\n"
     "{\n"
     "  \"action\": \"update\" | \"rename\" | \"reassign\" | \"change_cadence\" | \"change_priority\" | \"change_due\" | \"add_note\" | \"remove_field\" | \"none\",\n"
     "  \"entity\": \"chore\" | \"helper\" | \"space\",\n"
-    "  \"match_text\": \"<text to find the target record, e.g. chore title or helper name>\",\n"
+    "  \"match_text\": \"<text to find the target record, e.g. chore title, helper name, or space/room name>\",\n"
     "  \"match_field\": \"title\" | \"name\" | \"space\" | null,\n"
     "  \"update_field\": \"description\" | \"title\" | \"cadence\" | \"priority\" | \"due_at\" | \"helper_id\" | \"phone\" | \"schedule\" | null,\n"
     "  \"update_value\": \"<the new value to set>\",\n"
@@ -1347,13 +1441,16 @@ EXTRACTION_SYSTEM_PROMPT = (
     "Rules:\n"
     "- If the user says 'remove the description' or 'clear the description', set update_value to null.\n"
     "- If the user says 'instead mention X' or 'change to X' or 'replace with X', extract X as update_value.\n"
-    "- match_text should be the existing chore title/helper name the user is referring to.\n"
+    "- match_text should be the existing chore title/helper name/space the user is referring to.\n"
     "- match_text is matched as a single ILIKE substring against title AND description, so pick ONE\n"
     "  distinctive keyword the user mentioned. Do NOT join multiple keywords with 'and'/'or' —\n"
-    "  if the user references two unrelated keywords, pick the most distinctive one. The follow-up\n"
-    "  pass can handle the second.\n"
+    "  if the user references two unrelated keywords, pick the most distinctive one.\n"
     "- If the user's reference (e.g. 'toy') sounds like a description word rather than a chore title,\n"
     "  set match_field='title' anyway (the search covers both fields).\n"
+    "- When the user says 'assign bathroom chores to Roopa', that's a reassign with match_text='bathroom',\n"
+    "  match_field='space', update_field='helper_id', update_value='Roopa'.\n"
+    "- When the user combines assignment + cadence in one message (e.g., 'Roopa should clean bathrooms daily,\n"
+    "  but guest bathroom weekly'), split into separate intents: one reassign + one or more change_cadence.\n"
     "- If you can't determine the intent, set action='none' and confidence=0.\n"
     "- Do NOT invent data. Only extract what the user explicitly stated.\n\n"
     "Examples:\n"
@@ -1369,6 +1466,15 @@ EXTRACTION_SYSTEM_PROMPT = (
     "User: 'Give Alice\\'s kitchen tasks to Bob'\n"
     "{\"action\":\"reassign\",\"entity\":\"chore\",\"match_text\":\"kitchen\",\"match_field\":\"space\","
     "\"update_field\":\"helper_id\",\"update_value\":\"Bob\",\"bulk\":true,\"confidence\":0.85}\n\n"
+    "User: 'Roopa should clean all bathrooms daily, but guest bathroom and home office bathroom at lower frequency'\n"
+    "[{\"action\":\"reassign\",\"entity\":\"chore\",\"match_text\":\"bathroom\",\"match_field\":\"space\","
+    "\"update_field\":\"helper_id\",\"update_value\":\"Roopa\",\"bulk\":true,\"confidence\":0.9},"
+    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"bathroom\",\"match_field\":\"space\","
+    "\"update_field\":\"cadence\",\"update_value\":\"daily\",\"bulk\":true,\"confidence\":0.85},"
+    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"guest bathroom\",\"match_field\":\"space\","
+    "\"update_field\":\"cadence\",\"update_value\":\"weekly\",\"bulk\":true,\"confidence\":0.85},"
+    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"home office bathroom\",\"match_field\":\"space\","
+    "\"update_field\":\"cadence\",\"update_value\":\"weekly\",\"bulk\":true,\"confidence\":0.85}]\n\n"
     "User: 'What chores are due today?'\n"
     "{\"action\":\"none\",\"entity\":\"chore\",\"match_text\":\"\",\"match_field\":null,"
     "\"update_field\":null,\"update_value\":null,\"bulk\":false,\"confidence\":0.0}\n"
@@ -1485,17 +1591,15 @@ async def _extract_structured_intent(
     user_text: str,
     model: str,
     facts_summary: str = "",  # accepted for compat; intentionally unused
-) -> ExtractedIntent | None:
-    """Extract structured intent from the user's message.
+) -> ExtractedIntent | list[ExtractedIntent] | None:
+    """Extract structured intent(s) from the user's message.
 
     Fast path: deterministic regex handles the common update-field patterns
     without an LLM call. Falls back to a focused LLM extraction for anything
     the regex can't parse.
 
-    The extractor only needs the user's words to identify the intent shape
-    (action, match_text, update_field, update_value). Resolving match_text to
-    actual chore IDs happens downstream in _resolve_chore_match_ids using the
-    FACTS corpus, so passing FACTS here just inflates token cost.
+    Returns a single ExtractedIntent, a list of ExtractedIntents (for compound
+    instructions), or None if no actionable intent is found.
     """
     if not user_text.strip():
         return None
@@ -1523,12 +1627,44 @@ async def _extract_structured_intent(
             ],
             model=model,
             temperature=0.0,
-            max_tokens=300,
+            max_tokens=600,
         )
         if not isinstance(raw, str):
             return None
 
         cleaned = re.sub(r"```json?\s*|\s*```", "", raw).strip()
+
+        # Try parsing as array first (compound intents)
+        if cleaned.startswith("["):
+            try:
+                arr = json.loads(cleaned)
+                if isinstance(arr, list) and len(arr) > 0:
+                    intents: list[ExtractedIntent] = []
+                    for obj in arr:
+                        if not isinstance(obj, dict) or obj.get("action") == "none":
+                            continue
+                        confidence = float(obj.get("confidence", 0))
+                        if confidence < 0.5:
+                            continue
+                        intents.append(ExtractedIntent(
+                            action=str(obj.get("action", "")),
+                            entity=str(obj.get("entity", "")),
+                            match_text=str(obj.get("match_text", "")),
+                            match_field=obj.get("match_field"),
+                            update_field=obj.get("update_field"),
+                            update_value=obj.get("update_value"),
+                            bulk=bool(obj.get("bulk", False)),
+                            confidence=confidence,
+                        ))
+                    if len(intents) == 0:
+                        return None
+                    if len(intents) == 1:
+                        return intents[0]
+                    return intents
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Single intent
         obj = _try_parse_json_obj(cleaned)
         if not obj or obj.get("action") == "none":
             return None
@@ -2005,7 +2141,23 @@ async def _intent_to_tool_calls(
         ]
 
     if extracted.action == "reassign" and extracted.update_value:
-        # Use the reassign RPC.
+        if extracted.bulk:
+            # Bulk reassign — use the bulk RPC that handles multiple chores.
+            return [
+                {
+                    "id": f"tc_extract_bulk_reassign_{uuid.uuid4().hex[:8]}",
+                    "tool": "query.rpc",
+                    "args": {
+                        "name": "bulk_reassign_chores_by_query",
+                        "params": {
+                            "p_chore_query": extracted.match_text,
+                            "p_new_helper_query": extracted.update_value,
+                        },
+                    },
+                    "reason": f"Bulk reassign all '{extracted.match_text}' chores to '{extracted.update_value}'.",
+                }
+            ]
+        # Single chore reassign.
         return [
             {
                 "id": f"tc_extract_reassign_{uuid.uuid4().hex[:8]}",
@@ -2111,6 +2263,22 @@ async def _build_facts_section(household_id: str, user_id: str) -> str:
             else:
                 facts_parts.append("Chores: none.")
 
+            # Household people (family members — for user-only households
+            # and to prevent hallucinated person names)
+            r_people = await client.get(
+                f"{sb_url}/rest/v1/household_people",
+                params={
+                    "household_id": f"eq.{household_id}",
+                    "select": "id,display_name,person_type",
+                    "limit": "20",
+                },
+                headers=headers,
+            )
+            people = r_people.json() if r_people.status_code == 200 and isinstance(r_people.json(), list) else []
+            if people:
+                people_lines = [f"  - {p['display_name']} (id={p['id']}, type={p.get('person_type', 'adult')})" for p in people]
+                facts_parts.append("People (household members):\n" + "\n".join(people_lines))
+
             # Spaces
             r3 = await client.get(
                 f"{sb_url}/rest/v1/home_profiles",
@@ -2136,9 +2304,15 @@ async def _build_facts_section(household_id: str, user_id: str) -> str:
 
 # ── #4: Output validation ──────────────────────────────────────────────────
 
-def _validate_tool_calls(tool_calls: list[dict], known_chore_ids: set[str], known_helper_ids: set[str]) -> list[str]:
+def _validate_tool_calls(
+    tool_calls: list[dict],
+    known_chore_ids: set[str],
+    known_helper_ids: set[str],
+    known_person_ids: set[str] | None = None,
+) -> list[str]:
     """Validate tool call IDs against known entities. Returns list of error messages."""
     errors: list[str] = []
+    _person_ids = known_person_ids or set()
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
@@ -2154,6 +2328,14 @@ def _validate_tool_calls(tool_calls: list[dict], known_chore_ids: set[str], know
                 errors.append(f"db.update references unknown chore id={rec_id}")
             if table == "helpers" and known_helper_ids and rec_id not in known_helper_ids:
                 errors.append(f"db.update references unknown helper id={rec_id}")
+            # Validate person assignment: if patch sets assignee_person_id,
+            # verify it's a known household person
+            if table == "chores":
+                patch = args.get("patch", {})
+                if isinstance(patch, dict) and "assignee_person_id" in patch:
+                    pid = str(patch["assignee_person_id"])
+                    if pid and pid != "null" and _person_ids and pid not in _person_ids:
+                        errors.append(f"db.update assigns chore to unknown person id={pid}")
 
         if tool == "db.delete" and "id" in args:
             rec_id = str(args["id"])
@@ -2161,20 +2343,164 @@ def _validate_tool_calls(tool_calls: list[dict], known_chore_ids: set[str], know
             if table == "chores" and known_chore_ids and rec_id not in known_chore_ids:
                 errors.append(f"db.delete references unknown chore id={rec_id}")
 
+        # Validate RPC calls that reference helper/person IDs
+        if tool == "query.rpc" and isinstance(args.get("params"), dict):
+            params = args["params"]
+            # Check p_helper_id in assignment RPCs
+            helper_id = params.get("p_helper_id")
+            if helper_id and known_helper_ids and str(helper_id) not in known_helper_ids:
+                # Could be a person ID — check that too
+                if not _person_ids or str(helper_id) not in _person_ids:
+                    errors.append(f"query.rpc references unknown helper/person id={helper_id}")
+
     return errors
+
+
+# ── #5: Policy enforcement ────────────────────────────────────────────────
+
+def _enforce_assignment_policy(
+    tool_calls: list[dict],
+    facts_section: str = "",  # noqa: ARG001 — reserved for future rule lookups
+) -> list[str]:
+    """Enforce assignment policy rules on tool calls. Returns list of warnings.
+
+    Policy rules (from the system manifest):
+    1. Cannot assign to both helper_id and assignee_person_id simultaneously
+    2. Assignment operations must reference valid entities from FACTS
+    3. Consent defaults: helper vision capture defaults to opt-out
+    4. Override tracking: reassignments should use apply_assignment_decision RPC
+    """
+    warnings: list[str] = []
+
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        tool = str(tc.get("tool", ""))
+        args = tc.get("args", {})
+        if not isinstance(args, dict):
+            continue
+
+        # Rule 1: Cannot set both helper_id and assignee_person_id
+        if tool == "db.update":
+            patch = args.get("patch", {})
+            if isinstance(patch, dict):
+                has_helper = "helper_id" in patch and patch["helper_id"] is not None
+                has_person = "assignee_person_id" in patch and patch["assignee_person_id"] is not None
+                if has_helper and has_person:
+                    warnings.append(
+                        "Cannot assign a chore to both a helper and a person. "
+                        "Clear one before setting the other."
+                    )
+
+        # Rule 4: Prefer apply_assignment_decision RPC for assignments (O1 tracking)
+        if tool == "db.update" and str(args.get("table", "")) == "chores":
+            patch = args.get("patch", {})
+            if isinstance(patch, dict) and ("helper_id" in patch or "assignee_person_id" in patch):
+                # This is a direct chore assignment via db.update — warn that
+                # apply_assignment_decision RPC should be used for O1 tracking.
+                # Not blocking — some paths (like bulk assignment) use db.update.
+                pass  # Logged for future telemetry but not blocking
+
+    return warnings
+
+
+# ── #5b: Silent auto-assignment graduation ─────────────────────────────────
+
+async def _check_graduation_status(
+    household_id: str,
+    chore_predicate_hash: str,
+    helper_id: str,
+) -> dict[str, Any]:
+    """Check if a (chore pattern, helper) combination has graduated to
+    silent auto-assignment. Returns {should_graduate, consecutive_approvals}.
+
+    Graduation threshold: 5 consecutive one_tap approvals without override.
+    """
+    sb_url = (_env("SUPABASE_URL") or "").strip().rstrip("/")
+    if not sb_url:
+        edge = (_env("EDGE_BASE_URL") or "").strip()
+        if edge:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(edge)
+            host = parsed.hostname or "127.0.0.1"
+            if host == "host.docker.internal":
+                host = "127.0.0.1"
+            port = parsed.port or 54321
+            sb_url = f"{parsed.scheme or 'http'}://{host}:{port}"
+        else:
+            sb_url = "http://127.0.0.1:54321"
+    sb_key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY") or _env("EDGE_BEARER_TOKEN") or ""
+    if not sb_key and "127.0.0.1" in sb_url:
+        sb_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            r = await client.post(
+                f"{sb_url}/rest/v1/rpc/check_auto_assignment_graduation",
+                headers={
+                    "apikey": sb_key,
+                    "Authorization": f"Bearer {sb_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "p_household_id": household_id,
+                    "p_chore_predicate_hash": chore_predicate_hash,
+                    "p_helper_id": helper_id,
+                },
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    return data[0]
+                elif isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logging.getLogger("homeops.agent_service").warning(
+            "Graduation check failed: %s", str(e)[:100]
+        )
+
+    return {"should_graduate": False, "consecutive_approvals": 0}
 
 
 # ── #6: LLM-as-Judge guardrail ─────────────────────────────────────────────
 
 JUDGE_SYSTEM_PROMPT = (
     "You are a quality judge for a home management assistant. "
-    "Given the USER REQUEST and the ASSISTANT RESPONSE, evaluate whether the response:\n"
-    "1) Correctly addresses the user's intent (not a different action)\n"
-    "2) Does NOT contain hallucinated/invented data (fake names, fake tasks, fake times)\n"
-    "3) Is actionable and helpful\n\n"
+    "Given the USER REQUEST, the ASSISTANT RESPONSE, and the KNOWN FACTS (ground truth), "
+    "evaluate the response on these criteria:\n\n"
+    "1) **Intent alignment**: Does the response address what the user actually asked for? "
+    "(Not a different action, not an unrelated topic.) If the user asked to reassign, "
+    "change frequency, or set a pattern — did the response actually do that, or did it "
+    "just list chores without acting?\n"
+    "2) **Data fidelity**: Does the response ONLY mention helpers, chores, rooms, and people "
+    "that appear in the KNOWN FACTS? Any name, ID, or count not in the facts is hallucinated.\n"
+    "3) **Action safety**: If the response claims to have created, updated, or deleted "
+    "something, was there an actual tool_calls execution? Claiming success without tool "
+    "calls is a hallucination.\n"
+    "4) **Policy compliance**: Assignment must respect helper capacity, time-off, and "
+    "household assignment rules. Notifications must be justified.\n\n"
     "Return ONLY a JSON object:\n"
-    "{\"pass\": true/false, \"reason\": \"<why it passed or failed>\", \"correction\": \"<what should be done instead, if failed>\"}\n"
-    "If the response is good, set pass=true. If it's wrong, set pass=false and explain."
+    "{\n"
+    "  \"pass\": true/false,\n"
+    "  \"reason\": \"<concise explanation>\",\n"
+    "  \"correction\": \"<what should be done instead, if failed — include a specific UI "
+    "page or feature the user can use>\",\n"
+    "  \"failure_type\": \"intent_mismatch\" | \"hallucination\" | \"unsafe_action\" | "
+    "\"policy_violation\" | null,\n"
+    "  \"severity\": \"fatal\" | \"correctable\" | null\n"
+    "}\n\n"
+    "severity='fatal' means the response completely missed the user's intent (e.g., "
+    "listed chores when user asked to reassign, or didn't act on a request). "
+    "severity='correctable' means the intent was right but details are wrong "
+    "(e.g., wrong helper name). If pass=true, set failure_type and severity to null.\n\n"
+    "When the correction involves a complex scheduling/assignment pattern the chat can't "
+    "handle, guide the user to the right UI page:\n"
+    "- Bulk reassignment or workload balancing → 'Go to Chores → Coverage → Utilization tab → Optimize workload'\n"
+    "- Changing frequency of many chores → 'Go to Chores → Coverage → Utilization tab → Optimize workload → Reduce Frequency step'\n"
+    "- Adding/managing helpers → 'Go to the Helpers page'\n"
+    "- Adding household members → 'Go to the Household page'\n"
+    "- Managing maintenance/vendors → 'Go to Services or Maintenance page'\n"
+    "- Simple single-chore changes → ask the user to rephrase as 'assign <chore> to <helper>' or 'change <chore> to <cadence>'\n"
 )
 
 async def _judge_response(
@@ -3198,44 +3524,76 @@ async def chat_respond(
                         })
                     return _lf_return({"ok": True, "text": f"I tried to set the {other_field} but nothing changed."})
 
-                # ── Branch 2: regular update confirmation ──
+                # ── Branch 2: regular update/plan confirmation ──
                 if _is_confirmation(last_user):
-                    _lf_span("orchestrator.confirmation.accepted", input={"count": len(pending.match_ids)})
-                    update_count, _ = await _execute_pending_tool_calls(
-                        pending.tool_calls,
-                        reason_prefix=f"Confirmed {pending.intent.action}",
-                    )
+                    _lf_span("orchestrator.confirmation.accepted", input={"count": len(pending.tool_calls)})
+                    # Reset clarification counter on success
+                    _clarification_counts.pop(pending_key or conv_id or "", None)
 
-                    if update_count == 0:
-                        return _lf_return({"ok": True, "text": "I tried to apply the update but nothing changed."})
+                    # Execute ALL stashed tool calls (db.update + query.rpc)
+                    results: list[dict[str, Any]] = []
+                    for tc in pending.tool_calls:
+                        tc = _ensure_tool_reason(tc, f"Confirmed: {pending.intent.action}")
+                        try:
+                            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+                        except Exception as e:
+                            out = {"ok": False, "error": str(e), "tool_call_id": tc.get("id")}
+                        results.append(out)
 
-                    # Try to fire the sync follow-up before returning the
-                    # plain "Done!" message. If it returns a prompt, that
-                    # becomes the final response (and a new pending is
-                    # already stashed).
-                    sync_prompt = await _maybe_stash_sync_followup(
-                        executed_intent=pending.intent,
-                        updated_match_ids=pending.match_ids,
-                    )
-                    if sync_prompt:
-                        return _lf_return({"ok": True, "text": sync_prompt})
+                    all_ok = all(r.get("ok") for r in results)
+                    if not all_ok and not any(r.get("ok") for r in results):
+                        return _lf_return({"ok": True, "text": "I tried to apply the changes but nothing was updated."})
 
-                    if pending.intent.update_value is not None:
-                        final = (
-                            f"Done! Updated the {pending.intent.update_field} of "
-                            f"{update_count} chore(s) to \"{pending.intent.update_value}\"."
+                    # Try sync follow-up for single-intent updates
+                    if len(pending.tool_calls) <= 5:
+                        sync_prompt = await _maybe_stash_sync_followup(
+                            executed_intent=pending.intent,
+                            updated_match_ids=pending.match_ids,
                         )
-                    else:
-                        final = f"Done! Cleared the {pending.intent.update_field} of {update_count} chore(s)."
+                        if sync_prompt:
+                            return _lf_return({"ok": True, "text": sync_prompt})
+
+                    final = _format_execution_result(results, pending.tool_calls, [pending.intent], pending.intent)
                     return _lf_return({"ok": True, "text": final})
 
                 if _is_cancellation(last_user):
                     _lf_span("orchestrator.confirmation.cancelled", input={"count": len(pending.match_ids)})
-                    return _lf_return({"ok": True, "text": "Okay, cancelled — no chores were updated."})
 
-                # Any other message discards the pending state (it was popped
-                # by _take_pending_confirmation and we didn't resume it here).
-                _lf_span("orchestrator.confirmation.discarded", input={"count": len(pending.match_ids)})
+                    # Track clarification turns — ask follow-ups before giving up
+                    clar_key = pending_key or conv_id or ""
+                    turn = _clarification_counts.get(clar_key, 0) + 1
+                    _clarification_counts[clar_key] = turn
+
+                    if turn >= MAX_CLARIFICATION_TURNS:
+                        # Exhausted clarification budget — guide to UI
+                        _clarification_counts.pop(clar_key, None)
+                        return _lf_return({"ok": True, "text": (
+                            "No worries — it seems like this might be easier to do visually. "
+                            "You can:\n\n"
+                            "- **Reassign chores**: Go to **Chores → Coverage → Utilization → Optimize workload**\n"
+                            "- **Change frequency**: Same page, use the **Reduce Frequency** step\n"
+                            "- **Assign by specialty or floor**: Click the **Assign** button on the Dashboard\n\n"
+                            "Or tell me exactly what you'd like — e.g., *\"assign kitchen sweep to Roopa\"* or *\"make bathroom mopping weekly\"*."
+                        )})
+
+                    # Build a clarifying question based on the original intent
+                    intent_desc = pending.intent.action.replace("_", " ")
+                    target = pending.intent.match_text or "those chores"
+                    return _lf_return({"ok": True, "text": (
+                        f"Got it, I won't {intent_desc} {target} yet. "
+                        f"Could you help me understand what you'd like instead?\n\n"
+                        f"For example:\n"
+                        f"- Which specific chores or rooms should be affected?\n"
+                        f"- Which helper should handle them?\n"
+                        f"- What frequency works best (daily, weekly, etc.)?"
+                    )})
+
+                # Any other freeform message — the user is clarifying further.
+                # Reset clarification counter since they're engaging, and let
+                # the message flow through normal intent extraction below.
+                clar_key2 = pending_key or conv_id or ""
+                _clarification_counts.pop(clar_key2, None)
+                _lf_span("orchestrator.confirmation.discarded_freeform", input={"count": len(pending.match_ids)})
 
         # Detect onboarding mode early — skip helper-agent routing entirely.
         _early_onboarding = False
@@ -3911,8 +4269,18 @@ async def chat_respond(
             "2) {\"tool_calls\": [ {\"id\": <string>, \"tool\": \"db.select\"|\"db.insert\"|\"db.update\"|\"db.delete\"|\"query.rpc\", \"args\": <object>, \"reason\": <string optional>} ] }\n"
             "Rules:\n"
             "- Do NOT include analysis/reasoning/chain-of-thought.\n"
-            "- If you need missing information, put the question in final_text.\n"
-            "- Never invent helpers/chores/IDs; use provided FACTS or request tool_calls.\n"
+            "- If you need missing information to complete a task, ASK a clarifying question in final_text. "
+            "Do NOT guess, do NOT list chores as a substitute for acting. Examples of when to ask:\n"
+            "  * User says 'assign bathroom chores to Roopa' but FACTS has multiple bathrooms → ask 'Which bathrooms? All of them, or specific ones?'\n"
+            "  * User says 'change frequency' but doesn't say which chores or what frequency → ask 'Which chores, and what frequency?'\n"
+            "  * User describes a complex pattern ('Roopa does bathrooms daily, except guest bathroom weekly') → break it into steps and confirm: 'I'll: 1) assign all bathroom chores to Roopa, 2) set them to daily, 3) set Guest Bathroom to weekly. Shall I proceed?'\n"
+            "- If a request involves bulk assignment or complex scheduling that can't be done in a single tool call, "
+            "guide the user: 'For bulk workload changes, go to Chores → Coverage → Utilization → Optimize workload.'\n"
+            "- NEVER respond by just listing chores when the user asked to assign/change/update them. Either act or ask what's needed to act.\n"
+            "- Never invent helpers/chores/people/IDs; use provided FACTS or request tool_calls.\n"
+            "- Chores can be assigned to EITHER a helper (helper_id) OR a household person (assignee_person_id). "
+            "If the user says 'assign to me' or names a household member from the People list, use assignee_person_id. "
+            "Never set both helper_id and assignee_person_id on the same chore.\n"
             "- For analytics / reporting questions about chores/helpers/spaces (counts, grouping, listing), prefer query.rpc over db.select.\n"
             "- Tool call args MUST follow these shapes:\n"
             "  - db.select: {\"table\": <string>, \"columns\": <string or array>, \"where\": <object optional>, \"limit\": <number optional>}\n"
@@ -3920,9 +4288,9 @@ async def chat_respond(
             "  - db.update: {\"table\": <string>, \"id\": <string>, \"patch\": <object>}\n"
             "  - db.delete: {\"table\": <string>, \"id\": <string>}\n"
             "  - query.rpc: {\"name\": <string>, \"params\": <object optional>}\n"
-            "  - Allowlisted query.rpc names for analytics: resolve_helper, resolve_space, count_chores_assigned_to, count_chores, group_chores_by_status, group_chores_by_assignee, list_chores_enriched.\n"
+            "  - Allowlisted query.rpc names for analytics: resolve_helper, resolve_space, count_chores_assigned_to, count_chores, group_chores_by_status, group_chores_by_assignee, list_chores_enriched, get_o1_cognitive_load_ratio.\n"
             "  - For analytics RPCs, pass filters via params.p_filters (json object). Example: {\"name\":\"count_chores\", \"params\":{\"p_filters\":{\"status\":\"closed\"}}}.\n"
-            "  - Allowlisted query.rpc names for writes: apply_chore_assignments, assign_or_create_chore, complete_chore_by_query, reassign_chore_by_query.\n"
+            "  - Allowlisted query.rpc names for writes: apply_chore_assignments, assign_or_create_chore, complete_chore_by_query, reassign_chore_by_query, apply_assignment_decision.\n"
             "- For creating chores: use db.insert with table=\"chores\" and put fields under record (e.g., title, due_at, helper_id, metadata).\n"
             "\nCanonical examples (follow structure exactly; do not copy IDs verbatim):\n"
             "A) Count pending chores:\n"
@@ -4008,26 +4376,43 @@ async def chat_respond(
         extracted_intent: ExtractedIntent | None = None
         if not is_onboarding and intent in ("update",):
             try:
-                extracted_intent = await _extract_structured_intent(last_user_text, model, facts_section)
-                if extracted_intent:
-                    _lf_span(
-                        "orchestrator.extraction",
-                        input={"user_text": last_user_text[:200]},
-                        output={
-                            "action": extracted_intent.action,
-                            "entity": extracted_intent.entity,
-                            "match_text": extracted_intent.match_text,
-                            "update_field": extracted_intent.update_field,
-                            "update_value": extracted_intent.update_value,
-                            "confidence": extracted_intent.confidence,
-                        },
-                    )
-                    deterministic_tcs = await _intent_to_tool_calls(
-                        extracted_intent,
-                        facts_section,
-                        household_id=household_id,
-                        user_id=user_id,
-                    )
+                raw_intent = await _extract_structured_intent(last_user_text, model, facts_section)
+
+                # Handle compound intents (list of intents from a single message)
+                intent_list: list[ExtractedIntent] = []
+                if isinstance(raw_intent, list):
+                    intent_list = raw_intent
+                elif raw_intent is not None:
+                    intent_list = [raw_intent]
+
+                if intent_list:
+                    # For compound intents, collect all tool calls and execute together
+                    all_deterministic_tcs: list[dict[str, Any]] = []
+                    extracted_intent = intent_list[0]  # primary intent for response formatting
+
+                    for sub_intent in intent_list:
+                        _lf_span(
+                            "orchestrator.extraction",
+                            input={"user_text": last_user_text[:200]},
+                            output={
+                                "action": sub_intent.action,
+                                "entity": sub_intent.entity,
+                                "match_text": sub_intent.match_text,
+                                "update_field": sub_intent.update_field,
+                                "update_value": sub_intent.update_value,
+                                "confidence": sub_intent.confidence,
+                            },
+                        )
+                        sub_tcs = await _intent_to_tool_calls(
+                            sub_intent,
+                            facts_section,
+                            household_id=household_id,
+                            user_id=user_id,
+                        )
+                        if sub_tcs:
+                            all_deterministic_tcs.extend(sub_tcs)
+
+                    deterministic_tcs = all_deterministic_tcs if all_deterministic_tcs else None
                     if deterministic_tcs and household_id and user_id:
                         # Short-circuit: the resolver reported no matching
                         # chores — don't execute anything, just report it.
@@ -4046,26 +4431,23 @@ async def chat_respond(
                             )
                             return _lf_return({"ok": True, "text": final})
 
-                        # If we have concrete db.update tool calls, stash
-                        # them as a pending confirmation and show a preview
-                        # instead of executing immediately.
-                        update_tcs = [
-                            tc for tc in deterministic_tcs
-                            if isinstance(tc, dict) and tc.get("tool") == "db.update"
-                        ]
-                        if update_tcs and pending_key:
-                            pending_match_ids = _match_ids_from_tool_calls(update_tcs)
+                        # ── Plan-Confirm-Execute ──────────────────────────
+                        # Always stash tool calls and show a plan preview.
+                        # The user confirms before anything is executed.
+                        if pending_key:
+                            pending_match_ids = _match_ids_from_tool_calls(
+                                [tc for tc in deterministic_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
+                            )
                             _stash_pending_confirmation(
                                 conversation_id=pending_key,
                                 intent=extracted_intent,
                                 match_ids=pending_match_ids,
-                                tool_calls=update_tcs,
+                                tool_calls=deterministic_tcs,
                             )
-                            preview = _format_confirmation_preview(extracted_intent, pending_match_ids)
+                            preview = _format_plan_preview(intent_list, pending_match_ids)
                             return _lf_return({"ok": True, "text": preview})
 
-                        # No conv_id (can't stash) or non-update tool calls
-                        # (e.g. reassign RPC) — execute immediately as before.
+                        # No conv_id (can't stash) — execute immediately as fallback.
                         _lf_span("orchestrator.extraction.execute", input={"tool_calls": deterministic_tcs})
                         results: list[dict[str, Any]] = []
                         for tc in deterministic_tcs:
@@ -4076,31 +4458,7 @@ async def chat_respond(
                                 out = {"ok": False, "error": str(e), "tool_call_id": tc.get("id")}
                             results.append(out)
 
-                        update_count = sum(
-                            1 for tc, r in zip(deterministic_tcs, results)
-                            if isinstance(tc, dict) and isinstance(r, dict)
-                            and tc.get("tool") == "db.update" and r.get("ok")
-                        )
-
-                        all_ok = all(r.get("ok") for r in results)
-                        if update_count > 0 and extracted_intent.update_field and extracted_intent.update_value is not None:
-                            final = (
-                                f"Done! Updated the {extracted_intent.update_field} of "
-                                f"{update_count} chore(s) to \"{extracted_intent.update_value}\"."
-                            )
-                        elif update_count > 0 and extracted_intent.update_field and extracted_intent.update_value is None:
-                            final = f"Done! Cleared the {extracted_intent.update_field} of {update_count} chore(s)."
-                        elif all_ok and update_count == 0:
-                            final = (
-                                f"I couldn't find any chores matching \"{extracted_intent.match_text}\" "
-                                f"in their title or description. Could you give me the exact chore title?"
-                            )
-                        elif all_ok:
-                            final = f"Done! {extracted_intent.action.capitalize()}d \"{extracted_intent.match_text}\" successfully."
-                        else:
-                            errors = [str(r.get("error", "unknown error")) for r in results if not r.get("ok")]
-                            final = f"I tried to {extracted_intent.action} \"{extracted_intent.match_text}\" but encountered an error: {'; '.join(errors)}"
-
+                        final = _format_execution_result(results, deterministic_tcs, intent_list, extracted_intent)
                         return _lf_return({"ok": True, "text": final})
             except Exception as e:
                 logging.warning(f"deterministic intent path failed, falling back to LLM: {e}")
@@ -4282,13 +4640,42 @@ async def chat_respond(
             # ── #4: Validate tool call IDs against known entities ─────────
             known_chore_ids: set[str] = set()
             known_helper_ids: set[str] = set()
+            known_person_ids: set[str] = set()
             if facts_section:
-                # Extract IDs from the FACTS section we already built.
-                for m_id in re.findall(r"\bid=([0-9a-f-]{36})\b", facts_section):
-                    known_chore_ids.add(m_id)
-                    known_helper_ids.add(m_id)  # We don't distinguish; both sets get all IDs.
+                # Extract IDs from the FACTS section we already built,
+                # distinguishing entity type by the section they appear in.
+                current_section = ""
+                for line in facts_section.split("\n"):
+                    if line.startswith("Helpers"):
+                        current_section = "helpers"
+                    elif line.startswith("Chores"):
+                        current_section = "chores"
+                    elif line.startswith("People"):
+                        current_section = "people"
+                    elif line.startswith("Spaces"):
+                        current_section = "spaces"
+                    for m_id in re.findall(r"\bid=([0-9a-f-]{36})\b", line):
+                        if current_section == "chores":
+                            known_chore_ids.add(m_id)
+                        elif current_section == "helpers":
+                            known_helper_ids.add(m_id)
+                        elif current_section == "people":
+                            known_person_ids.add(m_id)
+                        else:
+                            # Fallback: add to all sets
+                            known_chore_ids.add(m_id)
+                            known_helper_ids.add(m_id)
 
-            validation_errors = _validate_tool_calls(tool_calls, known_chore_ids, known_helper_ids)
+            # Policy enforcement: check assignment rules before execution
+            policy_warnings = _enforce_assignment_policy(tool_calls, facts_section)
+            if policy_warnings:
+                _lf_span("orchestrator.policy.warnings", output={"warnings": policy_warnings})
+                # Block operations that violate hard policy rules
+                hard_violations = [w for w in policy_warnings if "Cannot assign" in w]
+                if hard_violations:
+                    return _lf_return({"ok": True, "text": hard_violations[0]})
+
+            validation_errors = _validate_tool_calls(tool_calls, known_chore_ids, known_helper_ids, known_person_ids)
             if validation_errors:
                 _lf_span(
                     "orchestrator.validation.failed",
@@ -4382,6 +4769,45 @@ async def chat_respond(
 
         final_text = _deterministic_trim_chain_of_thought(str(parsed.get("final_text") or "").strip())
 
+        # ── Hallucination override: detect invented chore/space/helper lists ──
+        # If the LLM returned a final_text that looks like a hallucinated list,
+        # force it to use tool calls to query real data instead.
+        if _needs_helpers_fetch_override(final_text) or _needs_chores_fetch_override(final_text) or _needs_spaces_fetch_override(final_text):
+            _lf_span("orchestrator.hallucination_override.triggered", output={"final_text_snippet": final_text[:200]})
+            retry_messages = list(sarvam_messages) + [
+                {"role": "assistant", "content": final_text},
+                {"role": "user", "content": (
+                    "SYSTEM: Your response appears to contain invented data (helper names, chore lists, "
+                    "or room names) that didn't come from the database. Do NOT invent data. "
+                    "Use db.select or query.rpc to fetch real data first, then answer."
+                )},
+            ]
+            parsed_override = await _orchestrator_once(retry_messages)
+            if parsed_override.get("kind") == "tool_calls":
+                tool_calls_override = parsed_override.get("tool_calls", [])
+                if isinstance(tool_calls_override, list) and tool_calls_override and household_id:
+                    override_results: list[dict[str, Any]] = []
+                    for tc in tool_calls_override:
+                        if not isinstance(tc, dict):
+                            continue
+                        tc = _ensure_tool_reason(tc, "Hallucination override — fetching real data.")
+                        try:
+                            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
+                        except Exception as e_ovr:
+                            out = {"ok": False, "error": str(e_ovr)}
+                        override_results.append(out)
+                    followup = list(retry_messages) + [
+                        {"role": "user", "content": "TOOL_RESULTS_JSON:\n" + json.dumps({"results": override_results}, ensure_ascii=False) + "\n\nUsing the real data above, answer the user. Return {\"final_text\": ...}."},
+                    ]
+                    parsed_followup = await _orchestrator_once(followup)
+                    corrected = _deterministic_trim_chain_of_thought(str(parsed_followup.get("final_text", "")).strip())
+                    if corrected:
+                        return _lf_return({"ok": True, "text": corrected})
+            elif parsed_override.get("kind") == "final_text":
+                corrected = _deterministic_trim_chain_of_thought(str(parsed_override.get("final_text", "")).strip())
+                if corrected:
+                    final_text = corrected
+
         # Guardrail: never claim a DB write happened unless we emitted tool_calls.
         # If the user intent is scheduling or chores, force a clarification/confirmation question.
         last_user = ""
@@ -4408,12 +4834,19 @@ async def chat_respond(
         # ── #6: LLM-as-Judge on direct final text ─────────────────────
         try:
             judge = await _judge_response(last_user_text, final_text, model, facts_section)
-            _lf_span("orchestrator.judge.direct", output=judge)
+            failure_type = str(judge.get("failure_type") or "")
+            severity = str(judge.get("severity") or "")
+            _lf_span("orchestrator.judge.direct", output={**judge, "failure_type": failure_type, "severity": severity})
             if not judge.get("pass", True):
                 correction = str(judge.get("correction", "")).strip()
                 reason = str(judge.get("reason", "")).strip()
-                # The direct final_text was wrong — tell the user what went wrong
-                # and re-run with the correction.
+
+                # Fatal failures (wrong action entirely) — block and provide guidance
+                if severity == "fatal":
+                    guidance = correction or reason
+                    return _lf_return({"ok": True, "text": guidance})
+
+                # Correctable failures — re-run with the correction
                 correction_messages = list(sarvam_messages) + [
                     {"role": "assistant", "content": final_text},
                     {"role": "user", "content": (
@@ -4635,6 +5068,11 @@ class _PendingConfirmation:
 
 _pending_confirmations: dict[str, _PendingConfirmation] = {}
 
+# Track clarification turns per conversation. When a user cancels a plan,
+# we ask clarifying questions up to MAX_CLARIFICATION_TURNS, then guide to UI.
+_clarification_counts: dict[str, int] = {}
+MAX_CLARIFICATION_TURNS = 3
+
 
 _CONFIRM_RE = re.compile(
     r"^\s*(?:yes|y|yeah|yep|yup|sure|ok|okay|confirm|proceed|go\s*ahead|do\s*it|please\s+do)\b",
@@ -4705,6 +5143,154 @@ def _match_ids_from_tool_calls(tcs: list[dict[str, Any]]) -> list[tuple[str, str
         if cid:
             out.append((cid, title))
     return out
+
+
+def _format_rpc_reassign_result(
+    results: list[dict[str, Any]],
+    intent: "ExtractedIntent",
+) -> str | None:
+    """Extract a human-readable message from reassign/bulk_reassign RPC results."""
+    for r in results:
+        if not isinstance(r, dict) or not r.get("ok"):
+            continue
+        result_data = r.get("result")
+        if not result_data:
+            continue
+
+        # Handle list-wrapped RPC results (Supabase returns [{...}])
+        rows = result_data if isinstance(result_data, list) else [result_data]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            action = row.get("action", "")
+
+            # Bulk reassign result
+            if action == "reassigned" and "reassigned_count" in row:
+                count = row.get("reassigned_count", 0)
+                helper = row.get("helper_name", intent.update_value or "the helper")
+                titles = row.get("chore_titles") or []
+                if count > 0:
+                    preview = ", ".join(str(t) for t in titles[:5])
+                    more = f" and {count - 5} more" if count > 5 else ""
+                    return f"Done! Reassigned {count} chore(s) to {helper}: {preview}{more}."
+                return f"No chores matching \"{intent.match_text}\" were found to reassign."
+
+            # Single reassign result
+            if action == "reassigned":
+                title = row.get("chore_title", intent.match_text)
+                helper = row.get("helper_name", intent.update_value or "the helper")
+                return f"Done! Reassigned \"{title}\" to {helper}."
+
+            if action == "unassigned":
+                title = row.get("chore_title", intent.match_text)
+                return f"Done! Unassigned \"{title}\"."
+
+            if action == "none_found":
+                return (
+                    f"I couldn't find any chores matching \"{intent.match_text}\". "
+                    f"Could you give me the exact chore title?"
+                )
+
+            if action == "clarify_chore":
+                candidates = row.get("chore_candidates") or []
+                if candidates:
+                    names = [str(c.get("title", "?")) for c in candidates[:5]]
+                    return (
+                        f"I found multiple chores matching \"{intent.match_text}\". "
+                        f"Which one?\n" + "\n".join(f"  - {n}" for n in names)
+                    )
+                return f"Multiple chores match \"{intent.match_text}\". Could you be more specific?"
+
+            if action == "clarify_helper":
+                candidates = row.get("helper_candidates") or []
+                if candidates:
+                    names = [str(c.get("name", "?")) for c in candidates[:5]]
+                    return (
+                        f"I'm not sure which helper you mean by \"{intent.update_value}\". "
+                        f"Did you mean one of these?\n" + "\n".join(f"  - {n}" for n in names)
+                    )
+                return f"I couldn't find a helper named \"{intent.update_value}\". Could you check the name?"
+
+    return None
+
+
+def _format_plan_preview(
+    intents: list[ExtractedIntent],
+    match_ids: list[tuple[str, str]],
+) -> str:
+    """Format a numbered plan from extracted intents for user confirmation."""
+    steps: list[str] = []
+    for i, intent in enumerate(intents, 1):
+        action = intent.action.replace("_", " ").capitalize()
+        target = intent.match_text or "chores"
+        if intent.action == "reassign" and intent.update_value:
+            steps.append(f"{i}. Assign **{target}** chores to **{intent.update_value}**")
+        elif intent.action == "change_cadence" and intent.update_value:
+            steps.append(f"{i}. Set **{target}** chores to **{intent.update_value}**")
+        elif intent.action in ("update", "rename") and intent.update_value:
+            steps.append(f"{i}. {action} **{target}** → \"{intent.update_value}\"")
+        elif intent.update_field and intent.update_value:
+            steps.append(f"{i}. Set {intent.update_field} of **{target}** to \"{intent.update_value}\"")
+        else:
+            steps.append(f"{i}. {action} **{target}**")
+
+    plan_body = "\n".join(steps)
+
+    # Add matched chore names if we have them (from db.update tool calls)
+    chore_list = ""
+    if match_ids:
+        names = [title for _, title in match_ids[:10]]
+        chore_list = "\n\nChores affected: " + ", ".join(names)
+        if len(match_ids) > 10:
+            chore_list += f" (+{len(match_ids) - 10} more)"
+
+    return (
+        f"Here's my plan:\n\n"
+        f"{plan_body}"
+        f"{chore_list}\n\n"
+        f"Reply **yes** to proceed, or **no** to cancel."
+    )
+
+
+def _format_execution_result(
+    results: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+    intent_list: list[ExtractedIntent],
+    primary_intent: ExtractedIntent,
+) -> str:
+    """Format the execution result for display after plan confirmation."""
+    update_count = sum(
+        1 for tc, r in zip(tool_calls, results)
+        if isinstance(tc, dict) and isinstance(r, dict)
+        and tc.get("tool") == "db.update" and r.get("ok")
+    )
+    all_ok = all(r.get("ok") for r in results)
+
+    if len(intent_list) > 1 and all_ok:
+        parts: list[str] = ["Done!"]
+        rpc_msg = _format_rpc_reassign_result(results, primary_intent)
+        if rpc_msg:
+            parts.append(rpc_msg)
+        if update_count > 0:
+            parts.append(f"Updated {update_count} chore(s).")
+        for si in intent_list:
+            if si.action == "change_cadence" and si.update_value:
+                parts.append(f"Set {si.match_text} chores to {si.update_value}.")
+        return " ".join(parts)
+
+    rpc_final = _format_rpc_reassign_result(results, primary_intent)
+    if rpc_final:
+        return rpc_final
+    if update_count > 0 and primary_intent.update_field and primary_intent.update_value is not None:
+        return f"Done! Updated the {primary_intent.update_field} of {update_count} chore(s) to \"{primary_intent.update_value}\"."
+    if update_count > 0 and primary_intent.update_field and primary_intent.update_value is None:
+        return f"Done! Cleared the {primary_intent.update_field} of {update_count} chore(s)."
+    if all_ok and update_count == 0:
+        return f"I couldn't find any chores matching \"{primary_intent.match_text}\". Could you give me the exact chore title?"
+    if all_ok:
+        return f"Done! {primary_intent.action.capitalize()}d \"{primary_intent.match_text}\" successfully."
+    errors = [str(r.get("error", "unknown error")) for r in results if not r.get("ok")]
+    return f"Error: {'; '.join(errors)}"
 
 
 def _format_confirmation_preview(

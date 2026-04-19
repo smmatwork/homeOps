@@ -2,16 +2,19 @@ import { useState, useCallback, useEffect } from "react";
 import {
   Box,
   Button,
+  IconButton,
+  MenuItem,
   Paper,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
-import { Home, CheckCircleOutline } from "@mui/icons-material";
+import { Add, Delete, Home, CheckCircleOutline, People } from "@mui/icons-material";
 import { useNavigate } from "react-router";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { LanguageSwitcher } from "../LanguageSwitcher";
+import { supabase } from "../../services/supabaseClient";
 import { fetchUserProfile, markOnboardingComplete, updateUserProfile } from "../../services/profileService";
 import type { UiLanguage } from "../../i18n";
 
@@ -19,14 +22,17 @@ import type { UiLanguage } from "../../i18n";
  * Simplified onboarding: welcome screen → collect name & language → redirect
  * to the chat in onboarding mode where the agent drives the full setup.
  */
+interface MemberEntry { name: string; type: "adult" | "kid" }
+
 export function OnboardingFlow() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, householdId } = useAuth();
   const { t, setLang, lang } = useI18n();
 
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [step, setStep] = useState<"welcome" | "name">("welcome");
+  const [step, setStep] = useState<"welcome" | "name" | "members">("welcome");
+  const [members, setMembers] = useState<MemberEntry[]>([{ name: "", type: "adult" }]);
 
   // Load existing name from profile or auth metadata
   useEffect(() => {
@@ -56,9 +62,26 @@ export function OnboardingFlow() {
       preferred_language: lang as UiLanguage,
     });
     setBusy(false);
-    // Redirect to chat in onboarding mode — the agent takes over from here
+    setStep("members");
+  }, [user?.id, name, lang]);
+
+  const handleSaveMembers = useCallback(async () => {
+    if (!householdId) return;
+    setBusy(true);
+
+    const validMembers = members.filter((m) => m.name.trim());
+    if (validMembers.length > 0) {
+      const rows = validMembers.map((m) => ({
+        household_id: householdId,
+        display_name: m.name.trim(),
+        person_type: m.type,
+      }));
+      await supabase.from("household_people").insert(rows);
+    }
+
+    setBusy(false);
     navigate("/chat?onboarding=true", { replace: true });
-  }, [user?.id, name, lang, navigate]);
+  }, [householdId, members, navigate]);
 
   const handleSkip = useCallback(async () => {
     if (!user?.id) return;
@@ -137,6 +160,71 @@ export function OnboardingFlow() {
               <Button variant="contained" onClick={handleContinue} disabled={busy || !name.trim()}>
                 {t("onboarding.continue_to_agent")}
               </Button>
+            </Stack>
+          </Stack>
+        )}
+
+        {step === "members" && (
+          <Stack spacing={3}>
+            <Stack direction="row" spacing={1.5} alignItems="center">
+              <People color="primary" sx={{ fontSize: 32 }} />
+              <Box>
+                <Typography variant="h5" fontWeight={700}>
+                  {t("onboarding.members_title")}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {t("onboarding.members_hint")}
+                </Typography>
+              </Box>
+            </Stack>
+
+            <Stack spacing={1.5}>
+              {members.map((m, i) => (
+                <Stack key={i} direction="row" spacing={1} alignItems="center">
+                  <TextField
+                    size="small" fullWidth
+                    label={t("onboarding.member_name")}
+                    value={m.name}
+                    onChange={(e) => setMembers((prev) => prev.map((p, j) => j === i ? { ...p, name: e.target.value } : p))}
+                    autoFocus={i === 0}
+                  />
+                  <TextField
+                    select size="small" sx={{ minWidth: 100 }}
+                    value={m.type}
+                    onChange={(e) => setMembers((prev) => prev.map((p, j) => j === i ? { ...p, type: e.target.value as "adult" | "kid" } : p))}
+                  >
+                    <MenuItem value="adult">{t("onboarding.adult")}</MenuItem>
+                    <MenuItem value="kid">{t("onboarding.kid")}</MenuItem>
+                  </TextField>
+                  {members.length > 1 && (
+                    <IconButton size="small" onClick={() => setMembers((prev) => prev.filter((_, j) => j !== i))}>
+                      <Delete fontSize="small" />
+                    </IconButton>
+                  )}
+                </Stack>
+              ))}
+            </Stack>
+
+            <Button
+              size="small" startIcon={<Add />} variant="text"
+              onClick={() => setMembers((prev) => [...prev, { name: "", type: "adult" }])}
+              sx={{ alignSelf: "flex-start" }}
+            >
+              {t("onboarding.add_member")}
+            </Button>
+
+            <Stack direction="row" justifyContent="space-between">
+              <Button variant="text" onClick={() => setStep("name")} disabled={busy}>
+                {t("home_profile.back")}
+              </Button>
+              <Stack direction="row" spacing={1}>
+                <Button variant="text" onClick={() => void handleSaveMembers()} disabled={busy} sx={{ color: "text.secondary" }}>
+                  {t("onboarding.skip_members")}
+                </Button>
+                <Button variant="contained" onClick={() => void handleSaveMembers()} disabled={busy}>
+                  {t("onboarding.continue_to_agent")}
+                </Button>
+              </Stack>
             </Stack>
           </Stack>
         )}

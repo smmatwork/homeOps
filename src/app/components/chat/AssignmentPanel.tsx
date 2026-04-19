@@ -14,6 +14,11 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
   LinearProgress,
   MenuItem,
   Paper,
@@ -21,10 +26,10 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { CheckCircle, Person, Layers, EditNote } from "@mui/icons-material";
+import { CheckCircle, Edit, Person, Layers, EditNote } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
-import { executeToolCall } from "../../services/agentApi";
+import { agentCreate, executeToolCall } from "../../services/agentApi";
 import {
   buildAssignmentPlan,
   inferRoleTags,
@@ -116,6 +121,13 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   const [applyProgress, setApplyProgress] = useState(0);
   const [applyTotal, setApplyTotal] = useState(0);
+
+  // Inline chore edit state
+  const [editChoreId, setEditChoreId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ title: "", description: "", space: "", category: "" });
+  const [editBusy, setEditBusy] = useState(false);
+  const [splitMode, setSplitMode] = useState(false);
+  const [splitTasks, setSplitTasks] = useState<Array<{ title: string }>>([{ title: "" }, { title: "" }]);
 
   // ── Load data ───────────────────────────────────────────────────
 
@@ -287,6 +299,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         id: h.id, name: h.name, type: h.type || null,
         dailyCapacityMinutes: h.capacityMinutes,
         roleTags: tags.length > 0 ? [...new Set(tags)] : inferRoleTags(h.type || null),
+        kind: h.kind,
         workDays: h.workDays,
       };
     });
@@ -320,7 +333,12 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     const map: Record<string, { helperId: string | null; cadence: string }> = {};
     for (const a of result.assignments) {
       const chore = rawChores.find((c) => c.id === a.choreId);
-      map[a.choreId] = { helperId: a.helperId, cadence: normalizeCadence(chore?.cadence ?? "weekly") };
+      // For person assignments, use the member_ prefix so we can distinguish
+      // in applyAssignments
+      const assigneeId = a.assigneePersonId
+        ? `member_${a.assigneePersonId}`
+        : a.helperId;
+      map[a.choreId] = { helperId: assigneeId, cadence: normalizeCadence(chore?.cadence ?? "weekly") };
     }
     setAssignments(map);
   };
@@ -338,19 +356,29 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     for (let i = 0; i < toApply.length; i++) {
       const [choreId, { helperId, cadence }] = toApply[i];
       const chore = rawChores.find((c) => c.id === choreId);
+
+      // Determine if assignee is a household person (member_xxx) or a helper
+      const isPerson = helperId?.startsWith("member_") ?? false;
+      const realId = isPerson ? helperId!.replace("member_", "") : helperId;
+
+      const patch: Record<string, unknown> = {
+        metadata: { ...(chore ? { space: chore.space } : {}), cadence, source: "assignment_panel" },
+      };
+      if (isPerson) {
+        patch.assignee_person_id = realId;
+        patch.helper_id = null;
+      } else {
+        patch.helper_id = realId;
+        patch.assignee_person_id = null;
+      }
+
       const res = await executeToolCall({
         accessToken, householdId, scope: "household",
         toolCall: {
           id: `assign_${choreId}_${Date.now()}`,
           tool: "db.update",
-          args: {
-            table: "chores", id: choreId,
-            patch: {
-              helper_id: helperId,
-              metadata: { ...(chore ? { space: chore.space } : {}), cadence, source: "assignment_panel" },
-            },
-          },
-          reason: "Assign chore",
+          args: { table: "chores", id: choreId, patch },
+          reason: isPerson ? "Assign chore to household member" : "Assign chore to helper",
         },
       });
       if (!res.ok) {
@@ -410,6 +438,179 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
     setStep("done");
     onComplete(toApply.length);
+  };
+
+  // ── Inline chore edit ───────────────────────────────────────────
+
+  const openEditChore = (choreId: string) => {
+    const chore = rawChores.find((c) => c.id === choreId);
+    if (!chore) return;
+    setEditForm({
+      title: chore.title,
+      description: "",
+      space: chore.space,
+      category: "",
+    });
+    setSplitMode(false);
+    setSplitTasks([{ title: "" }, { title: "" }]);
+    setEditChoreId(choreId);
+  };
+
+  const saveEditChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    setEditBusy(true);
+    const currentAssignment = assignments[editChoreId];
+    const patch: Record<string, unknown> = {
+      title: editForm.title.trim() || chore.title,
+      metadata: {
+        space: editForm.space || chore.space,
+        cadence: currentAssignment?.cadence ?? chore.cadence,
+        category: editForm.category || undefined,
+      },
+    };
+
+    const res = await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `edit_chore_${editChoreId}_${Date.now()}`,
+        tool: "db.update",
+        args: { table: "chores", id: editChoreId, patch },
+        reason: "Edit chore from assignment panel",
+      },
+    });
+    setEditBusy(false);
+
+    if (!res.ok) {
+      setError(`Edit failed: ${"error" in res ? res.error : "unknown"}`);
+      return;
+    }
+
+    // Update local state
+    setRawChores((prev) => prev.map((c) =>
+      c.id === editChoreId
+        ? { ...c, title: editForm.title.trim() || c.title, space: editForm.space || c.space }
+        : c,
+    ));
+    setEditChoreId(null);
+  };
+
+  const deleteEditChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    setEditBusy(true);
+    const res = await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `delete_chore_${editChoreId}_${Date.now()}`,
+        tool: "db.delete",
+        args: { table: "chores", id: editChoreId },
+        reason: `Delete chore "${chore.title}" from assignment panel`,
+      },
+    });
+    setEditBusy(false);
+
+    if (!res.ok) {
+      setError(`Delete failed: ${"error" in res ? res.error : "unknown"}`);
+      return;
+    }
+
+    setRawChores((prev) => prev.filter((c) => c.id !== editChoreId));
+    setAssignments((prev) => {
+      const next = { ...prev };
+      delete next[editChoreId];
+      return next;
+    });
+    setEditChoreId(null);
+  };
+
+  const splitChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    const validSubs = splitTasks.filter((s) => s.title.trim());
+    if (validSubs.length < 2) return;
+
+    setEditBusy(true);
+    try {
+      // Create each sub-task as an independent chore
+      const newChores: AssignableChore[] = [];
+      for (const sub of validSubs) {
+        const res = await agentCreate({
+          accessToken,
+          table: "chores",
+          record: {
+            household_id: householdId,
+            title: sub.title.trim(),
+            status: "pending",
+            priority: 1,
+            due_at: null,
+            helper_id: null,
+            metadata: {
+              space: editForm.space || chore.space,
+              cadence: chore.cadence,
+              category: editForm.category || null,
+              split_from: editChoreId,
+            },
+          },
+          reason: `Split from "${chore.title}"`,
+        });
+        if (res.ok) {
+          const created = res.created as Record<string, unknown> | null;
+          newChores.push({
+            id: String(created?.id ?? `new_${Date.now()}_${Math.random()}`),
+            title: sub.title.trim(),
+            space: editForm.space || chore.space,
+            cadence: chore.cadence,
+            estimatedMinutes: chore.estimatedMinutes,
+            currentHelperId: null,
+          });
+        } else {
+          setError("error" in res ? res.error : "Failed to create sub-task");
+          setEditBusy(false);
+          return;
+        }
+      }
+
+      // Soft-delete the original
+      await executeToolCall({
+        accessToken, householdId, scope: "household",
+        toolCall: {
+          id: `split_delete_${editChoreId}_${Date.now()}`,
+          tool: "db.delete",
+          args: { table: "chores", id: editChoreId },
+          reason: `Split "${chore.title}" into ${validSubs.length} tasks`,
+        },
+      });
+
+      // Update local state: remove original, add new chores
+      setRawChores((prev) => {
+        const without = prev.filter((c) => c.id !== editChoreId);
+        return [...without, ...newChores];
+      });
+
+      // Add new chores to assignments (unassigned)
+      setAssignments((prev) => {
+        const next = { ...prev };
+        delete next[editChoreId];
+        for (const nc of newChores) {
+          next[nc.id] = { helperId: null, cadence: normalizeCadence(nc.cadence) };
+        }
+        return next;
+      });
+
+      setEditChoreId(null);
+      setSplitMode(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Split failed");
+    } finally {
+      setEditBusy(false);
+    }
   };
 
   // ── Stats ───────────────────────────────────────────────────────
@@ -702,6 +903,9 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
                     <MenuItem value="" sx={{ fontSize: 12, color: "text.secondary" }}><em>Unassigned</em></MenuItem>
                     {helpers.map((h) => <MenuItem key={h.id} value={h.id} sx={{ fontSize: 12 }}>{h.name}</MenuItem>)}
                   </TextField>
+                  <IconButton size="small" onClick={() => openEditChore(choreId)} title="Edit chore">
+                    <Edit sx={{ fontSize: 16 }} />
+                  </IconButton>
                 </Stack>
               );
             })}
@@ -716,6 +920,82 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
           <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>Not now</Button>
         </Stack>
       </Stack>
+
+      {/* ── Inline chore edit dialog ──────────────────────────────── */}
+      <Dialog open={!!editChoreId} onClose={() => setEditChoreId(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>{splitMode ? "Split Chore" : "Edit Chore"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            {!splitMode && (
+              <>
+                <TextField size="small" label="Title" fullWidth value={editForm.title}
+                  onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))} />
+                <TextField size="small" label="Space / Room" fullWidth value={editForm.space}
+                  onChange={(e) => setEditForm((f) => ({ ...f, space: e.target.value }))} />
+                <TextField size="small" select label="Category" fullWidth value={editForm.category}
+                  onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}>
+                  <MenuItem value="">—</MenuItem>
+                  <MenuItem value="cleaning">Cleaning</MenuItem>
+                  <MenuItem value="kitchen">Kitchen & cooking</MenuItem>
+                  <MenuItem value="bathroom">Bathroom</MenuItem>
+                  <MenuItem value="laundry">Laundry & ironing</MenuItem>
+                  <MenuItem value="outdoor">Outdoor & garden</MenuItem>
+                  <MenuItem value="maintenance">Maintenance</MenuItem>
+                  <MenuItem value="other">Other</MenuItem>
+                </TextField>
+                <Button size="small" variant="text" onClick={() => setSplitMode(true)} sx={{ alignSelf: "flex-start" }}>
+                  Split into sub-tasks
+                </Button>
+              </>
+            )}
+
+            {splitMode && (
+              <Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 1 }}>
+                <Typography variant="caption" fontWeight={600} mb={1} display="block">
+                  Break &quot;{editForm.title}&quot; into independent tasks:
+                </Typography>
+                <Stack spacing={0.75}>
+                  {splitTasks.map((st, i) => (
+                    <Stack key={i} direction="row" spacing={0.5} alignItems="center">
+                      <TextField
+                        size="small" fullWidth variant="standard"
+                        placeholder={`Sub-task ${i + 1}`}
+                        value={st.title}
+                        onChange={(e) => setSplitTasks((prev) => prev.map((s, j) => j === i ? { title: e.target.value } : s))}
+                        InputProps={{ sx: { fontSize: 13 } }}
+                      />
+                      {splitTasks.length > 2 && (
+                        <Button size="small" sx={{ minWidth: 0, p: 0 }} onClick={() => setSplitTasks((prev) => prev.filter((_, j) => j !== i))}>✕</Button>
+                      )}
+                    </Stack>
+                  ))}
+                </Stack>
+                <Stack direction="row" spacing={1} mt={1}>
+                  <Button size="small" onClick={() => setSplitTasks((prev) => [...prev, { title: "" }])}>+ Add</Button>
+                  <Button size="small" variant="text" onClick={() => setSplitMode(false)}>Cancel split</Button>
+                </Stack>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ justifyContent: "space-between" }}>
+          <Button color="error" onClick={() => void deleteEditChore()} disabled={editBusy}>Delete</Button>
+          <Stack direction="row" spacing={1}>
+          <Button onClick={() => { setEditChoreId(null); setSplitMode(false); }} disabled={editBusy}>Cancel</Button>
+          {splitMode ? (
+            <Button
+              variant="contained" color="secondary"
+              disabled={editBusy || splitTasks.filter((s) => s.title.trim()).length < 2}
+              onClick={() => void splitChore()}
+            >
+              Split into {splitTasks.filter((s) => s.title.trim()).length} tasks
+            </Button>
+          ) : (
+            <Button variant="contained" onClick={() => void saveEditChore()} disabled={editBusy || !editForm.title.trim()}>Save</Button>
+          )}
+          </Stack>
+        </DialogActions>
+      </Dialog>
     </Paper>
   );
 }

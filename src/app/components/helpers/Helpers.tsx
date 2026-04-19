@@ -21,6 +21,9 @@ import { useI18n } from "../../i18n";
 import { HelperWorkloadCard } from "./HelperWorkloadCard";
 import { HelperOnboardingFlow } from "./HelperOnboardingFlow";
 import { HelperCard } from "./HelperCard";
+import { HelperCheckinCard } from "./HelperCheckinCard";
+import { HelperDailyView } from "./HelperDailyView";
+import { CompensationLedger } from "./CompensationLedger";
 
 type HelperRow = {
   id: string;
@@ -144,6 +147,14 @@ export function Helpers() {
   const [snackOpen, setSnackOpen] = useState(false);
   const [snackSeverity, setSnackSeverity] = useState<"success" | "error" | "info">("success");
   const [snackMessage, setSnackMessage] = useState<string>("");
+
+  // Expanded helper detail panel: which helper ID has its detail pane open, and which tab
+  const [expandedHelperId, setExpandedHelperId] = useState<string | null>(null);
+  const [expandedTab, setExpandedTab] = useState(0);
+  const toggleExpanded = (id: string) => {
+    setExpandedHelperId((prev) => (prev === id ? null : id));
+    setExpandedTab(0);
+  };
 
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("");
@@ -815,7 +826,18 @@ export function Helpers() {
         .is("deleted_at", null);
     }
 
-    // 3. Delete the helper
+    // 3. Cascade cleanup — remove all related records
+    await Promise.all([
+      supabase.from("assignment_rules").delete().eq("household_id", hid).eq("helper_id", helper.id),
+      supabase.from("member_time_off").delete().eq("household_id", hid).eq("helper_id", helper.id),
+      supabase.from("helper_checkins").delete().eq("helper_id", helper.id),
+      supabase.from("helper_feedback").delete().eq("helper_id", helper.id),
+      supabase.from("helper_outreach_attempts").delete().eq("helper_id", helper.id),
+      supabase.from("assignment_decisions").delete().eq("helper_id", helper.id),
+      supabase.from("chore_templates").update({ default_helper_id: null }).eq("household_id", hid).eq("default_helper_id", helper.id),
+    ]);
+
+    // 4. Delete the helper
     const res = await executeToolCall({
       accessToken: token,
       householdId: hid,
@@ -832,13 +854,6 @@ export function Helpers() {
       showSnack("error", "error" in res ? res.error : t("common.delete_failed"));
       return;
     }
-
-    // 4. Clean up assignment rules for this helper
-    await supabase
-      .from("assignment_rules")
-      .delete()
-      .eq("household_id", hid)
-      .eq("helper_id", helper.id);
 
     setHelpers((prev) => prev.filter((h) => h.id !== helper.id));
     setDeleteOpen(false);
@@ -1100,17 +1115,46 @@ export function Helpers() {
       ) : (
         <Box display="grid" gridTemplateColumns="repeat(auto-fill, minmax(320px, 1fr))" gap={2}>
           {helpers.map((helper) => (
-            <HelperCard
-              key={helper.id}
-              helper={helper}
-              scheduleSummary={scheduleSummary(helper)}
-              onMenuOpen={(e) => openHelperMenu(e, helper)}
-              onCapacity={() => openCapacity(helper)}
-              onSchedule={() => openSchedule(helper)}
-              onTimeOff={() => void openTimeOff(helper)}
-              onFeedback={() => void openFeedback(helper)}
-              onRewards={() => void openRewards(helper)}
-            />
+            <Box key={helper.id}>
+              <Box onClick={() => toggleExpanded(helper.id)} sx={{ cursor: "pointer" }}>
+                <HelperCard
+                  helper={helper}
+                  scheduleSummary={scheduleSummary(helper)}
+                  onMenuOpen={(e) => { e.stopPropagation(); openHelperMenu(e, helper); }}
+                  onCapacity={() => openCapacity(helper)}
+                  onSchedule={() => openSchedule(helper)}
+                  onTimeOff={() => void openTimeOff(helper)}
+                  onFeedback={() => void openFeedback(helper)}
+                  onRewards={() => void openRewards(helper)}
+                />
+              </Box>
+
+              {/* Expanded detail panel */}
+              {expandedHelperId === helper.id && (
+                <Box sx={{ mt: 0.5 }}>
+                  <Tabs
+                    value={expandedTab}
+                    onChange={(_, v) => setExpandedTab(v)}
+                    variant="scrollable"
+                    scrollButtons="auto"
+                    sx={{ minHeight: 32, "& .MuiTab-root": { minHeight: 32, py: 0.5, fontSize: 12 } }}
+                  >
+                    <Tab label="Today" />
+                    <Tab label="Check-ins" />
+                    <Tab label="Compensation" />
+                  </Tabs>
+                  {expandedTab === 0 && (
+                    <HelperDailyView helperId={helper.id} helperName={helper.name} />
+                  )}
+                  {expandedTab === 1 && (
+                    <HelperCheckinCard helperId={helper.id} helperName={helper.name} />
+                  )}
+                  {expandedTab === 2 && (
+                    <CompensationLedger helperId={helper.id} helperName={helper.name} />
+                  )}
+                </Box>
+              )}
+            </Box>
           ))}
         </Box>
       )}
