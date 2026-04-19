@@ -3391,6 +3391,10 @@ async def chat_respond(
                 f"or paste a different {other_field} to use that instead."
             )
 
+        # Initialize facts_section early so it's available in the confirmation handler.
+        # Build it lazily only if we actually need it (confirmation + formatting).
+        facts_section = ""
+
         if pending_key and last_user:
             pending = _take_pending_confirmation(pending_key)
             if pending is not None:
@@ -3458,7 +3462,20 @@ async def chat_respond(
 
                     all_ok = all(r.get("ok") for r in results)
                     if not all_ok and not any(r.get("ok") for r in results):
-                        return _lf_return({"ok": True, "text": "I tried to apply the changes but nothing was updated."})
+                        for i, r in enumerate(results):
+                            logging.warning(f"confirmation.execute result[{i}]: ok={r.get('ok')} error={r.get('error', 'none')}")
+                        # Give a user-friendly error with guidance
+                        errors = [str(r.get("error", "")) for r in results if not r.get("ok") and r.get("error")]
+                        err_hint = errors[0][:100] if errors else ""
+                        if "unsupported" in err_hint.lower() or "not allowed" in err_hint.lower():
+                            return _lf_return({"ok": True, "text": (
+                                "I wasn't able to complete that action — it's not supported through chat yet. "
+                                "You can do this from the app directly."
+                            )})
+                        return _lf_return({"ok": True, "text": (
+                            "Something went wrong while applying the changes. Please try again, "
+                            "or make the change directly from the app."
+                        )})
 
                     # Try sync follow-up for single-intent updates
                     if len(pending.tool_calls) <= 5:

@@ -375,7 +375,9 @@ type RpcName =
   | "apply_assignment_decision"
   | "record_assignment_override"
   | "find_chores_needing_reassignment"
-  | "compensation_ledger_summary";
+  | "compensation_ledger_summary"
+  | "bulk_reassign_chores_by_query"
+  | "add_space_to_profile";
 
 function isRpcName(v: unknown): v is RpcName {
   return (
@@ -394,7 +396,9 @@ function isRpcName(v: unknown): v is RpcName {
     v === "apply_assignment_decision" ||
     v === "record_assignment_override" ||
     v === "find_chores_needing_reassignment" ||
-    v === "compensation_ledger_summary"
+    v === "compensation_ledger_summary" ||
+    v === "bulk_reassign_chores_by_query" ||
+    v === "add_space_to_profile"
   );
 }
 

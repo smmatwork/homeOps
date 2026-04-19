@@ -692,8 +692,13 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
         );
         return;
       }
-      const errMsg =
-        err instanceof Error ? err.message : "Unknown error from Sarvam AI";
+      const rawMsg = err instanceof Error ? err.message : "Unknown error";
+      // Sanitize internal errors — never show stack traces or variable names to users
+      const isInternal = /cannot access|traceback|TypeError|KeyError|AttributeError|undefined is not/i.test(rawMsg);
+      const errMsg = isInternal
+        ? "The assistant encountered a temporary issue. Please try again."
+        : rawMsg;
+      console.error("Chat error:", rawMsg);
       setError(errMsg);
       setMessages((prev) =>
         prev.map((m) =>

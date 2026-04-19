@@ -341,7 +341,12 @@ export async function* streamChat(
         "Your session token is invalid/expired. Open Agent Setup and sign in again to refresh your access_token + household_id.",
       );
     }
-    throw new Error(`Sarvam chat error ${res.status}: ${errText}`);
+    // Don't show raw server errors to the user — log them and show a friendly message
+    console.error(`Sarvam chat error ${res.status}:`, errText);
+    if (res.status >= 500) {
+      throw new Error("The assistant encountered a temporary issue. Please try again in a moment.");
+    }
+    throw new Error(`Request failed (${res.status}). Please try rephrasing your message.`);
   }
 
   const rawText = await res.text().catch(() => "");
