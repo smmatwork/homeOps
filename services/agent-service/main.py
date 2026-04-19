@@ -4301,6 +4301,61 @@ async def chat_respond(
         else:
             messages = [{"role": "system", "content": enhanced_suffix.strip()}] + messages
 
+        # ── Pending clarification context ─────────────────────────────
+        # If the agent previously asked "which bathroom?" and the user is now
+        # replying, substitute their answer into the original intent and re-run.
+        if pending_key and last_user_text:
+            clarification = _take_clarification(pending_key)
+            if clarification is not None:
+                # The user's reply is the clarified value — substitute it into
+                # the original intents where the match failed
+                clarified_text = last_user_text.strip()
+                # Strip common prefixes like "I meant", "it's", "the one called"
+                clarified_text = re.sub(
+                    r"^(?:i\s+meant?|it'?s|the\s+one\s+called|the\s+)\s*",
+                    "", clarified_text, flags=re.IGNORECASE,
+                ).strip() or clarified_text
+
+                updated_intents = []
+                for orig in clarification.original_intents:
+                    if orig.match_text.lower() == clarification.failed_match_text.lower():
+                        updated_intents.append(ExtractedIntent(
+                            action=orig.action,
+                            entity=orig.entity,
+                            match_text=clarified_text,
+                            match_field=orig.match_field,
+                            update_field=orig.update_field,
+                            update_value=orig.update_value,
+                            bulk=orig.bulk,
+                            confidence=orig.confidence,
+                        ))
+                    else:
+                        updated_intents.append(orig)
+
+                # Re-run tool call generation with the updated intents
+                all_tcs: list[dict[str, Any]] = []
+                for sub in updated_intents:
+                    sub_tcs = await _intent_to_tool_calls(
+                        sub, facts_section,
+                        household_id=household_id, user_id=user_id,
+                    )
+                    if sub_tcs:
+                        all_tcs.extend(sub_tcs)
+
+                if all_tcs and pending_key:
+                    extracted_intent = updated_intents[0]
+                    pending_match_ids = _match_ids_from_tool_calls(
+                        [tc for tc in all_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
+                    )
+                    _stash_pending_confirmation(
+                        conversation_id=pending_key,
+                        intent=extracted_intent,
+                        match_ids=pending_match_ids,
+                        tool_calls=all_tcs,
+                    )
+                    preview = _format_plan_preview(updated_intents, pending_match_ids)
+                    return _lf_return({"ok": True, "text": preview})
+
         # ── Structured intent extraction ─────────────────────────────
         # If we can extract a structured intent with high confidence, convert
         # it directly to tool calls and skip the main LLM call entirely.
@@ -4358,6 +4413,15 @@ async def chat_respond(
                             args = no_match_tcs[0].get("args") or {}
                             keywords = args.get("keywords") or [extracted_intent.match_text]
                             match_term = keywords[0] if keywords else extracted_intent.match_text
+                            # Stash the original intents so the user's clarification reply
+                            # can be interpreted in context
+                            if pending_key:
+                                _stash_clarification(
+                                    conversation_id=pending_key,
+                                    original_intents=intent_list,
+                                    failed_match_text=match_term,
+                                    question_type="space_not_found",
+                                )
                             final = _format_no_match_with_suggestions(match_term, facts_section)
                             return _lf_return({"ok": True, "text": final})
 
@@ -5011,6 +5075,47 @@ _pending_confirmations: dict[str, _PendingConfirmation] = {}
 # we ask clarifying questions up to MAX_CLARIFICATION_TURNS, then guide to UI.
 _clarification_counts: dict[str, int] = {}
 MAX_CLARIFICATION_TURNS = 3
+
+# ── Pending clarification context ────────────────────────────────────
+# When the agent asks a clarifying question (e.g., "which bathroom?"),
+# stash the original intent so the user's reply can be interpreted
+# in context without re-extracting from scratch.
+
+@dataclass
+class _PendingClarification:
+    """Stashed context when the agent asked for clarification."""
+    original_intents: list[ExtractedIntent]
+    failed_match_text: str  # the term that didn't match
+    question_type: str  # "space_not_found", "helper_not_found", "ambiguous"
+    expires_at: float
+
+_pending_clarifications: dict[str, _PendingClarification] = {}
+PENDING_CLARIFICATION_TTL_SECONDS = 300
+
+def _stash_clarification(
+    conversation_id: str,
+    original_intents: list[ExtractedIntent],
+    failed_match_text: str,
+    question_type: str,
+) -> None:
+    import time as _time
+    _pending_clarifications[conversation_id] = _PendingClarification(
+        original_intents=list(original_intents),
+        failed_match_text=failed_match_text,
+        question_type=question_type,
+        expires_at=_time.monotonic() + PENDING_CLARIFICATION_TTL_SECONDS,
+    )
+
+def _take_clarification(conversation_id: str) -> _PendingClarification | None:
+    if not conversation_id:
+        return None
+    import time as _time
+    pending = _pending_clarifications.pop(conversation_id, None)
+    if pending is None:
+        return None
+    if _time.monotonic() > pending.expires_at:
+        return None
+    return pending
 
 
 _CONFIRM_RE = re.compile(

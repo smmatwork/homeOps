@@ -154,6 +154,55 @@ Level 3: COMMUNITY
 
 3. **Data compounds** — every chore completed, every helper check-in, every maintenance cycle completed teaches the agent about that household. After 6 months, the agent knows more about the home's operational patterns than the owner does.
 
+### The Platform Play — Community Signals as a Micro-Startup Engine
+
+This is the highest-leverage part of the business. HomeOps doesn't just serve households — it **creates a real-time demand signal** that enables an entirely new category of hyperlocal micro-startups.
+
+**How community signals work:**
+
+When 30%+ of a gated community is on HomeOps, the system knows — in aggregate, anonymized — what the community needs:
+
+```
+Signal: "23 homes need solar panel cleaning this month"
+Signal: "14 homes have RO filters due for replacement"
+Signal: "8 homes need pre-monsoon terrace waterproofing"
+Signal: "31 homes are low on rice, cooking oil, and dal"
+```
+
+**This demand signal is an open API.** Any entrepreneur can build on it:
+
+| Micro-startup opportunity | Signal they consume | Business model |
+|---|---|---|
+| **Solar panel washing crew** | "N homes need panel cleaning in [society]" | Service 20 homes/day at ₹300/panel vs. ₹800 individual rate |
+| **RO filter subscription service** | "N homes have [brand] purifier, filter due" | Bulk-buy filters at 40% discount, install same-day |
+| **Monsoon-prep contractor** | "N homes need waterproofing + drain cleaning" | Bundle 3 services, bid once for the whole block |
+| **Grocery co-op** | "N homes need [rice/oil/dal] this week" | Direct-from-mill bulk order, 25-35% cheaper than retail |
+| **Festival prep service** | "Diwali in 3 weeks, N homes need deep clean + painting" | Assemble a crew, service an entire floor in one day |
+| **Appliance AMC aggregator** | "N homes have [brand] AC, service due Q2" | Negotiate fleet rate with brand service center |
+
+**Why this matters for investors:**
+
+1. **HomeOps becomes a platform, not just an app.** Every micro-startup built on the signal API increases the value of the network — more services available → more households join → richer signals → more startups.
+
+2. **Zero marginal cost per startup.** HomeOps doesn't need to build the solar cleaning crew or the grocery co-op. The API exposes the demand; entrepreneurs do the rest. HomeOps takes 2-5% of transactions as a platform fee.
+
+3. **Breaks the aggregator monopoly.** Today, UrbanClap/Amazon Home are the only way to discover demand. They charge 30-40% and control which providers get visibility. HomeOps's open signal API lets **any** local entrepreneur compete — the signal is the same for everyone, the best service wins.
+
+4. **Consumable procurement is recurring and high-frequency.** Grocery and household supplies are ordered weekly. If 200 homes in a society aggregate their staple orders (rice, oil, dal, cleaning supplies), they bypass the retail markup entirely — **direct from wholesaler/mill**. This is a ₹50,000-80,000/year savings per household on groceries alone.
+
+5. **Creates local employment.** Every micro-startup is 2-10 local jobs. A society of 500 homes can sustain 15-20 hyperlocal service businesses — solar crew, plumber, electrician, gardener, grocery co-op, appliance service. These are **real businesses with real margins**, not gig economy race-to-the-bottom.
+
+**The flywheel:**
+
+```
+More households → richer demand signals → more micro-startups
+→ better/cheaper services → more households join
+→ community becomes self-sufficient
+→ HomeOps becomes the invisible infrastructure
+```
+
+This is the **Shopify model for household services**: HomeOps doesn't provide the service — it provides the demand signal, the trust layer, and the transaction rail. Entrepreneurs build businesses on top.
+
 ### Traction & Ask
 
 | Metric | Current | 12-month target |

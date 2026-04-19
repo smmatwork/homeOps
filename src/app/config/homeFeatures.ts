@@ -62,10 +62,12 @@ export const HOME_FEATURES: HomeFeatureDef[] = [
   { key: "generator", label: "Generator", labelHi: "जनरेटर", labelKn: "ಜನರೇಟರ್", group: "power", homeTypes: ["villa", "independent_house"] },
 
   // Outdoor & Exterior
+  { key: "bicycle", label: "Bicycle", labelHi: "साइकिल", labelKn: "ಬೈಸಿಕಲ್", group: "outdoor", hasQuantity: true, quantityLabel: "Bicycles" },
   { key: "garden", label: "Garden / Lawn", labelHi: "बगीचा / लॉन", labelKn: "ತೋಟ / ಲಾನ್", group: "outdoor" },
   { key: "garden_irrigation", label: "Garden Irrigation System", labelHi: "बगीचा सिंचाई प्रणाली", labelKn: "ತೋಟ ನೀರಾವರಿ ವ್ಯವಸ್ಥೆ", group: "outdoor" },
   { key: "swimming_pool", label: "Swimming Pool", labelHi: "स्विमिंग पूल", labelKn: "ಈಜುಕೊಳ", group: "outdoor", homeTypes: ["villa", "villa_with_pool", "independent_house", "penthouse"] },
   { key: "wood_flooring", label: "Wood / Laminate Flooring", labelHi: "लकड़ी / लैमिनेट फ़्लोरिंग", labelKn: "ಮರ / ಲ್ಯಾಮಿನೇಟ್ ಫ್ಲೋರಿಂಗ್", group: "outdoor" },
+  { key: "carpet_flooring", label: "Carpet / Area Rugs", labelHi: "कालीन / एरिया रग", labelKn: "ಕಾರ್ಪೆಟ್ / ಏರಿಯಾ ರಗ್", group: "outdoor" },
 
   // Safety & Security
   { key: "cctv_system", label: "CCTV Cameras", labelHi: "CCTV कैमरा", labelKn: "CCTV ಕ್ಯಾಮೆರಾ", group: "safety", hasQuantity: true, quantityLabel: "Cameras" },

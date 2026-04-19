@@ -8,8 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
+# Copy all application code (main + channel dispatcher + adapters)
 COPY main.py ./main.py
-COPY .env* ./
+COPY channel_dispatcher.py ./channel_dispatcher.py
+COPY channel_adapters/ ./channel_adapters/
 
 EXPOSE 8011
 

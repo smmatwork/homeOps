@@ -19,6 +19,7 @@ import {
   People,
 } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
+import { CognitiveLoadCard } from "./CognitiveLoadCard";
 
 export function OwnerAnalytics() {
   const { t } = useI18n();
@@ -97,6 +98,11 @@ export function OwnerAnalytics() {
             </CardContent>
           </Card>
         ))}
+      </Box>
+
+      {/* O1 Cognitive Load Metric */}
+      <Box mb={4}>
+        <CognitiveLoadCard />
       </Box>
 
       <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(300px, 1fr))" gap={4}>

@@ -68,6 +68,7 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "sweep", cadence: "weekly_sat", category: "outdoor", minutes: 20 },
       { suffix: "cobweb removal and drain check", cadence: "monthly", category: "outdoor", minutes: 20 },
       { suffix: "furniture wipe", cadence: "weekly_sat", category: "outdoor", minutes: 10 },
+      { suffix: "cushion air and clean", cadence: "biweekly_sat", category: "outdoor", minutes: 15 },
     ],
   },
   {
@@ -104,6 +105,8 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "deep clean (cabinets, tiles, grout)", cadence: "weekly_sat", category: "kitchen", minutes: 45 },
       { suffix: "chimney and hob clean", cadence: "biweekly_sat", category: "kitchen", minutes: 30 },
       { suffix: "fridge clean and organize", cadence: "monthly", category: "organizing", minutes: 30 },
+      { suffix: "ceiling fan dusting", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
+      { suffix: "window and glass clean", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
     ],
   },
   {
@@ -122,6 +125,8 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "dust surfaces and furniture", cadence: "weekly_wed", category: "cleaning", minutes: 15 },
       { suffix: "wardrobe organize", cadence: "monthly", category: "organizing", minutes: 30 },
       { suffix: "ceiling fan dusting", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
+      { suffix: "mirror and glass clean", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
+      { suffix: "carpet/rug vacuum", cadence: "weekly_thu", category: "cleaning", minutes: 15 },
     ],
   },
   {
@@ -133,6 +138,7 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "sofa and upholstery wipe", cadence: "biweekly_sat", category: "cleaning", minutes: 20 },
       { suffix: "carpet/rug vacuum", cadence: "weekly_thu", category: "cleaning", minutes: 15 },
       { suffix: "cobweb removal", cadence: "monthly", category: "cleaning", minutes: 10 },
+      { suffix: "ceiling fan dusting", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
     ],
   },
   {
@@ -140,6 +146,7 @@ const ROOM_RULES: RoomRule[] = [
     chores: [
       { suffix: "wipe table and chairs", cadence: "daily", category: "cleaning", minutes: 10 },
       { suffix: "sweep and mop floor", cadence: "daily", category: "cleaning", minutes: 10 },
+      { suffix: "ceiling fan dusting", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
     ],
   },
   // balcony, terrace, garden rules are at the top of the array (before bedroom)
@@ -164,6 +171,8 @@ const ROOM_RULES: RoomRule[] = [
       { suffix: "dust desk, shelves, books", cadence: "weekly_wed", category: "cleaning", minutes: 15 },
       { suffix: "sweep and mop floor", cadence: "daily", category: "cleaning", minutes: 10 },
       { suffix: "wipe electronics and screens", cadence: "weekly_sat", category: "cleaning", minutes: 10 },
+      { suffix: "ceiling fan dusting", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
+      { suffix: "mirror and glass clean", cadence: "biweekly_sat", category: "cleaning", minutes: 10 },
     ],
   },
   {
@@ -301,6 +310,22 @@ export function generateChoreRecommendations(input: GeneratorInput): GeneratedCh
   if (feats.has("swimming_pool")) {
     chores.push({ title: "Check pool water level and clarity", space: "Pool", cadence: "daily", category: "outdoor", estimatedMinutes: 10 });
     chores.push({ title: "Skim pool debris", space: "Pool", cadence: "daily", category: "outdoor", estimatedMinutes: 15 });
+  }
+  if (feats.has("bicycle")) {
+    chores.push({ title: "Bicycle chain clean and lube", space: "Garage", cadence: "monthly", category: "maintenance", estimatedMinutes: 15 });
+    chores.push({ title: "Bicycle tyre pressure check", space: "Garage", cadence: "biweekly_sat", category: "maintenance", estimatedMinutes: 5 });
+  }
+  if (feats.has("wood_flooring")) {
+    chores.push({ title: "Wood floor polish and condition check", space: "General", cadence: "monthly", category: "maintenance", estimatedMinutes: 30 });
+  }
+  if (feats.has("carpet_flooring")) {
+    chores.push({ title: "Carpet deep clean (all rooms)", space: "General", cadence: "monthly", category: "cleaning", estimatedMinutes: 45 });
+  }
+  if (feats.has("cctv_system")) {
+    chores.push({ title: "CCTV lens clean and angle check", space: "General", cadence: "monthly", category: "maintenance", estimatedMinutes: 15 });
+  }
+  if (feats.has("washing_machine")) {
+    chores.push({ title: "Washing machine drum clean (hot cycle)", space: "General", cadence: "monthly", category: "maintenance", estimatedMinutes: 15 });
   }
 
   // ── Kids-specific chores ───────────────────────────────────────

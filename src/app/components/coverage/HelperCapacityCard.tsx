@@ -67,6 +67,7 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<CapacitySummary | null>(null);
   const [showRebalance, setShowRebalance] = useState(false);
+  const [optimizerHelperFilter, setOptimizerHelperFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!householdId) { setLoading(false); return; }
@@ -218,8 +219,10 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
   if (showRebalance) {
     return (
       <WorkloadOptimizer
+        initialHelperFilter={optimizerHelperFilter}
         onDone={() => {
           setShowRebalance(false);
+          setOptimizerHelperFilter(null);
           void load();
         }}
       />
@@ -274,9 +277,13 @@ export function HelperCapacityCard({ refreshKey = 0 }: { refreshKey?: number }) 
             </Alert>
           ))}
 
-          {/* Per-helper bars */}
+          {/* Per-helper bars — click to optimize that helper */}
           {summary.helpers.map((h) => (
-            <Box key={h.id}>
+            <Box
+              key={h.id}
+              onClick={() => { setOptimizerHelperFilter(h.id); setShowRebalance(true); }}
+              sx={{ cursor: "pointer", p: 1, mx: -1, borderRadius: 1, "&:hover": { bgcolor: "action.hover" } }}
+            >
               <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Typography variant="body2" fontWeight={600}>{h.name}</Typography>

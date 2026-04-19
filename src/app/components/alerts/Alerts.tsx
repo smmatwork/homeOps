@@ -45,6 +45,10 @@ type AlertRow = {
   status: string;
   created_at: string;
   metadata: Record<string, unknown> | null;
+  justification: string | null;
+  category: string | null;
+  read_at: string | null;
+  dismissed_at: string | null;
 };
 
 function localDateTimeLabel(iso: string | null): string {
@@ -81,7 +85,7 @@ export function Alerts() {
       setLoadError(null);
       const { data, error } = await supabase
         .from("alerts")
-        .select("id,title,body,severity,status,created_at,metadata")
+        .select("id,title,body,severity,status,created_at,metadata,justification,category,read_at,dismissed_at")
         .eq("household_id", householdId.trim())
         .order("created_at", { ascending: false })
         .limit(50);
@@ -125,7 +129,24 @@ export function Alerts() {
     () => (filter === "all" ? alerts : alerts.filter((a) => alertType(a) === filter)),
     [alerts, filter],
   );
-  const unreadCount = 0;
+  const unreadCount = alerts.filter((a) => !a.read_at && !a.dismissed_at).length;
+
+  const markAsRead = async (alertId: string) => {
+    await supabase.from("alerts").update({ read_at: new Date().toISOString() }).eq("id", alertId);
+    setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, read_at: new Date().toISOString() } : a));
+  };
+
+  const dismissAlert = async (alertId: string) => {
+    await supabase.from("alerts").update({ dismissed_at: new Date().toISOString() }).eq("id", alertId);
+    setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, dismissed_at: new Date().toISOString() } : a));
+  };
+
+  const markAllRead = async () => {
+    const unreadIds = alerts.filter((a) => !a.read_at).map((a) => a.id);
+    if (unreadIds.length === 0) return;
+    await supabase.from("alerts").update({ read_at: new Date().toISOString() }).in("id", unreadIds);
+    setAlerts((prev) => prev.map((a) => ({ ...a, read_at: a.read_at ?? new Date().toISOString() })));
+  };
 
   return (
     <Box p={4}>
@@ -145,7 +166,7 @@ export function Alerts() {
           )}
         </Box>
         <Box display="flex" gap={2}>
-          <Button variant="outlined" startIcon={<CheckCircle />}>
+          <Button variant="outlined" startIcon={<CheckCircle />} onClick={() => void markAllRead()} disabled={unreadCount === 0}>
             {t("alerts.mark_all_read")}
           </Button>
           <Button variant="contained" startIcon={<AddAlert />} onClick={() => setDialogOpen(true)}>
@@ -172,23 +193,36 @@ export function Alerts() {
         {loadError ? (
           <Typography color="error">{loadError}</Typography>
         ) : null}
-        {filteredAlerts.map((alert) => (
-          <Card key={alert.id} variant="outlined">
+        {filteredAlerts.filter((a) => !a.dismissed_at).map((alert) => (
+          <Card key={alert.id} variant="outlined" sx={{ opacity: alert.read_at ? 0.75 : 1 }}>
             <CardContent>
-              <Box display="flex" alignItems="center" gap={2}>
+              <Box display="flex" alignItems="flex-start" gap={2}>
                 {getAlertIcon(alertType(alert))}
                 <Box flex={1}>
-                  <Typography variant="h6">{alert.title}</Typography>
+                  <Typography variant="h6" fontWeight={alert.read_at ? 400 : 700}>{alert.title}</Typography>
                   <Typography variant="body2" color="textSecondary">
                     {alert.body ?? ""}
                   </Typography>
-                  <Typography variant="caption" color="textSecondary">
+                  {alert.justification && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontStyle: "italic" }}>
+                      Why: {alert.justification}
+                    </Typography>
+                  )}
+                  <Typography variant="caption" color="textSecondary" sx={{ display: "block", mt: 0.5 }}>
                     {localDateTimeLabel(alert.created_at)}
+                    {alert.category && ` · ${alert.category}`}
                   </Typography>
                 </Box>
-                <IconButton>
-                  <MoreVert />
-                </IconButton>
+                <Box display="flex" gap={0.5}>
+                  {!alert.read_at && (
+                    <IconButton size="small" title="Mark as read" onClick={() => void markAsRead(alert.id)}>
+                      <CheckCircle fontSize="small" />
+                    </IconButton>
+                  )}
+                  <IconButton size="small" title="Dismiss" onClick={() => void dismissAlert(alert.id)}>
+                    <Delete fontSize="small" />
+                  </IconButton>
+                </Box>
               </Box>
             </CardContent>
           </Card>

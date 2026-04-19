@@ -37,6 +37,7 @@ import {
 
 interface WorkloadOptimizerProps {
   onDone?: () => void;
+  initialHelperFilter?: string | null;
 }
 
 interface ChoreEntry {
@@ -58,7 +59,19 @@ interface HelperEntry {
   capacityMinutes: number;
 }
 
-type Step = "loading" | "gap" | "cadence" | "skip" | "redistribute" | "applying" | "done";
+type Step = "loading" | "gap" | "strategies" | "cadence" | "skip" | "redistribute" | "applying" | "done";
+
+interface Strategy {
+  key: string;
+  label: string;
+  description: string;
+  projectedLoad: number;
+  projectedGap: number;
+  changes: Record<string, string>; // choreId → newCadence
+  skipIds: Set<string>;
+  changeCount: number;
+  skipCount: number;
+}
 
 const CADENCE_OPTIONS = [
   { value: "daily", label: "Daily", factor: 1 },
@@ -100,7 +113,7 @@ function cadenceLabel(cadence: string): string {
   return cadence.replace(/_/g, " ");
 }
 
-export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
+export function WorkloadOptimizer({ onDone, initialHelperFilter }: WorkloadOptimizerProps) {
   const { householdId, accessToken } = useAuth();
   const [step, setStep] = useState<Step>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -111,8 +124,12 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
 
   // Cadence changes: choreId → new cadence
   const [cadenceChanges, setCadenceChanges] = useState<Record<string, string>>({});
+  // Helper reassignments: choreId → new helperId
+  const [helperChanges, setHelperChanges] = useState<Record<string, string>>({});
   // Chores to skip/remove
   const [skipSet, setSkipSet] = useState<Set<string>>(new Set());
+  // Filter cadence view to a specific helper (null = show all)
+  const [helperFilter, setHelperFilter] = useState<string | null>(initialHelperFilter ?? null);
 
   const [applyProgress, setApplyProgress] = useState(0);
   const [applyTotal, setApplyTotal] = useState(0);
@@ -172,7 +189,7 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
     setHelpers(hs);
     setChores(cs);
     setTotalCapacity(hs.reduce((sum, h) => sum + h.capacityMinutes, 0));
-    setStep("gap");
+    setStep(initialHelperFilter ? "cadence" : "gap");
   }, [householdId]);
 
   useEffect(() => { void load(); }, [load]);
@@ -193,6 +210,104 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
   const projectedGap = projectedLoad - totalCapacity;
   const savedMinutes = currentTotalLoad - projectedLoad;
 
+  // ── Compute optimization strategies ─────────────────────────────
+
+  const computeStrategies = (): Strategy[] => {
+    if (totalCapacity <= 0 || currentTotalLoad <= totalCapacity) return [];
+
+    const strategies: Strategy[] = [];
+
+    // Strategy 1: Conservative — only reduce daily → alternate_days
+    const conservative: Record<string, string> = {};
+    let consLoad = currentTotalLoad;
+    for (const c of chores.filter((c) => c.cadence === "daily").sort((a, b) => b.dailyLoad - a.dailyLoad)) {
+      if (consLoad <= totalCapacity) break;
+      const saved = c.estimatedMinutes * (1.0 - 0.5); // daily→alternate saves 50%
+      conservative[c.id] = "alternate_days";
+      consLoad -= saved;
+    }
+    strategies.push({
+      key: "conservative",
+      label: "Conservative",
+      description: "Reduce daily chores to alternate days. Keeps weekly and monthly unchanged.",
+      projectedLoad: Math.round(consLoad),
+      projectedGap: Math.round(consLoad - totalCapacity),
+      changes: conservative,
+      skipIds: new Set(),
+      changeCount: Object.keys(conservative).length,
+      skipCount: 0,
+    });
+
+    // Strategy 2: Moderate — daily→alternate, weekly→biweekly for low-priority
+    const moderate: Record<string, string> = {};
+    let modLoad = currentTotalLoad;
+    for (const c of chores.filter((c) => c.cadence === "daily").sort((a, b) => b.dailyLoad - a.dailyLoad)) {
+      const saved = c.estimatedMinutes * 0.5;
+      moderate[c.id] = "alternate_days";
+      modLoad -= saved;
+    }
+    if (modLoad > totalCapacity) {
+      for (const c of chores.filter((c) => c.cadence.startsWith("weekly") && c.priority <= 1).sort((a, b) => b.dailyLoad - a.dailyLoad)) {
+        if (modLoad <= totalCapacity) break;
+        const saved = c.dailyLoad - c.estimatedMinutes * (1 / 12);
+        moderate[c.id] = "biweekly";
+        modLoad -= saved;
+      }
+    }
+    strategies.push({
+      key: "moderate",
+      label: "Moderate",
+      description: "Daily → alternate days. Low-priority weekly → biweekly.",
+      projectedLoad: Math.round(modLoad),
+      projectedGap: Math.round(modLoad - totalCapacity),
+      changes: moderate,
+      skipIds: new Set(),
+      changeCount: Object.keys(moderate).length,
+      skipCount: 0,
+    });
+
+    // Strategy 3: Aggressive — daily→weekly, weekly→biweekly, remove P1 chores
+    const aggressive: Record<string, string> = {};
+    const aggSkips = new Set<string>();
+    let aggLoad = currentTotalLoad;
+    for (const c of chores.filter((c) => c.cadence === "daily").sort((a, b) => b.dailyLoad - a.dailyLoad)) {
+      const saved = c.dailyLoad - c.estimatedMinutes * (1 / 6);
+      aggressive[c.id] = "weekly";
+      aggLoad -= saved;
+    }
+    if (aggLoad > totalCapacity) {
+      for (const c of chores.filter((c) => c.cadence.startsWith("weekly")).sort((a, b) => b.dailyLoad - a.dailyLoad)) {
+        if (aggLoad <= totalCapacity) break;
+        if (aggressive[c.id]) continue; // already changed
+        const saved = c.dailyLoad - c.estimatedMinutes * (1 / 12);
+        aggressive[c.id] = "biweekly";
+        aggLoad -= saved;
+      }
+    }
+    if (aggLoad > totalCapacity) {
+      for (const c of chores.filter((c) => c.priority <= 1).sort((a, b) => a.dailyLoad - b.dailyLoad)) {
+        if (aggLoad <= totalCapacity) break;
+        aggSkips.add(c.id);
+        aggLoad -= c.dailyLoad;
+      }
+    }
+    strategies.push({
+      key: "aggressive",
+      label: "Aggressive",
+      description: "Daily → weekly. Weekly → biweekly. Remove low-priority chores.",
+      projectedLoad: Math.round(aggLoad),
+      projectedGap: Math.round(aggLoad - totalCapacity),
+      changes: aggressive,
+      skipIds: aggSkips,
+      changeCount: Object.keys(aggressive).length,
+      skipCount: aggSkips.size,
+    });
+
+    return strategies;
+  };
+
+  const strategies = step === "gap" || step === "strategies" ? computeStrategies() : [];
+
   // Cadence suggestions: daily/alternate chores sorted by highest daily load
   const cadenceSuggestions = chores
     .filter((c) => ["daily", "alternate_days"].includes(c.cadence) || c.cadence.startsWith("weekly"))
@@ -210,8 +325,9 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
     if (!householdId || !accessToken) return;
 
     const cadenceUpdates = Object.entries(cadenceChanges);
+    const helperUpdates = Object.entries(helperChanges);
     const skips = [...skipSet];
-    const total = cadenceUpdates.length + skips.length;
+    const total = cadenceUpdates.length + helperUpdates.length + skips.length;
     if (total === 0) return;
 
     setStep("applying");
@@ -235,6 +351,31 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
             patch: { metadata: { ...(chore ? { space: chore.space, estimated_minutes: chore.estimatedMinutes } : {}), cadence: newCadence } },
           },
           reason: `Optimize: change "${chore?.title}" from ${chore?.cadence} to ${newCadence}`,
+        },
+      });
+      if (!res.ok) {
+        setError(`Failed on "${chore?.title}": ${"error" in res ? res.error : "unknown"}`);
+        setStep("cadence");
+        return;
+      }
+      i += 1;
+      setApplyProgress(i);
+    }
+
+    // Apply helper reassignments
+    for (const [choreId, newHelperId] of helperUpdates) {
+      const chore = chores.find((c) => c.id === choreId);
+      const res = await executeToolCall({
+        accessToken, householdId, scope: "household",
+        toolCall: {
+          id: `optimize_reassign_${choreId}_${Date.now()}`,
+          tool: "db.update",
+          args: {
+            table: "chores",
+            id: choreId,
+            patch: { helper_id: newHelperId || null },
+          },
+          reason: `Optimize: reassign "${chore?.title}" to ${helpers.find((h) => h.id === newHelperId)?.name ?? "unassigned"}`,
         },
       });
       if (!res.ok) {
@@ -381,16 +522,22 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
 
           {error && <Alert severity="error">{error}</Alert>}
 
-          {/* Per-helper breakdown */}
+          {/* Per-helper breakdown — click to optimize per helper */}
           {helpers.map((h) => {
+            const helperChoreCount = chores.filter((c) => c.helperId === h.id).length;
             const load = chores.filter((c) => c.helperId === h.id).reduce((s, c) => s + c.dailyLoad, 0);
             const pct = h.capacityMinutes > 0 ? Math.round((load / h.capacityMinutes) * 100) : 0;
             return (
-              <Box key={h.id}>
+              <Box
+                key={h.id}
+                onClick={() => { setHelperFilter(h.id); setStep("cadence"); }}
+                sx={{ cursor: "pointer", p: 1, borderRadius: 1, "&:hover": { bgcolor: "action.hover" } }}
+              >
                 <Stack direction="row" justifyContent="space-between" mb={0.5}>
                   <Stack direction="row" spacing={1} alignItems="center">
                     <Typography variant="body2" fontWeight={600}>{h.name}</Typography>
                     <Chip size="small" label={h.type} variant="outlined" sx={{ fontSize: 10 }} />
+                    <Typography variant="caption" color="text.secondary">{helperChoreCount} chores</Typography>
                   </Stack>
                   <Typography variant="caption" color={pct > 100 ? "error.main" : "text.secondary"}>
                     {Math.round(load)}/{h.capacityMinutes} min · {pct}%
@@ -422,7 +569,7 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
 
           <Stack direction="row" spacing={1}>
             {isOver && (
-              <Button variant="contained" color="warning" startIcon={<TrendingDown />} onClick={() => setStep("cadence")}>
+              <Button variant="contained" color="warning" startIcon={<TrendingDown />} onClick={() => setStep("strategies")}>
                 Reduce workload
               </Button>
             )}
@@ -438,23 +585,148 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
     );
   }
 
-  // ── Step 2: Cadence reduction ─────────────────────────────────
+  // ── Step 2a: Strategy selection ──────────────────────────────────
 
-  if (step === "cadence") {
+  if (step === "strategies") {
     return (
       <Card variant="outlined"><CardContent>
         <Stack spacing={3}>
           <Box>
-            <Typography variant="h6" fontWeight={600}>Reduce Frequency</Typography>
+            <Typography variant="h6" fontWeight={600}>Choose an Optimization Strategy</Typography>
             <Typography variant="body2" color="text.secondary">
-              These chores have the highest daily load. Reducing their frequency frees the most time.
-              {savedMinutes > 0 && (
-                <Chip size="small" label={`${Math.round(savedMinutes)} min/day saved so far`} color="success" sx={{ ml: 1, fontSize: 11 }} />
-              )}
+              Your workload is {Math.round(currentTotalLoad)} min/day but capacity is {totalCapacity} min.
+              Pick a strategy to close the {Math.round(gap)} min gap.
             </Typography>
           </Box>
 
           {error && <Alert severity="error">{error}</Alert>}
+
+          {strategies.map((s) => {
+            const withinCapacity = s.projectedGap <= 0;
+            return (
+              <Card
+                key={s.key}
+                variant="outlined"
+                sx={{
+                  cursor: "pointer",
+                  "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" },
+                  borderColor: withinCapacity ? "success.main" : undefined,
+                }}
+                onClick={() => {
+                  setCadenceChanges(s.changes);
+                  setSkipSet(s.skipIds);
+                  setStep("cadence");
+                }}
+              >
+                <CardContent>
+                  <Stack spacing={1}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Typography variant="subtitle1" fontWeight={700}>{s.label}</Typography>
+                        {withinCapacity && <Chip size="small" label="Fits capacity" color="success" />}
+                      </Stack>
+                      <Typography
+                        variant="body2"
+                        fontWeight={600}
+                        color={withinCapacity ? "success.main" : "warning.main"}
+                      >
+                        {s.projectedLoad}/{totalCapacity} min
+                        {withinCapacity ? " — within capacity" : ` — ${s.projectedGap} min over`}
+                      </Typography>
+                    </Stack>
+
+                    <Typography variant="body2" color="text.secondary">{s.description}</Typography>
+
+                    <LinearProgress
+                      variant="determinate"
+                      value={Math.min(100, totalCapacity > 0 ? (s.projectedLoad / totalCapacity) * 100 : 0)}
+                      color={withinCapacity ? "success" : "warning"}
+                      sx={{ height: 6, borderRadius: 1 }}
+                    />
+
+                    <Typography variant="caption" color="text.secondary">
+                      {s.changeCount} frequency change{s.changeCount === 1 ? "" : "s"}
+                      {s.skipCount > 0 && ` · ${s.skipCount} chore${s.skipCount === 1 ? "" : "s"} removed`}
+                    </Typography>
+                  </Stack>
+                </CardContent>
+              </Card>
+            );
+          })}
+
+          <Stack direction="row" spacing={1}>
+            <Button variant="outlined" onClick={() => setStep("gap")}>Back</Button>
+            <Button variant="text" onClick={() => { setCadenceChanges({}); setSkipSet(new Set()); setStep("cadence"); }} sx={{ color: "text.secondary" }}>
+              Custom — adjust manually
+            </Button>
+          </Stack>
+        </Stack>
+      </CardContent></Card>
+    );
+  }
+
+  // ── Step 2b: Cadence reduction (manual fine-tuning) ─────────────
+
+  if (step === "cadence") {
+    const filteredHelper = helperFilter ? helpers.find((h) => h.id === helperFilter) : null;
+    const displayChores = helperFilter
+      ? cadenceSuggestions.filter((c) => c.helperId === helperFilter)
+      : cadenceSuggestions;
+
+    return (
+      <Card variant="outlined"><CardContent>
+        <Stack spacing={3}>
+          <Box>
+            <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+              <Box>
+                <Typography variant="h6" fontWeight={600}>
+                  {filteredHelper ? `${filteredHelper.name}'s Chores` : "Reduce Frequency"}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {filteredHelper
+                    ? `${displayChores.length} chores assigned to ${filteredHelper.name}. Adjust frequency, reassign, or remove.`
+                    : "These chores have the highest daily load. Reducing their frequency frees the most time."}
+                  {savedMinutes > 0 && (
+                    <Chip size="small" label={`${Math.round(savedMinutes)} min/day saved so far`} color="success" sx={{ ml: 1, fontSize: 11 }} />
+                  )}
+                </Typography>
+              </Box>
+              {helperFilter && (
+                <Button size="small" variant="outlined" onClick={() => setHelperFilter(null)} sx={{ whiteSpace: "nowrap" }}>
+                  Show all
+                </Button>
+              )}
+            </Stack>
+          </Box>
+
+          {error && <Alert severity="error">{error}</Alert>}
+
+          {/* Helper filter chips */}
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            <Chip
+              size="small"
+              label="All helpers"
+              color={helperFilter === null ? "primary" : "default"}
+              variant={helperFilter === null ? "filled" : "outlined"}
+              onClick={() => setHelperFilter(null)}
+              sx={{ cursor: "pointer" }}
+            />
+            {helpers.map((h) => {
+              const hLoad = chores.filter((c) => c.helperId === h.id).reduce((s, c) => s + c.dailyLoad, 0);
+              const hPct = h.capacityMinutes > 0 ? Math.round((hLoad / h.capacityMinutes) * 100) : 0;
+              return (
+                <Chip
+                  key={h.id}
+                  size="small"
+                  label={`${h.name} (${hPct}%)`}
+                  color={helperFilter === h.id ? "primary" : hPct > 100 ? "error" : "default"}
+                  variant={helperFilter === h.id ? "filled" : "outlined"}
+                  onClick={() => setHelperFilter(helperFilter === h.id ? null : h.id)}
+                  sx={{ cursor: "pointer" }}
+                />
+              );
+            })}
+          </Stack>
 
           {/* Live projected gap */}
           <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: projectedGap > 0 ? "warning.50" : "success.50", border: "1px solid", borderColor: projectedGap > 0 ? "warning.200" : "success.200" }}>
@@ -475,38 +747,83 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
           {/* Suggestion list */}
           <Box sx={{ maxHeight: 400, overflowY: "auto" }}>
             <Stack spacing={0.75}>
-              {cadenceSuggestions.slice(0, 40).map((c) => {
-                const suggested = suggestCadence(c.cadence)!;
+              {displayChores.slice(0, 50).map((c) => {
+                const isSkipped = skipSet.has(c.id);
                 const currentOverride = cadenceChanges[c.id];
-                const savings = c.dailyLoad - c.estimatedMinutes * cadenceLoadFactor(currentOverride ?? c.cadence);
+                // Effective new cadence: if overridden use that, if unchanged use current
+                const effectiveCadence = currentOverride ?? c.cadence;
+                const savings = c.dailyLoad - (isSkipped ? 0 : c.estimatedMinutes * cadenceLoadFactor(effectiveCadence));
                 return (
-                  <Stack key={c.id} direction="row" spacing={1} alignItems="center"
-                    sx={{ py: 0.75, px: 1, borderRadius: 1, bgcolor: currentOverride ? "success.50" : "transparent" }}>
+                  <Stack key={c.id} direction="row" spacing={0.75} alignItems="center"
+                    sx={{
+                      py: 0.75, px: 1, borderRadius: 1,
+                      bgcolor: isSkipped ? "error.50" : currentOverride ? "success.50" : "transparent",
+                      opacity: isSkipped ? 0.6 : 1,
+                      textDecoration: isSkipped ? "line-through" : "none",
+                    }}>
+                    <Checkbox
+                      size="small"
+                      checked={isSkipped}
+                      onChange={(e) => {
+                        setSkipSet((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(c.id); else next.delete(c.id);
+                          return next;
+                        });
+                      }}
+                      title="Remove this chore"
+                      sx={{ p: 0.25, color: "error.main", "&.Mui-checked": { color: "error.main" } }}
+                    />
                     <Box flex={1} minWidth={0}>
                       <Typography variant="body2" noWrap fontWeight={500} sx={{ fontSize: 13 }}>{c.title}</Typography>
                       <Typography variant="caption" color="text.secondary">
                         {c.space ? `${c.space} · ` : ""}{c.helperName} · {Math.round(c.dailyLoad)} min/day
                       </Typography>
                     </Box>
-                    <Chip size="small" label={cadenceLabel(c.cadence)} variant="outlined" sx={{ fontSize: 10 }} />
-                    <ArrowForward sx={{ fontSize: 14, color: "text.secondary" }} />
-                    <TextField
-                      select size="small" value={currentOverride ?? suggested}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === c.cadence) {
-                          setCadenceChanges((prev) => { const n = { ...prev }; delete n[c.id]; return n; });
-                        } else {
-                          setCadenceChanges((prev) => ({ ...prev, [c.id]: val }));
-                        }
-                      }}
-                      sx={{ minWidth: 140 }}
-                      SelectProps={{ sx: { fontSize: 11 } }}
-                    >
-                      {CADENCE_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value} sx={{ fontSize: 12 }}>{o.label}</MenuItem>)}
-                    </TextField>
-                    {currentOverride && savings > 0 && (
-                      <Typography variant="caption" color="success.main" sx={{ minWidth: 50, textAlign: "right" }}>
+                    {!isSkipped && (
+                      <>
+                        <TextField
+                          select size="small"
+                          value={helperChanges[c.id] ?? c.helperId ?? ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === (c.helperId ?? "")) {
+                              setHelperChanges((prev) => { const n = { ...prev }; delete n[c.id]; return n; });
+                            } else {
+                              setHelperChanges((prev) => ({ ...prev, [c.id]: val }));
+                            }
+                          }}
+                          sx={{ minWidth: 100 }}
+                          SelectProps={{ sx: { fontSize: 11 } }}
+                        >
+                          <MenuItem value="" sx={{ fontSize: 11, color: "text.secondary" }}><em>None</em></MenuItem>
+                          {helpers.map((h) => (
+                            <MenuItem key={h.id} value={h.id} sx={{ fontSize: 11 }}>{h.name}</MenuItem>
+                          ))}
+                        </TextField>
+                        <Chip size="small" label={cadenceLabel(c.cadence)} variant="outlined" sx={{ fontSize: 10 }} />
+                        <ArrowForward sx={{ fontSize: 14, color: "text.secondary" }} />
+                        <TextField
+                          select size="small" value={effectiveCadence}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === c.cadence) {
+                              setCadenceChanges((prev) => { const n = { ...prev }; delete n[c.id]; return n; });
+                            } else {
+                              setCadenceChanges((prev) => ({ ...prev, [c.id]: val }));
+                            }
+                          }}
+                          sx={{ minWidth: 130 }}
+                          SelectProps={{ sx: { fontSize: 11 } }}
+                        >
+                          {CADENCE_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value} sx={{ fontSize: 12 }}>
+                            {o.value === c.cadence ? `${o.label} (keep)` : o.label}
+                          </MenuItem>)}
+                        </TextField>
+                      </>
+                    )}
+                    {savings > 0 && (
+                      <Typography variant="caption" color={isSkipped ? "error.main" : "success.main"} sx={{ minWidth: 50, textAlign: "right" }}>
                         -{Math.round(savings)} min
                       </Typography>
                     )}
@@ -526,10 +843,10 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
                 Looks good — redistribute
               </Button>
             )}
-            <Button variant="outlined" onClick={() => setStep("gap")}>Back</Button>
+            <Button variant="outlined" onClick={() => setStep("strategies")}>Back to strategies</Button>
             {Object.keys(cadenceChanges).length > 0 && (
               <Button variant="text" color="success" onClick={() => void applyChanges()}>
-                Apply {Object.keys(cadenceChanges).length} changes now
+                Apply {Object.keys(cadenceChanges).length + Object.keys(helperChanges).length + skipSet.size} changes now
               </Button>
             )}
           </Stack>
@@ -606,7 +923,7 @@ export function WorkloadOptimizer({ onDone }: WorkloadOptimizerProps) {
             <Button variant="contained" color={projectedGap > 0 ? "warning" : "success"}
               onClick={() => void applyChanges()}
               disabled={Object.keys(cadenceChanges).length === 0 && skipSet.size === 0}>
-              Apply {Object.keys(cadenceChanges).length + skipSet.size} changes
+              Apply {Object.keys(cadenceChanges).length + Object.keys(helperChanges).length + skipSet.size} changes
             </Button>
             <Button variant="outlined" onClick={() => setStep("cadence")}>Back</Button>
           </Stack>
