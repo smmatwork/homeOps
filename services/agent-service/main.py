@@ -1302,119 +1302,16 @@ def _looks_like_chain_of_thought(text: str) -> bool:
 
 # ── #2: Deterministic intent classifier ─────────────────────────────────────
 
-INTENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    # Most specific first — order matters (first match wins)
-    ("complete",      re.compile(r"\b(done|complete|mark\s*(as\s*)?done|finished|complete\s+chore|check\s+off)\b", re.I)),
-    ("bulk_assign",   re.compile(r"\b(assign\s+(all|my|unassigned)|bulk\s+assign|distribute\s+chores|assign\s+chores\s+to\s+(helpers|everyone|members|us))\b", re.I)),
-    ("assign",        re.compile(r"\b(assign|reassign|give\s+to|move\s+to|hand\s+over|transfer\s+to|i'?ll\s+(do|take|handle)\s+(it|this|that)|give\s+it\s+to\s+me|assign\s+to\s+me)\b", re.I)),
-    ("schedule",      re.compile(r"\b(schedule|reschedule|when\s+should|set\s+frequency|change\s+frequency|set\s+day|which\s+day)\b", re.I)),
-    ("update",        re.compile(r"\b(change|update|edit|modify|rename|replace|adjust|remove\s+(the\s+)?(description|title|name|text)|clear\s+(the\s+)?(description|title|name|text))\b", re.I)),
-    ("delete",        re.compile(r"\b(delete|erase|drop)\b", re.I)),
-    ("create",        re.compile(r"\b(create|add|new|plan|set\s*up|insert)\b", re.I)),
-    ("query",         re.compile(r"\b(how many|count|list|show|what|which|status|report|summary|view|display|tell\s+me)\b", re.I)),
-]
-
-# ── Compound phrase overrides — run BEFORE the main pattern scan ──────────
-# These catch multi-word phrases that would be mis-classified by single-word
-# matches in INTENT_PATTERNS. Order: most specific first.
-_COMPOUND_OVERRIDES: list[tuple[str, re.Pattern[str]]] = [
-    # "check off" = complete, not query (bare "check" matches query)
-    ("complete",  re.compile(r"\bcheck\s+off\b", re.I)),
-    # "set up" = create, not update (bare "set" matches update)
-    ("create",    re.compile(r"\bset\s*up\b", re.I)),
-    # "remove the description" / "clear the description" = update, not delete
-    ("update",    re.compile(r"\b(remove|clear)\s+(the\s+)?(description|title|name|text)\b", re.I)),
-    # "cancel chore" = delete, but "cancel my subscription" is a query
-    ("delete",    re.compile(r"\b(cancel|remove)\s+(this\s+|the\s+|my\s+)?(chore|task|item)\b", re.I)),
-    # "remove chore" = delete (not update)
-    ("delete",    re.compile(r"\b(remove|cancel)\b(?!.*\b(description|title|name|text)\b)", re.I)),
-    # "add more helpers" or "add a helper" = helper management, not chore create
-    # (routed via helper-intent check downstream, but classify as create)
-    # "check status" / "check how many" = query
-    ("query",     re.compile(r"\bcheck\s+(status|how|what|which|if)\b", re.I)),
-    # bare "check" when alone or at end = query
-    ("query",     re.compile(r"\bcheck\b", re.I)),
-    # "assign to me" / "I'll do it" / "I'll take care of it" = assign (self-assignment)
-    ("assign",    re.compile(r"\b(assign\s+(it\s+)?to\s+me|i'?ll\s+(do|take|handle)\b)", re.I)),
-]
-
-def classify_intent(text: str) -> str:
-    """Classify user message into an intent. Returns the first match or 'unknown'.
-
-    Uses a two-pass strategy:
-    1. Compound phrase overrides (multi-word patterns that would be mis-classified
-       by single-word matches).
-    2. Standard intent patterns (first match wins).
-    """
-    t = (text or "").strip().lower()
-    if not t:
-        return "unknown"
-
-    # Pass 1: compound phrase overrides (most specific multi-word patterns)
-    for intent, pattern in _COMPOUND_OVERRIDES:
-        if pattern.search(t):
-            return intent
-
-    # Pass 2: standard intent patterns (first match wins)
-    for intent, pattern in INTENT_PATTERNS:
-        if pattern.search(t):
-            return intent
-    return "unknown"
-
-def intent_specific_instruction(intent: str) -> str:
-    """Return an additional system instruction tailored to the classified intent."""
-    if intent == "update":
-        return (
-            "\nThe user wants to UPDATE an existing record. "
-            "Step 1: Use db.select to find the matching record by title/name. "
-            "Step 2: Use db.update with the record's id and the patch. "
-            "Do NOT use db.delete. Do NOT invent record IDs.\n"
-        )
-    if intent == "delete":
-        return (
-            "\nThe user wants to DELETE records. "
-            "Step 1: Use db.select to find matching records. "
-            "Step 2: Use db.delete with each record's id. "
-            "Do NOT use db.update.\n"
-        )
-    if intent == "query":
-        return (
-            "\nThe user wants to READ/QUERY data. "
-            "Use db.select or query.rpc to fetch the data. "
-            "Do NOT use db.insert, db.update, or db.delete.\n"
-        )
-    if intent == "create":
-        return (
-            "\nThe user wants to CREATE new records. "
-            "Use db.insert to create them. "
-            "Do NOT use db.update or db.delete.\n"
-        )
-    if intent == "complete":
-        return (
-            "\nThe user wants to mark a chore as DONE. "
-            "Use query.rpc with name='complete_chore_by_query' and the chore title as p_query.\n"
-        )
-    if intent == "assign":
-        return (
-            "\nThe user wants to ASSIGN or REASSIGN a chore to a helper or a household member. "
-            "The assignee can be a helper (from the Helpers list) OR a household person/member "
-            "(from the People list). If the user says 'assign to me' or 'I'll do it', the "
-            "assignee is the current user. "
-            "Use query.rpc with name='reassign_chore_by_query' or 'assign_or_create_chore'.\n"
-        )
-    if intent == "bulk_assign":
-        return (
-            "\nThe user wants to BULK ASSIGN multiple chores to helpers or household members. "
-            "Assignees can be helpers OR household people/members. "
-            "First use query.rpc with name='list_chores_enriched' to find unassigned chores. "
-            "Then use query.rpc with name='apply_chore_assignments' to assign them in bulk.\n"
-        )
-    if intent == "schedule":
-        return (
-            "\nThe user wants to SCHEDULE or RESCHEDULE chores. "
-            "Use db.update to set due_at and/or metadata.cadence on the relevant chore(s).\n"
-        )
-    return ""
+from intent_registry import (
+    classify_intent,
+    get_intent_def,
+    get_llm_hint as intent_specific_instruction,
+    extract_intent as registry_extract_intent,
+    intent_to_tool_calls as registry_intent_to_tool_calls,
+    requires_plan as registry_requires_plan,
+    list_intents,
+    ExtractedIntent as _RegistryExtractedIntent,
+)
 
 
 # ── Structured intent extraction ────────────────────────────────────────────
@@ -1423,7 +1320,8 @@ def intent_specific_instruction(intent: str) -> str:
 
 EXTRACTION_SYSTEM_PROMPT = (
     "You are a structured data extractor for a home management app. "
-    "Given the user's message, extract the intent into JSON.\n\n"
+    "Given the user's message, extract the intent into JSON.\n"
+    "Return ONLY the JSON. No reasoning, no thinking, no explanation.\n\n"
     "If the message contains a SINGLE intent, return ONE JSON object.\n"
     "If the message contains MULTIPLE distinct instructions (e.g., 'assign X to Y and change Z to weekly'), "
     "return a JSON array of objects — one per instruction.\n\n"
@@ -1604,6 +1502,14 @@ async def _extract_structured_intent(
     if not user_text.strip():
         return None
 
+    # Try registry-based extraction first (covers add_space, reassign, complete, etc.)
+    for intent_def_item in __import__("intent_registry").INTENT_REGISTRY:
+        if intent_def_item.extract:
+            hit = intent_def_item.extract(user_text)
+            if hit:
+                print(f"intent_registry_hit", {"intent": intent_def_item.name, "match_text": hit.match_text}, flush=True)
+                return hit
+
     regex_hit = _extract_intent_regex(user_text)
     if regex_hit:
         print(
@@ -1627,12 +1533,14 @@ async def _extract_structured_intent(
             ],
             model=model,
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=1200,
         )
         if not isinstance(raw, str):
             return None
 
-        cleaned = re.sub(r"```json?\s*|\s*```", "", raw).strip()
+        # Strip <think>...</think> blocks the model may produce before the JSON
+        cleaned = _strip_think_blocks(raw).strip()
+        cleaned = re.sub(r"```json?\s*|\s*```", "", cleaned).strip()
 
         # Try parsing as array first (compound intents)
         if cleaned.startswith("["):
@@ -2030,6 +1938,14 @@ async def _intent_to_tool_calls(
     """
     if not extracted.match_text:
         return None
+
+    # Try registry-based tool call builder first
+    registry_result = await registry_intent_to_tool_calls(
+        extracted.action, extracted, facts_section,
+        household_id=household_id, user_id=user_id,
+    )
+    if registry_result is not None:
+        return registry_result
 
     table = "chores" if extracted.entity == "chore" else (
         "helpers" if extracted.entity == "helper" else None
@@ -3553,7 +3469,7 @@ async def chat_respond(
                         if sync_prompt:
                             return _lf_return({"ok": True, "text": sync_prompt})
 
-                    final = _format_execution_result(results, pending.tool_calls, [pending.intent], pending.intent)
+                    final = _format_execution_result(results, pending.tool_calls, [pending.intent], pending.intent, facts=facts_section)
                     return _lf_return({"ok": True, "text": final})
 
                 if _is_cancellation(last_user):
@@ -4368,13 +4284,14 @@ async def chat_respond(
         else:
             messages = [{"role": "system", "content": enhanced_suffix.strip()}] + messages
 
-        # ── Structured intent extraction (for update/edit/rename patterns) ─
+        # ── Structured intent extraction ─────────────────────────────
         # If we can extract a structured intent with high confidence, convert
         # it directly to tool calls and skip the main LLM call entirely.
         # This is faster, more reliable, and avoids hallucination.
-        # Skip in onboarding mode — let the LLM handle everything conversationally.
+        # Runs for ALL intents (except onboarding). If extraction returns None,
+        # falls through to the LLM as before — no downside.
         extracted_intent: ExtractedIntent | None = None
-        if not is_onboarding and intent in ("update",):
+        if not is_onboarding:
             try:
                 raw_intent = await _extract_structured_intent(last_user_text, model, facts_section)
 
@@ -4423,12 +4340,8 @@ async def chat_respond(
                         if no_match_tcs:
                             args = no_match_tcs[0].get("args") or {}
                             keywords = args.get("keywords") or [extracted_intent.match_text]
-                            kw_display = ", ".join(f"\"{k}\"" for k in keywords)
-                            final = (
-                                f"I couldn't find any chores matching {kw_display} in their "
-                                f"title or description. Could you give me the chore title "
-                                f"exactly, or pick from the list with 'show me my chores'?"
-                            )
+                            match_term = keywords[0] if keywords else extracted_intent.match_text
+                            final = _format_no_match_with_suggestions(match_term, facts_section)
                             return _lf_return({"ok": True, "text": final})
 
                         # ── Plan-Confirm-Execute ──────────────────────────
@@ -4458,7 +4371,7 @@ async def chat_respond(
                                 out = {"ok": False, "error": str(e), "tool_call_id": tc.get("id")}
                             results.append(out)
 
-                        final = _format_execution_result(results, deterministic_tcs, intent_list, extracted_intent)
+                        final = _format_execution_result(results, deterministic_tcs, intent_list, extracted_intent, facts=facts_section)
                         return _lf_return({"ok": True, "text": final})
             except Exception as e:
                 logging.warning(f"deterministic intent path failed, falling back to LLM: {e}")
@@ -4841,18 +4754,27 @@ async def chat_respond(
                 correction = str(judge.get("correction", "")).strip()
                 reason = str(judge.get("reason", "")).strip()
 
-                # Fatal failures (wrong action entirely) — block and provide guidance
-                if severity == "fatal":
+                # Fatal or intent_mismatch — return guidance directly
+                # Don't re-run through the LLM (it treats correction prompts as user questions)
+                if severity == "fatal" or failure_type == "intent_mismatch":
                     guidance = correction or reason
+                    if not guidance or "quality check" in guidance.lower():
+                        # Fallback if the Judge produced a generic/meta response
+                        guidance = (
+                            "I wasn't able to do that directly. Could you rephrase your request? "
+                            "For example: \"assign bathroom mopping to Roopa\" or \"make guest bathroom chores weekly\".\n\n"
+                            "For bulk changes, go to **Chores → Coverage → Utilization → Optimize workload**."
+                        )
                     return _lf_return({"ok": True, "text": guidance})
 
-                # Correctable failures — re-run with the correction
+                # Correctable failures (e.g. wrong helper name) — re-run with the correction
                 correction_messages = list(sarvam_messages) + [
                     {"role": "assistant", "content": final_text},
-                    {"role": "user", "content": (
-                        f"QUALITY CHECK FAILED: {reason}\n"
-                        f"Correction needed: {correction}\n"
-                        f"Please provide a corrected response. Use tool_calls if you need to query or update data."
+                    {"role": "system", "content": (
+                        f"INTERNAL CORRECTION (not from the user): {reason}\n"
+                        f"Fix: {correction}\n"
+                        f"Generate a corrected response for the USER's original request. "
+                        f"Do NOT mention this correction to the user. Do NOT ask about quality checks."
                     )},
                 ]
                 parsed_corrected = await _orchestrator_once(correction_messages)
@@ -5145,11 +5067,74 @@ def _match_ids_from_tool_calls(tcs: list[dict[str, Any]]) -> list[tuple[str, str
     return out
 
 
+def _extract_spaces_from_facts(facts: str, keyword: str = "") -> list[str]:
+    """Pull room/space names from the FACTS section, optionally filtered by keyword."""
+    spaces: list[str] = []
+    kw = keyword.lower().strip()
+    for line in (facts or "").split("\n"):
+        # Format: "Spaces: Kitchen, Living Room, Master Bathroom-Attached Master Bedroom, ..."
+        if line.startswith("Spaces:") or line.startswith("Rooms:"):
+            raw = line.split(":", 1)[1].strip()
+            for name in raw.split(","):
+                name = name.strip()
+                if name and (not kw or kw in name.lower()):
+                    spaces.append(name)
+    return spaces
+
+
+def _format_no_match_with_suggestions(
+    match_text: str,
+    facts: str,
+) -> str:
+    """Format a helpful no-match message with similar space/room suggestions."""
+    # Try each word in match_text as a keyword to find similar spaces
+    words = match_text.lower().split() if match_text else []
+    similar: list[str] = []
+    for word in words:
+        if len(word) >= 3:  # skip short words like "the", "a"
+            similar = _extract_spaces_from_facts(facts, word)
+            if similar:
+                break
+
+    add_hint = (
+        f"\n\nIf \"{match_text}\" is a new room that's not in your home profile yet, "
+        f"you can add it from the **Home Profile** page, or say "
+        f"*\"add {match_text} to my home profile\"*."
+    )
+
+    if not similar:
+        # Broader search — get all spaces
+        all_spaces = _extract_spaces_from_facts(facts)
+        if all_spaces:
+            space_list = "\n".join(f"  - {s}" for s in all_spaces[:10])
+            more = f"\n  ...and {len(all_spaces) - 10} more" if len(all_spaces) > 10 else ""
+            return (
+                f"I couldn't find \"{match_text}\" in your home profile. "
+                f"Here are your current rooms:\n{space_list}{more}\n\n"
+                f"Did you mean one of these?"
+                f"{add_hint}"
+            )
+        return (
+            f"I couldn't find \"{match_text}\" in your home profile. "
+            f"Could you give me the exact room name?"
+            f"{add_hint}"
+        )
+
+    space_list = "\n".join(f"  - {s}" for s in similar[:8])
+    return (
+        f"I couldn't find an exact match for \"{match_text}\" in your home profile. "
+        f"Did you mean one of these?\n{space_list}\n\n"
+        f"Tell me which one and I'll proceed."
+        f"{add_hint}"
+    )
+
+
 def _format_rpc_reassign_result(
     results: list[dict[str, Any]],
     intent: "ExtractedIntent",
+    facts: str = "",
 ) -> str | None:
-    """Extract a human-readable message from reassign/bulk_reassign RPC results."""
+    """Extract a human-readable message from reassign/bulk_reassign/add_space RPC results."""
     for r in results:
         if not isinstance(r, dict) or not r.get("ok"):
             continue
@@ -5186,10 +5171,7 @@ def _format_rpc_reassign_result(
                 return f"Done! Unassigned \"{title}\"."
 
             if action == "none_found":
-                return (
-                    f"I couldn't find any chores matching \"{intent.match_text}\". "
-                    f"Could you give me the exact chore title?"
-                )
+                return _format_no_match_with_suggestions(intent.match_text, facts)
 
             if action == "clarify_chore":
                 candidates = row.get("chore_candidates") or []
@@ -5211,6 +5193,19 @@ def _format_rpc_reassign_result(
                     )
                 return f"I couldn't find a helper named \"{intent.update_value}\". Could you check the name?"
 
+            # Add space to profile result
+            if action == "added":
+                space_name = row.get("display_name", intent.match_text)
+                total = row.get("total_spaces", "?")
+                return (
+                    f"Done! Added **{space_name}** to your home profile. "
+                    f"You now have {total} rooms/spaces. "
+                    f"You can now assign chores to this room."
+                )
+            if action == "already_exists":
+                space_name = row.get("display_name", intent.match_text)
+                return f"**{space_name}** already exists in your home profile — no changes needed."
+
     return None
 
 
@@ -5223,7 +5218,9 @@ def _format_plan_preview(
     for i, intent in enumerate(intents, 1):
         action = intent.action.replace("_", " ").capitalize()
         target = intent.match_text or "chores"
-        if intent.action == "reassign" and intent.update_value:
+        if intent.action == "add_space":
+            steps.append(f"{i}. Add **{target}** to your home profile")
+        elif intent.action == "reassign" and intent.update_value:
             steps.append(f"{i}. Assign **{target}** chores to **{intent.update_value}**")
         elif intent.action == "change_cadence" and intent.update_value:
             steps.append(f"{i}. Set **{target}** chores to **{intent.update_value}**")
@@ -5257,6 +5254,7 @@ def _format_execution_result(
     tool_calls: list[dict[str, Any]],
     intent_list: list[ExtractedIntent],
     primary_intent: ExtractedIntent,
+    facts: str = "",
 ) -> str:
     """Format the execution result for display after plan confirmation."""
     update_count = sum(
@@ -5268,7 +5266,7 @@ def _format_execution_result(
 
     if len(intent_list) > 1 and all_ok:
         parts: list[str] = ["Done!"]
-        rpc_msg = _format_rpc_reassign_result(results, primary_intent)
+        rpc_msg = _format_rpc_reassign_result(results, primary_intent, facts)
         if rpc_msg:
             parts.append(rpc_msg)
         if update_count > 0:
@@ -5278,7 +5276,7 @@ def _format_execution_result(
                 parts.append(f"Set {si.match_text} chores to {si.update_value}.")
         return " ".join(parts)
 
-    rpc_final = _format_rpc_reassign_result(results, primary_intent)
+    rpc_final = _format_rpc_reassign_result(results, primary_intent, facts)
     if rpc_final:
         return rpc_final
     if update_count > 0 and primary_intent.update_field and primary_intent.update_value is not None:
@@ -5286,7 +5284,7 @@ def _format_execution_result(
     if update_count > 0 and primary_intent.update_field and primary_intent.update_value is None:
         return f"Done! Cleared the {primary_intent.update_field} of {update_count} chore(s)."
     if all_ok and update_count == 0:
-        return f"I couldn't find any chores matching \"{primary_intent.match_text}\". Could you give me the exact chore title?"
+        return _format_no_match_with_suggestions(primary_intent.match_text, facts)
     if all_ok:
         return f"Done! {primary_intent.action.capitalize()}d \"{primary_intent.match_text}\" successfully."
     errors = [str(r.get("error", "unknown error")) for r in results if not r.get("ok")]

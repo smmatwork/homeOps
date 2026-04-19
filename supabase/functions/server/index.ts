@@ -2910,6 +2910,75 @@ api.post("/chat/append", async (c) => {
   return c.json({ ok: true, conversation_id: conversationId });
 });
 
+api.post("/chat/clear", async (c) => {
+  const devBypassRaw = (optionalEnv("DEV_BYPASS_AUTH") || "").trim().toLowerCase();
+  const devBypass = devBypassRaw === "1" || devBypassRaw === "true" || devBypassRaw === "yes" || devBypassRaw === "y" || devBypassRaw === "on";
+
+  const token = getBearerToken(c.req.raw);
+  if (!token && !devBypass) {
+    return c.json({ error: "Missing authorization header" }, 401);
+  }
+
+  const admin = supabaseAdmin();
+  const actorUserId = devBypass
+    ? devActorUserIdFromRequest(c)
+    : await getAuthedUserId(admin, token as string);
+  if (!actorUserId) {
+    return c.json({ error: "Invalid token" }, 401);
+  }
+
+  let body: { household_id?: string; scope?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const householdId = typeof body.household_id === "string" ? body.household_id.trim() : "";
+  if (!householdId) return c.json({ error: "Missing household_id" }, 400);
+
+  const scope = parseChatScope(typeof body.scope === "string" ? body.scope : null);
+  if (!scope) return c.json({ error: "Missing or invalid scope" }, 400);
+
+  const memberCheck = await isHouseholdMember(admin, householdId, actorUserId);
+  if (!memberCheck.ok) {
+    return c.json({ error: memberCheck.error ?? "User cannot access household" }, 403);
+  }
+
+  // Find the current conversation
+  const convoQuery = admin
+    .from("chat_conversations")
+    .select("id")
+    .eq("household_id", householdId)
+    .eq("scope", scope)
+    .order("created_at", { ascending: true })
+    .limit(1);
+
+  const convoRes =
+    scope === "user"
+      ? await convoQuery.eq("user_id", actorUserId).maybeSingle()
+      : await convoQuery.is("user_id", null).maybeSingle();
+
+  if (convoRes.data?.id) {
+    const oldConvoId = convoRes.data.id as string;
+    // Delete messages and summary for the old conversation
+    await admin.from("chat_messages").delete().eq("conversation_id", oldConvoId);
+    await admin.from("chat_summaries").delete().eq("conversation_id", oldConvoId);
+    await admin.from("chat_conversations").delete().eq("id", oldConvoId);
+  }
+
+  // Create a fresh conversation
+  const { data: newConvo, error: createErr } = await admin
+    .from("chat_conversations")
+    .insert({ household_id: householdId, scope, user_id: scope === "user" ? actorUserId : null })
+    .select("id")
+    .maybeSingle();
+
+  if (createErr) return c.json({ error: createErr.message }, 500);
+
+  return c.json({ ok: true, conversation_id: newConvo?.id ?? "" });
+});
+
 api.get("/agent/helpers", async (c) => {
   const token = getBearerToken(c.req.raw);
   if (!token) {
