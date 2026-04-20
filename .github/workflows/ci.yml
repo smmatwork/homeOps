@@ -25,6 +25,12 @@ jobs:
 
       - name: Run tests
         run: npx vitest run
+        env:
+          # supabaseClient throws on import when these are missing. Tests
+          # don't make real network calls (they mock supabase), so any
+          # non-empty values satisfy the import guard.
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || 'placeholder' }}
 
   agent-service-check:
     name: Agent Service (Python)
