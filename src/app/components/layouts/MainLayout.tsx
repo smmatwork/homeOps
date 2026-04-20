@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Outlet, Link, useLocation, useNavigate } from "react-router";
+import { useOnboardingGate } from "../../hooks/useOnboardingGate";
 import {
   Box,
   Button,
@@ -22,6 +23,8 @@ import {
   Toolbar,
   Typography,
   AppBar,
+  Fab,
+  Zoom,
 } from "@mui/material";
 import {
   Home,
@@ -29,6 +32,7 @@ import {
   MenuBook,
   People,
   NotificationsNone,
+  Timeline,
   Settings,
   Chat,
   BuildCircle,
@@ -39,10 +43,22 @@ import {
   Logout,
   Person,
   Feedback as FeedbackIcon,
+  Science,
+  GridView,
+  Event as EventIcon,
+  Handyman,
+  CalendarMonth,
+  FamilyRestroom,
+  SmartToy,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
+import { ChatInterface } from "../chat/ChatInterface";
+import { useI18n } from "../../i18n";
+import { LanguageSwitcher } from "../LanguageSwitcher";
+import { ProposalsDrawer } from "../replan/ProposalsDrawer";
+import AutoAwesome from "@mui/icons-material/AutoAwesome";
 
 type EscalationChoreRow = {
   id: string;
@@ -54,26 +70,38 @@ type EscalationChoreRow = {
 };
 
 const NAV_ITEMS = [
-  { name: "Dashboard",      path: "/",          icon: Home,            roles: ["household", "admin", "owner", "support"] },
-  { name: "Chores",         path: "/chores",    icon: Assignment,      roles: ["household", "admin"] },
-  { name: "Recipes",        path: "/recipes",   icon: MenuBook,        roles: ["household", "admin"] },
-  { name: "Helpers",        path: "/helpers",   icon: People,          roles: ["household", "admin"] },
-  { name: "Alerts",         path: "/alerts",    icon: NotificationsNone, roles: ["household", "admin", "support"] },
-  { name: "Chat Assistant", path: "/chat",      icon: Chat,            roles: ["household", "admin"] },
-  { name: "Task Status",    path: "/status",    icon: CheckBox,        roles: ["household", "admin", "support"] },
-  { name: "Admin Config",   path: "/admin",     icon: Settings,        roles: ["admin"] },
-  { name: "Analytics",      path: "/analytics", icon: BarChart,        roles: ["owner"] },
-  { name: "Support Panel",  path: "/support",   icon: HeadsetMic,      roles: ["support"] },
+  { key: "nav.dashboard", path: "/", icon: Home, roles: ["household", "admin", "owner", "support"] },
+  { key: "nav.home_profile", path: "/home-profile", icon: Home, roles: ["household", "admin"] },
+  { key: "nav.chores", path: "/chores", icon: Assignment, roles: ["household", "admin"] },
+  { key: "nav.coverage", path: "/coverage", icon: GridView, roles: ["household", "admin"] },
+  { key: "nav.events", path: "/events", icon: EventIcon, roles: ["household", "admin"] },
+  { key: "nav.recipes", path: "/recipes", icon: MenuBook, roles: ["household", "admin"] },
+  { key: "nav.services", path: "/services", icon: Handyman, roles: ["household", "admin"] },
+  { key: "nav.maintenance", path: "/maintenance", icon: CalendarMonth, roles: ["household", "admin"] },
+  { key: "nav.members", path: "/members", icon: FamilyRestroom, roles: ["household", "admin"] },
+  { key: "nav.helpers", path: "/helpers", icon: People, roles: ["household", "admin"] },
+  { key: "nav.alerts", path: "/alerts", icon: NotificationsNone, roles: ["household", "admin", "support"] },
+  { key: "nav.automations", path: "/automations", icon: BuildCircle, roles: ["household", "admin"] },
+  { key: "nav.signals", path: "/signals", icon: Timeline, roles: ["household", "admin"] },
+  { key: "nav.status", path: "/status", icon: CheckBox, roles: ["household", "admin", "support"] },
+  { key: "nav.tests", path: "/tests", icon: Science, roles: ["admin", "owner"] },
+  { key: "nav.admin", path: "/admin", icon: Settings, roles: ["admin"] },
+  { key: "nav.analytics", path: "/analytics", icon: BarChart, roles: ["owner"] },
+  { key: "nav.support", path: "/support", icon: HeadsetMic, roles: ["support"] },
 ];
 
 type Role = "household" | "admin" | "owner" | "support";
 
 export function MainLayout() {
+  const { loading: onboardingLoading } = useOnboardingGate();
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut, user, householdId, accessToken } = useAuth();
+  const { t } = useI18n();
   const [role, setRole] = useState<Role>("household");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [proposalsOpen, setProposalsOpen] = useState(false);
 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
@@ -137,6 +165,7 @@ export function MainLayout() {
       .from("chores")
       .select("id,household_id,title,status,due_at,metadata")
       .eq("household_id", hid)
+      .is("deleted_at", null)
       .neq("status", "completed")
       .not("due_at", "is", null)
       .filter("metadata->>maintenance", "eq", "true")
@@ -259,6 +288,15 @@ export function MainLayout() {
     }
   };
 
+  const openChatDrawer = () => {
+    setChatOpen(true);
+    try {
+      window.dispatchEvent(new Event("homeops:open-agent-setup"));
+    } catch {
+      // ignore
+    }
+  };
+
   const openProfile = async () => {
     setProfileError(null);
     setProfileOpen(true);
@@ -291,7 +329,7 @@ export function MainLayout() {
 
   const submitFeedback = async () => {
     if (!user?.id) {
-      setFeedbackError("Please log in to send feedback.");
+      setFeedbackError(t("auth.login.sign_in"));
       return;
     }
     const rating = typeof feedbackRating === "number" ? Math.floor(feedbackRating) : null;
@@ -348,7 +386,7 @@ export function MainLayout() {
               <ListItemIcon sx={{ minWidth: 36 }}>
                 <Icon fontSize="small" color={isActive ? "primary" : "inherit"} />
               </ListItemIcon>
-              <ListItemText primary={item.name} />
+              <ListItemText primary={t(item.key)} />
             </ListItemButton>
           </ListItem>
         );
@@ -364,7 +402,7 @@ export function MainLayout() {
             HomeOps
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            Household Manager
+            {t("layout.household_manager")}
           </Typography>
         </Box>
       </Toolbar>
@@ -373,7 +411,7 @@ export function MainLayout() {
       </Box>
       <Box sx={{ p: 2, borderTop: "1px solid", borderColor: "divider" }}>
         <Typography variant="caption" color="text.secondary" display="block" gutterBottom>
-          Role (Demo)
+          {t("layout.role_demo")}
         </Typography>
         <Select
           value={role}
@@ -381,10 +419,10 @@ export function MainLayout() {
           fullWidth
           size="small"
         >
-          <MenuItem value="household">Household User</MenuItem>
-          <MenuItem value="admin">Admin</MenuItem>
-          <MenuItem value="owner">Owner / Dev</MenuItem>
-          <MenuItem value="support">Support Staff</MenuItem>
+          <MenuItem value="household">{t("layout.role.household")}</MenuItem>
+          <MenuItem value="admin">{t("layout.role.admin")}</MenuItem>
+          <MenuItem value="owner">{t("layout.role.owner")}</MenuItem>
+          <MenuItem value="support">{t("layout.role.support")}</MenuItem>
         </Select>
 
         <Stack spacing={1} sx={{ mt: 1.5 }}>
@@ -395,7 +433,7 @@ export function MainLayout() {
             onClick={openAgentSetup}
             sx={{ textTransform: "none" }}
           >
-            Agent Setup
+            {t("layout.agent_setup")}
           </Button>
           <Button
             variant="outlined"
@@ -404,7 +442,7 @@ export function MainLayout() {
             onClick={openProfile}
             sx={{ textTransform: "none" }}
           >
-            Profile
+            {t("layout.profile")}
           </Button>
           <Button
             variant="outlined"
@@ -417,7 +455,7 @@ export function MainLayout() {
             }}
             sx={{ textTransform: "none" }}
           >
-            Send feedback
+            {t("layout.send_feedback")}
           </Button>
         </Stack>
 
@@ -428,11 +466,19 @@ export function MainLayout() {
           onClick={onLogout}
           sx={{ mt: 1.5, textTransform: "none" }}
         >
-          Logout
+          {t("common.logout")}
         </Button>
       </Box>
     </>
   );
+
+  if (onboardingLoading) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" height="100vh">
+        <Typography color="text.secondary">{t("common.loading")}</Typography>
+      </Box>
+    );
+  }
 
   return (
     <Box display="flex" height="100vh" overflow="hidden">
@@ -489,13 +535,82 @@ export function MainLayout() {
           flexGrow: 1,
           display: "flex",
           flexDirection: "column",
-          overflow: "hidden",
+          overflowY: "auto",
+          overflowX: "hidden",
           p: 3,
           mt: { xs: 8, md: 0 },
         }}
       >
+        <Box display="flex" justifyContent="flex-end" alignItems="center" gap={1} mb={1}>
+          {location.pathname.startsWith("/chat") ? null : <LanguageSwitcher />}
+          {location.pathname.startsWith("/chat") ? null : (
+            <Button
+              variant="outlined"
+              startIcon={<AutoAwesome fontSize="small" />}
+              onClick={() => setProposalsOpen(true)}
+              sx={{ textTransform: "none" }}
+            >
+              {t("replan.button")}
+            </Button>
+          )}
+        </Box>
         <Outlet />
       </Box>
+
+      {/* Floating AI Agent FAB */}
+      {!location.pathname.startsWith("/chat") && (
+        <Zoom in>
+          <Fab
+            color="primary"
+            onClick={openChatDrawer}
+            sx={{
+              position: "fixed",
+              bottom: 24,
+              right: 24,
+              zIndex: (theme) => theme.zIndex.drawer - 1,
+            }}
+            aria-label={t("layout.ai_agent")}
+          >
+            <SmartToy />
+          </Fab>
+        </Zoom>
+      )}
+
+      <ProposalsDrawer open={proposalsOpen} onClose={() => setProposalsOpen(false)} />
+
+      <Drawer
+        anchor="right"
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        PaperProps={{
+          sx: {
+            width: { xs: "100%", sm: 440 },
+            maxWidth: "100vw",
+            display: "flex",
+            flexDirection: "column",
+          },
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 2, py: 1.25, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}
+        >
+          <Stack direction="row" spacing={1} alignItems="center">
+            <SmartToy sx={{ fontSize: 22, color: "primary.main" }} />
+            <Typography variant="subtitle1" fontWeight={700}>
+              {t("layout.ai_agent")}
+            </Typography>
+          </Stack>
+          <IconButton size="small" onClick={() => setChatOpen(false)} aria-label={t("common.close")}>
+            <span style={{ fontSize: 18 }}>&times;</span>
+          </IconButton>
+        </Stack>
+        <Box sx={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <ChatInterface embedded />
+        </Box>
+      </Drawer>
 
       <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Profile</DialogTitle>

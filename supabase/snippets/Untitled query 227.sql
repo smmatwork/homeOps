@@ -1,3 +1,4 @@
-select id, email, created_at
-from auth.users
-where lower(email) = lower('greetsunshine@gmail.com');
+select id, full_name, created_at
+from public.profiles
+order by created_at desc
+limit 10;

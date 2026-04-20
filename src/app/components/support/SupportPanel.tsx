@@ -25,8 +25,10 @@ import {
   Send,
   Person,
 } from "@mui/icons-material";
+import { useI18n } from "../../i18n";
 
 export function SupportPanel() {
+  const { t } = useI18n();
   const [selectedTicket, setSelectedTicket] = useState<number | null>(null);
 
   const tickets = [
@@ -91,10 +93,10 @@ export function SupportPanel() {
       {/* Header */}
       <Box mb={4}>
         <Typography variant="h4" fontWeight="bold">
-          Support Panel
+          {t("support.title")}
         </Typography>
         <Typography color="textSecondary">
-          Manage and respond to user support requests
+          {t("support.subtitle")}
         </Typography>
       </Box>
 
@@ -106,7 +108,7 @@ export function SupportPanel() {
               {stats.open}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Open Tickets
+              {t("support.open_tickets")}
             </Typography>
           </CardContent>
         </Card>
@@ -116,7 +118,7 @@ export function SupportPanel() {
               {stats.inProgress}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              In Progress
+              {t("support.in_progress")}
             </Typography>
           </CardContent>
         </Card>
@@ -126,7 +128,7 @@ export function SupportPanel() {
               {stats.resolved}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Resolved Today
+              {t("support.resolved_today")}
             </Typography>
           </CardContent>
         </Card>
@@ -136,7 +138,7 @@ export function SupportPanel() {
               {stats.avgResponseTime}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Avg. Response Time
+              {t("support.avg_response_time")}
             </Typography>
           </CardContent>
         </Card>
@@ -145,11 +147,11 @@ export function SupportPanel() {
       <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(300px, 1fr))" gap={4}>
         {/* Tickets List */}
         <Card>
-          <CardHeader title="Support Tickets" subheader="All user support requests" />
+          <CardHeader title={t("support.tickets")} subheader={t("support.subheader")} />
           <Divider />
           <CardContent>
             <TextField
-              placeholder="Search tickets..."
+              placeholder={t("support.search_placeholder")}
               fullWidth
               InputProps={{
                 startAdornment: <Search sx={{ mr: 1, color: "action.active" }} />,
@@ -157,9 +159,9 @@ export function SupportPanel() {
               sx={{ mb: 2 }}
             />
             <Tabs value="all" variant="scrollable">
-              <Tab label="All" value="all" />
-              <Tab label="Open" value="open" />
-              <Tab label="Resolved" value="resolved" />
+              <Tab label={t("support.all")} value="all" />
+              <Tab label={t("support.open")} value="open" />
+              <Tab label={t("support.resolved")} value="resolved" />
             </Tabs>
             <Box mt={2}>
               {tickets.map((ticket) => (
@@ -232,7 +234,7 @@ export function SupportPanel() {
               <Divider />
               <CardContent>
                 <TextField
-                  placeholder="Type your response..."
+                  placeholder={t("support.type_response")}
                   multiline
                   rows={3}
                   fullWidth
@@ -240,15 +242,15 @@ export function SupportPanel() {
                 />
                 <Box display="flex" justifyContent="space-between" alignItems="center">
                   <FormControl size="small" sx={{ minWidth: 150 }}>
-                    <InputLabel>Status</InputLabel>
+                    <InputLabel>{t("support.status")}</InputLabel>
                     <Select defaultValue="in-progress">
-                      <MenuItem value="open">Open</MenuItem>
-                      <MenuItem value="in-progress">In Progress</MenuItem>
-                      <MenuItem value="resolved">Resolved</MenuItem>
+                      <MenuItem value="open">{t("support.open")}</MenuItem>
+                      <MenuItem value="in-progress">{t("support.in_progress")}</MenuItem>
+                      <MenuItem value="resolved">{t("support.resolved")}</MenuItem>
                     </Select>
                   </FormControl>
                   <Button variant="contained" startIcon={<Send />}>
-                    Send Reply
+                    {t("support.send_reply")}
                   </Button>
                 </Box>
               </CardContent>
@@ -256,10 +258,10 @@ export function SupportPanel() {
           ) : (
             <CardContent>
               <Typography variant="h6" align="center">
-                No ticket selected
+                {t("support.no_ticket_selected")}
               </Typography>
               <Typography variant="body2" color="textSecondary" align="center">
-                Select a ticket from the list to view details and respond.
+                {t("support.no_ticket_selected_hint")}
               </Typography>
             </CardContent>
           )}

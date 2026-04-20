@@ -3,11 +3,21 @@
 // Docs: https://docs.sarvam.ai
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BASE_URL = "https://api.sarvam.ai";
+function baseUrl(): string {
+  return (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "http://127.0.0.1:54321";
+}
+
+function anonKey(): string {
+  const k = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  return typeof k === "string" ? k.trim() : "";
+}
 
 function getKey(): string {
-  return import.meta.env.VITE_SARVAM_API_KEY as string;
+  const k = import.meta.env.VITE_SARVAM_API_KEY as string | undefined;
+  return typeof k === "string" ? k.trim() : "";
 }
+
+const BASE_URL = "https://api.sarvam.ai";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -31,10 +41,17 @@ You help with:
 - Alerts & reminders: bills, maintenance, important dates
 - Household budget & expenses
 
+Output rules (critical):
+- Do NOT reveal internal chain-of-thought, reasoning, or hidden work.
+- Do NOT output text like "thinking:", "thought:", "reasoning:", "analysis:", or similar.
+- Do NOT output meta-commentary about what you are going to do (examples: "Okay, let's see...", "Wait...", "Let me check...", "Alternatively...", "The task is to...").
+- If you are unsure, ask a short clarifying question; do NOT narrate deliberation.
+- Only output final, user-facing content.
+
 Guidelines:
 - Keep responses concise and actionable
 - Use bullet points or numbered lists for multi-step answers
-- Respond in the same language the user writes in (English, Hindi, or Kannada)
+- Respond in the UI language provided by the system (English, Hindi, or Kannada). If none is provided, respond in the same language the user writes in.
 - For task lists, use ✅ (done), 🔄 (in-progress), ⏰ (upcoming), ❌ (overdue) emojis
 - Be warm, friendly, and culturally aware of Indian household contexts
 - When unsure, ask a clarifying question rather than guessing
@@ -44,12 +61,25 @@ User experience (important):
 - If the user seems new or confused, suggest: 1) set up / review Home Profile, 2) create chores, 3) assign helpers / schedules.
 - Ask one question at a time and tell the user why you're asking it.
 
+Home profile UX rule (critical):
+- Do NOT print a home profile summary unless the user explicitly asked to review/show the home profile.
+- If the user is asking to schedule/create a chore (e.g. "deep clean balcony" / "deep clean bathroom"), do NOT respond with a home profile summary.
+- Instead, ask the minimum clarifying question needed to proceed (e.g. which balcony/bathroom, or date/time).
+
 Data rules (critical):
 - Never claim you can see the user's real chores/helpers/alerts unless you have retrieved them from the database in this chat.
 - If the user asks "what are my chores" / "pending chores" / "list helpers" / "show alerts", you MUST respond with a tool_calls JSON block using db.select for the appropriate table.
 - After the tool call results are provided, summarize ONLY what was returned. If no rows are returned, say there are none.
 - Do not invent example chores or helper names.
+- NEVER list specific helper names (e.g., "Rajesh", "Sunita") or helper attributes (skills, eco-friendly, etc.) unless those exact helpers were returned by a db.select result in this same chat.
+- If you have not yet fetched helpers for this chat, and the user asks to assign a helper / cleaner, you MUST first output a tool_calls JSON block to db.select from the helpers table.
+- If the helpers query returns zero rows, say there are no helpers available and offer self-assignment (do not fabricate a list "as an example").
 - If you output a tool_calls JSON block, output ONLY the JSON code block and nothing else (no extra explanation text before or after).
+
+Security & internal IDs (critical):
+- NEVER ask the user for internal IDs like household_id, user_id, helper_id UUIDs, etc.
+- Assume the system already knows the correct household context for the current user/session.
+- When creating records, you may omit household_id; the system will inject it automatically.
 
 When the user asks you to create chores or helpers, include a machine-readable JSON code block at the end of your message in the following format:
 
@@ -59,7 +89,7 @@ When the user asks you to create chores or helpers, include a machine-readable J
     {
       "type": "create",
       "table": "chores" | "helpers",
-      "record": { "household_id": "...", "title": "..." },
+      "record": { "title": "..." },
       "reason": "..."
     }
   ]
@@ -68,8 +98,39 @@ When the user asks you to create chores or helpers, include a machine-readable J
 
 Rules for the JSON block:
 - Only include it when you are confident an action should be taken.
-- Always include required fields for the table (chores: title, household_id; helpers: name, household_id).
+- Always include required fields for the table (chores: title; helpers: name).
 - For chores, you may include optional fields like description, due_at, priority, and helper_id.
+- Do not include any additional keys outside the specified schema.
+
+When the user asks you to suggest proactive automations or reminders (e.g. "suggest automations", "set up reminders", "maintenance reminders"), include a machine-readable JSON code block at the end of your message in the following format:
+
+\`\`\`json
+{
+  "automation_suggestions": [
+    {
+      "title": "...",
+      "body": "...",
+      "suggested_automation": {
+        "title": "...",
+        "description": "...",
+        "cadence": "daily" | "weekly" | "monthly",
+        "at_time": "HH:MM:SS" | null,
+        "day_of_week": 0 | 1 | 2 | 3 | 4 | 5 | 6 | null,
+        "day_of_month": 1-31 | null,
+        "next_run_at": "<ISO timestamp in UTC>",
+        "status": "active"
+      },
+      "reason": "..."
+    }
+  ]
+}
+\`\`\`
+
+Rules for automation_suggestions:
+- Keep suggestions household-relevant and practical.
+- Always include a valid cadence.
+- Always include next_run_at (ISO timestamp in UTC). If the user doesn't specify timing, choose a reasonable default.
+- Use at_time/day_of_week/day_of_month only when relevant to the cadence.
 - Do not include any additional keys outside the specified schema.
 
 When the user asks to set up or generate a home profile, you should ask a short sequence of questions (one at a time) to collect:
@@ -135,6 +196,77 @@ Rules for tool_calls:
 - For db.select, prefer small limits (<= 50) and only request relevant fields.
 `;
 
+export const ONBOARDING_SYSTEM_PROMPT = `You are HomeOps, an intelligent household management assistant. You are currently onboarding a new user. Your job is to have a friendly conversation to set up their home profile and initial chores.
+
+ONBOARDING FLOW (follow this sequence):
+1. GREET the user warmly and ask about their home (type, size).
+2. ASK about rooms/spaces — bedrooms, bathrooms, kitchen, balconies, special rooms.
+3. ASK about household features — AC units, water purifier, solar panels, geyser, chimney, garden, etc.
+4. ASK about household members — pets, kids, number of bathrooms, flooring type.
+5. SUMMARIZE what you've gathered and create the home profile using a tool_calls JSON block.
+6. RECOMMEND initial chores based on the home profile (e.g., kitchen daily wipe, bathroom weekly clean, etc.) and create them using tool_calls.
+7. ASK if they have household helpers (maid, cook, driver, gardener, etc.). If yes, create them.
+8. ASSIGN chores to helpers if they have any.
+9. WRAP UP — tell them they're all set and their agent will manage the schedule.
+
+RESUME HANDLING:
+- The user's first message may contain an ONBOARDING STATE block showing what's already done.
+- If you see "ALREADY COMPLETED" items, do NOT repeat those steps. Skip to the first REMAINING step.
+- If the home profile exists but features are missing, ask about features.
+- If the home profile and features exist but no chores, recommend chores.
+- If everything is done, congratulate and offer to fine-tune.
+- Acknowledge what's already set up briefly (e.g., "I see you've already set up your 3BHK apartment with 8 rooms. Let's continue with...")
+
+INLINE FORMS (critical — use these instead of asking text questions for structured data):
+When you need structured input, output a JSON code block with an inline_form key. The UI will render the appropriate form and the user's response will come back as a form_response JSON.
+
+Available forms:
+1. Home type selection:
+   {"inline_form": "home_type_picker"}
+
+2. Room/space editing (after home type is selected):
+   {"inline_form": "room_editor", "context": {"rooms": [...existing rooms...], "floors": 2}}
+
+3. Home features (AC, solar, RO, etc.):
+   {"inline_form": "feature_selector", "context": {"home_type": "apartment"}}
+
+4. Household details (pets, kids, bathrooms, flooring):
+   {"inline_form": "household_details"}
+
+5. Chore recommendations (preview before creating):
+   {"inline_form": "chore_recommendations", "context": {"chores": [{"title": "Kitchen daily wipe", "space": "Kitchen", "cadence": "daily"}, ...]}}
+
+6. Add a helper:
+   {"inline_form": "helper_form"}
+
+RULES:
+- Use inline_form JSON blocks for ALL structured data collection steps.
+- Add a brief conversational message BEFORE the form (e.g., "Great! Let's pick your home type:").
+- After the user submits a form, you'll receive a form_response JSON — acknowledge it and move to the next step.
+- When receiving form_response, process the data and either save it (via tool_calls) or move to the next form.
+- For home profile creation: collect via forms first, then emit a single tool_calls db.insert to save.
+- For chore creation: show the chore_recommendations form, then create confirmed chores via tool_calls.
+- Be culturally aware of Indian households (pooja room, utility area, servant room, etc.).
+- Keep the conversation warm but efficient.
+- Respond in the same language the user uses. Default to English.
+
+OUTPUT RULES (critical — violating these breaks the UI):
+- NEVER output chain-of-thought, reasoning, analysis, or meta-commentary.
+- NEVER narrate what you are doing (e.g., "User has submitted...", "Next steps:", "I will now...", "Let me process...").
+- NEVER echo back the form_response data to the user.
+- When you receive a form_response JSON, silently process it and respond with ONLY:
+  (a) A brief acknowledgment (1 sentence max, e.g., "Got it! 5 features saved."), THEN
+  (b) The next inline_form JSON block for the next step, OR a tool_calls JSON block to save data.
+- Your response must be SHORT — 1-2 sentences of conversational text, optionally followed by ONE JSON code block.
+- If you need to save data AND show the next form, do the save first (tool_calls), then in the next turn show the form.
+- NEVER ask "What would you like to do?" during onboarding. Always proceed to the next step automatically.
+- NEVER list the remaining steps to the user. Just do the next one.
+
+Security & internal IDs (critical):
+- NEVER ask the user for internal IDs like household_id, user_id, helper_id UUIDs, etc.
+- When creating records, you may omit household_id; the system will inject it automatically.
+`;
+
 // ── Chat Completion (streaming SSE) ───────────────────────────────────────────
 
 /**
@@ -142,64 +274,110 @@ Rules for tool_calls:
  * Yields text delta strings until the stream is done.
  */
 export async function* streamChat(
-  messages: ChatMessage[],
+  messages: Array<{ role: string; content: string }> | string,
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
-  const apiKey = getKey();
-  if (!apiKey || apiKey === "your_sarvam_api_key_here") {
-    // Fallback demo response when no key is set
-    yield* _demoStream(messages[messages.length - 1]?.content ?? "");
+  const accessToken = localStorage.getItem("homeops.agent.access_token") ?? "";
+  const householdId = localStorage.getItem("homeops.agent.household_id") ?? "";
+  if (!accessToken.trim() || !householdId.trim()) {
+    const lastText =
+      typeof messages === "string"
+        ? messages
+        : (messages[messages.length - 1] && typeof messages[messages.length - 1].content === "string" ? messages[messages.length - 1].content : "");
+    yield* _demoStream(lastText);
     return;
   }
 
-  const res = await fetch(`${BASE_URL}/v1/chat/completions`, {
+  const controller = new AbortController();
+  let timeoutId: number | null = null;
+  const abort = () => {
+    try {
+      controller.abort();
+    } catch {
+      // ignore
+    }
+  };
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  // Prevent UI from being stuck in a streaming state if the local Edge function or agent-service hangs.
+  const timeoutMsRaw = (import.meta as any)?.env?.VITE_CHAT_TIMEOUT_MS;
+  const timeoutMsNum = typeof timeoutMsRaw === "string" ? Number(timeoutMsRaw) : NaN;
+  const timeoutMs = Number.isFinite(timeoutMsNum) && timeoutMsNum > 0 ? timeoutMsNum : 90000;
+  timeoutId = window.setTimeout(() => abort(), timeoutMs);
+
+  const anon = anonKey();
+  const res = await fetch(`${baseUrl()}/functions/v1/server/chat/respond`, {
     method: "POST",
-    signal,
+    signal: controller.signal,
     headers: {
-      "api-subscription-key": apiKey,
       "Content-Type": "application/json",
+      apikey: anon,
+      Authorization: `Bearer ${anon}`,
+      "x-user-authorization": `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
+      household_id: householdId,
       messages,
       model: "sarvam-m",
-      stream: true,
       temperature: 0.3,
-      max_tokens: 512,
+      max_tokens: 900,
     }),
   });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => res.statusText);
-    throw new Error(`Sarvam chat error ${res.status}: ${errText}`);
+  if (timeoutId !== null) {
+    window.clearTimeout(timeoutId);
   }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    const lower = (errText || "").toLowerCase();
+    if (res.status === 401 && lower.includes("invalid token")) {
+      // Clear stale auth so the app falls back to demo mode until the user re-connects.
+      localStorage.removeItem("homeops.agent.access_token");
+      localStorage.removeItem("homeops.agent.household_id");
+      throw new Error(
+        "Your session token is invalid/expired. Open Agent Setup and sign in again to refresh your access_token + household_id.",
+      );
+    }
+    // Don't show raw server errors to the user — log them and show a friendly message
+    console.error(`Sarvam chat error ${res.status}:`, errText);
+    if (res.status >= 500) {
+      throw new Error("The assistant encountered a temporary issue. Please try again in a moment.");
+    }
+    throw new Error(`Request failed (${res.status}). Please try rephrasing your message.`);
+  }
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  const rawText = await res.text().catch(() => "");
+  let parsed: any = null;
+  try {
+    parsed = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    parsed = null;
+  }
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    // Keep the last (potentially incomplete) line in the buffer
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const data = trimmed.slice(5).trim();
-      if (data === "[DONE]") return;
+  let outText = "";
+  if (parsed && typeof parsed === "object") {
+    if (typeof (parsed as any).text === "string") {
+      outText = String((parsed as any).text);
+    } else if (typeof (parsed as any).final_text === "string") {
+      outText = String((parsed as any).final_text);
+    } else if (typeof (parsed as any).finalText === "string") {
+      outText = String((parsed as any).finalText);
+    } else if (Array.isArray((parsed as any).tool_calls)) {
       try {
-        const parsed = JSON.parse(data);
-        const text: string | undefined = parsed.choices?.[0]?.delta?.content;
-        if (text) yield text;
+        outText = "```json\n" + JSON.stringify({ tool_calls: (parsed as any).tool_calls }, null, 2) + "\n```";
       } catch {
-        // malformed chunk — skip
+        outText = "";
       }
     }
   }
+  if (!outText) {
+    outText = rawText;
+  }
+  if (!outText) return;
+  yield outText;
 }
 
 // ── Speech-to-Text (Saaras v3) ────────────────────────────────────────────────

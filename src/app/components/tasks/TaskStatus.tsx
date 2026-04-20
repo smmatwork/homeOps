@@ -24,8 +24,10 @@ import {
   CalendarToday,
   Download,
 } from "@mui/icons-material";
+import { useI18n } from "../../i18n";
 
 export function TaskStatus() {
+  const { t } = useI18n();
   const [statusFilter, setStatusFilter] = useState("all");
   const [timeFilter, setTimeFilter] = useState("all");
 
@@ -120,14 +122,14 @@ export function TaskStatus() {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box>
           <Typography variant="h4" fontWeight="bold">
-            Task Status & Tracking
+            {t("task_status.title")}
           </Typography>
           <Typography color="textSecondary">
-            Monitor progress and completion of all household tasks
+            {t("task_status.subtitle")}
           </Typography>
         </Box>
         <Button variant="outlined" startIcon={<Download />}>
-          Export Report
+          {t("task_status.export")}
         </Button>
       </Box>
 
@@ -139,7 +141,7 @@ export function TaskStatus() {
               {stats.total}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Total Tasks
+              {t("task_status.total_tasks")}
             </Typography>
           </CardContent>
         </Card>
@@ -149,7 +151,7 @@ export function TaskStatus() {
               {stats.completed}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Completed
+              {t("task_status.completed")}
             </Typography>
           </CardContent>
         </Card>
@@ -159,7 +161,7 @@ export function TaskStatus() {
               {stats.inProgress}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              In Progress
+              {t("task_status.in_progress")}
             </Typography>
           </CardContent>
         </Card>
@@ -169,7 +171,7 @@ export function TaskStatus() {
               {stats.pending}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Pending
+              {t("task_status.pending")}
             </Typography>
           </CardContent>
         </Card>
@@ -179,7 +181,7 @@ export function TaskStatus() {
               {stats.overdue}
             </Typography>
             <Typography variant="body2" color="textSecondary">
-              Overdue
+              {t("task_status.overdue")}
             </Typography>
           </CardContent>
         </Card>
@@ -188,14 +190,14 @@ export function TaskStatus() {
       {/* Completion Rate */}
       <Card>
         <CardHeader
-          title="Overall Completion Rate"
-          subheader="Progress across all household tasks"
+          title={t("task_status.overall_completion")}
+          subheader={t("task_status.progress_subtitle")}
         />
         <Divider />
         <CardContent>
           <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
             <Typography variant="body2" color="textSecondary">
-              Completion Progress
+              {t("task_status.completion_progress")}
             </Typography>
             <Typography variant="h5" fontWeight="bold">
               {completionRate}%
@@ -208,22 +210,22 @@ export function TaskStatus() {
       {/* Filters */}
       <Box display="flex" gap={2} alignItems="center" my={4}>
         <FormControl size="small" sx={{ minWidth: 200 }}>
-          <InputLabel>Status</InputLabel>
+          <InputLabel>{t("task_status.status")}</InputLabel>
           <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-            <MenuItem value="all">All</MenuItem>
-            <MenuItem value="completed">Completed</MenuItem>
-            <MenuItem value="in-progress">In Progress</MenuItem>
-            <MenuItem value="pending">Pending</MenuItem>
-            <MenuItem value="overdue">Overdue</MenuItem>
+            <MenuItem value="all">{t("task_status.all")}</MenuItem>
+            <MenuItem value="completed">{t("task_status.completed")}</MenuItem>
+            <MenuItem value="in-progress">{t("task_status.in_progress")}</MenuItem>
+            <MenuItem value="pending">{t("task_status.pending")}</MenuItem>
+            <MenuItem value="overdue">{t("task_status.overdue")}</MenuItem>
           </Select>
         </FormControl>
         <FormControl size="small" sx={{ minWidth: 200 }}>
-          <InputLabel>Time Period</InputLabel>
+          <InputLabel>{t("task_status.time_period")}</InputLabel>
           <Select value={timeFilter} onChange={(e) => setTimeFilter(e.target.value)}>
-            <MenuItem value="all">All Time</MenuItem>
-            <MenuItem value="today">Today</MenuItem>
-            <MenuItem value="week">This Week</MenuItem>
-            <MenuItem value="month">This Month</MenuItem>
+            <MenuItem value="all">{t("task_status.all_time")}</MenuItem>
+            <MenuItem value="today">{t("task_status.today")}</MenuItem>
+            <MenuItem value="week">{t("task_status.this_week")}</MenuItem>
+            <MenuItem value="month">{t("task_status.this_month")}</MenuItem>
           </Select>
         </FormControl>
       </Box>
@@ -244,14 +246,14 @@ export function TaskStatus() {
                 />
               </Box>
               <Typography variant="body2" color="textSecondary">
-                Assigned to: {task.assignee}
+                {t("task_status.assigned_to")}: {task.assignee}
               </Typography>
               <Typography variant="body2" color="textSecondary">
-                Due Date: {task.dueDate}
+                {t("task_status.due_date")}: {task.dueDate}
               </Typography>
               {task.notes && (
                 <Typography variant="body2" color="textSecondary" mt={1}>
-                  Notes: {task.notes}
+                  {t("task_status.notes")}: {task.notes}
                 </Typography>
               )}
             </CardContent>

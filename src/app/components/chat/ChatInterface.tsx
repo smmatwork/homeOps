@@ -15,7 +15,6 @@ import {
   Divider,
   Drawer,
   FormControl,
-  FormControlLabel,
   IconButton,
   InputLabel,
   List,
@@ -23,12 +22,8 @@ import {
   ListItemButton,
   ListItemText,
   Stack,
-  Step,
-  StepLabel,
-  Stepper,
   Snackbar,
   Select,
-  Switch,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
@@ -50,32 +45,42 @@ import {
   Bolt,
   ExpandMore,
   ExpandLess,
+  Home,
+  BarChart,
 } from "@mui/icons-material";
 import { keyframes } from "@emotion/react";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { QuickActionsPanel } from "./QuickActionsPanel";
+import { inferSpaceFromText, normalizeChoreTextFromUserUtterance, normalizeSpaceName } from "./chatTextUtils";
 import { buildThreadKey, useClarificationStore } from "../../stores/clarificationThreadStore";
 import { useSarvamChat } from "../../hooks/useSarvamChat";
+import { ONBOARDING_SYSTEM_PROMPT } from "../../services/sarvamApi";
 import { useSarvamSTT, type SpeechLang } from "../../hooks/useSarvamSTT";
 import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssistantText, parseClarificationFromAssistantText, parseToolCallsFromAssistantText, type AgentCreateAction, type AutomationSuggestion, type ToolCall } from "../../services/agentActions";
+import { OnboardingPanel } from "./OnboardingPanel";
+import { AssignmentPanel } from "./AssignmentPanel";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
-import { agentCreate, agentListHelpers, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
+import { agentCreate, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
+import { useHelpersStore } from "../../stores/helpersStore";
+import { ElicitationFlow } from "../helpers/ElicitationFlow";
+import type { ElicitationTemplateId } from "../../services/elicitationApi";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
 import { CoverageExperimentEntry } from "../../experiments/coverage/CoverageExperimentEntry";
+import { useHomeProfileWizard } from "../home-profile/useHomeProfileWizard";
+import { HomeProfileWizard } from "../home-profile/HomeProfileWizard";
 import { useNavigate } from "react-router";
 import Sanscript from "@sanskrit-coders/sanscript";
+import {
+  HOME_PROFILE_TEMPLATES,
+  normalizeSpacesToRooms,
+} from "../../config/homeProfileTemplates";
 
 type HelperOption = { id: string; name: string; type: string | null; phone: string | null };
 
 type ChoreDraft = {
-  id: string;
-  action: AgentCreateAction;
-};
-
-type HomeProfileDraft = {
   id: string;
   action: AgentCreateAction;
 };
@@ -156,12 +161,7 @@ function normalizeDatetimeLocal(value: string): string | null {
   return `${yyyy2}-${mm2}-${dd2}T${hh2}:${mi2}:${ss2}${sign}${tzh}:${tzm}`;
 }
 
-function normalizeSpaceName(value: string): string {
-  return value
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
+ 
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -218,15 +218,15 @@ const EMPTY_APPROVED_TOOLCALL_KEYS: Record<string, boolean> = {};
 
 function buildClientChoreToolCall(params: { userText: string; dueAt: string; space: string }): ToolCall {
   const { userText, dueAt, space } = params;
-  const title = userText.trim().slice(0, 120) || "Chore";
+  const norm = normalizeChoreTextFromUserUtterance(userText);
   const tc: ToolCall = {
     id: `client_chore_${Date.now()}`,
     tool: "db.insert",
     args: {
       table: "chores",
       record: {
-        title,
-        description: userText.trim(),
+        title: norm.title,
+        description: norm.description,
         due_at: dueAt,
         priority: 2,
         metadata: { space },
@@ -782,9 +782,13 @@ function TypingIndicator() {
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
-export function ChatInterface(props: { embedded?: boolean } = {}) {
+export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean; startAssignment?: boolean } = {}) {
   const navigate = useNavigate();
-  const { t, setLang: setUiLang } = useI18n();
+  const [autoDetectedOnboarding, setAutoDetectedOnboarding] = useState<boolean | null>(null);
+  // null = still detecting, true = onboarding, false = normal
+  const onboardingResolved = props.onboarding ?? autoDetectedOnboarding;
+  const isOnboarding = onboardingResolved === true;
+  const { t, lang: uiLang, setLang: setUiLang } = useI18n();
   const [input, setInput] = useState("");
   const [lang, setLang] = useState<SpeechLang>("en-IN");
   const [sttError, setSttError] = useState<string | null>(null);
@@ -832,10 +836,65 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     bootstrapHousehold,
   } = useAuth();
 
+  // Auto-detect onboarding mode if prop isn't explicitly set
+  useEffect(() => {
+    if (props.startAssignment) return; // skip in assignment mode
+    if (props.onboarding !== undefined) return; // explicit prop takes priority
+    const hid = authedHouseholdId?.trim();
+    const uid = authedUser?.id;
+    if (!hid || !uid) return;
+    let cancelled = false;
+    void (async () => {
+      const { detectOnboardingState } = await import("../../services/onboardingState");
+      const state = await detectOnboardingState(hid, uid);
+      if (cancelled) return;
+      // If home profile exists but no chores → needs onboarding
+      // Match the onboarding state machine's completion criteria
+      const setupComplete = state.homeProfileExists && state.roomCount > 0
+        && state.hasFeatures && state.choreCount > 0 && state.helperCount > 0;
+      setAutoDetectedOnboarding(!setupComplete);
+    })();
+    return () => { cancelled = true; };
+  }, [props.onboarding, authedHouseholdId, authedUser?.id]);
+
+  // Count unassigned chores for the assignment nudge
+  useEffect(() => {
+    // Try auth-based household first, fall back to manual agent setup
+    const hid = (authedHouseholdId || "").trim()
+      || (() => { try { return localStorage.getItem("homeops.agent.household_id") ?? ""; } catch { return ""; } })().trim();
+    if (!hid) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { count, error } = await supabase
+          .from("chores")
+          .select("id", { count: "exact", head: true })
+          .eq("household_id", hid)
+          .is("helper_id", null)
+          .is("deleted_at", null)
+          .neq("status", "completed");
+        if (!cancelled) {
+          if (error) {
+            console.warn("[assignment-nudge] count error:", error.message);
+          } else {
+            setUnassignedChoreCount(count ?? 0);
+          }
+        }
+      } catch (e) {
+        console.warn("[assignment-nudge] exception:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authedHouseholdId]);
+
   const [agentAccessToken, setAgentAccessToken] = useState("");
   const [agentHouseholdId, setAgentHouseholdId] = useState("");
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [coverageExperimentOpen, setCoverageExperimentOpen] = useState(false);
+  const [quickCommandsCollapsed, setQuickCommandsCollapsed] = useState(true);
+  const [assignmentNudgeDismissed, setAssignmentNudgeDismissed] = useState(false);
+  const [assignmentPanelOpen, setAssignmentPanelOpen] = useState(props.startAssignment ?? false);
+  const [unassignedChoreCount, setUnassignedChoreCount] = useState(0);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [agentSuccess, setAgentSuccess] = useState<string | null>(null);
@@ -982,21 +1041,23 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     return () => window.removeEventListener("homeops:delete-chores-flow", handler as EventListener);
   }, [toolBusy, persistDeleteChoresFlow]);
 
-  const [helpers, setHelpers] = useState<HelperOption[]>([]);
-  const [helperLoadError, setHelperLoadError] = useState<string | null>(null);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const helperLoadError = useHelpersStore((s) => s.error);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const helpers = useMemo<HelperOption[]>(
+    () => storeHelpers.map((h) => ({ id: h.id, name: h.name, type: h.type, phone: h.phone })),
+    [storeHelpers],
+  );
+
+  // ui.* pseudo tool calls — dispatched client-side, never sent to the edge
+  // function. Currently supports ui.open_elicitation (→ ElicitationFlow).
+  const [elicitationUiScope, setElicitationUiScope] = useState<ElicitationTemplateId | null | "__unscoped__">(null);
+  const [uiToolCallOpenCounter, setUiToolCallOpenCounter] = useState(0);
+  const [processedUiToolCallIds, setProcessedUiToolCallIds] = useState<Record<string, boolean>>({});
 
   const [choreDrafts, setChoreDrafts] = useState<ChoreDraft[]>([]);
   const [selectedChoreDraftIds, setSelectedChoreDraftIds] = useState<Record<string, boolean>>({});
   const [editChoreDraftId, setEditChoreDraftId] = useState<string | null>(null);
-  const [homeProfileDraft, setHomeProfileDraft] = useState<HomeProfileDraft | null>(null);
-  const [homeProfileBusy, setHomeProfileBusy] = useState(false);
-  const [homeProfileError, setHomeProfileError] = useState<string | null>(null);
-  const [homeProfileWizardOpen, setHomeProfileWizardOpen] = useState(false);
-  const [homeProfileWizardStep, setHomeProfileWizardStep] = useState(0);
-  const [homeProfileNewSpace, setHomeProfileNewSpace] = useState("");
-  const [homeProfileMode, setHomeProfileMode] = useState<"view" | "edit">("edit");
-  const [homeProfileExists, setHomeProfileExists] = useState(false);
-
   const [accountAnchorEl, setAccountAnchorEl] = useState<HTMLElement | null>(null);
   const accountMenuOpen = Boolean(accountAnchorEl);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
@@ -1077,93 +1138,11 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     setFeedbackRating(5);
   }, [authedUser, authedHouseholdId, feedbackMessage, feedbackRating]);
 
-  const getBaselineSpaces = useCallback((homeType: string, bhk: number) => {
-    const ht = homeType.trim().toLowerCase();
-    const n = Number.isFinite(bhk) && bhk > 0 ? Math.floor(bhk) : 2;
-    const base: string[] = ["living room", "dining area", "work area", "study", "powder room", "utility room", "store room", "pantry", "pooja room", "balcony", "terrace", "deck", "home office", "gym", "basement", "lift", "battery room", "solar storage", "servant room", "laundry", "garden", "parking", "car porch"];
-    for (let i = 1; i <= n; i += 1) base.push(`bedroom ${i}`);
-    if (ht === "villa") base.push("stairs");
-    return base;
-  }, []);
-
   const getAgentSetup = useCallback(() => {
     const token = authedAccessToken.trim() || agentAccessToken.trim();
     const householdId = authedHouseholdId.trim() || agentHouseholdId.trim();
     return { token, householdId };
   }, [authedAccessToken, agentAccessToken, authedHouseholdId, agentHouseholdId]);
-
-  const reviewHomeProfile = useCallback(async () => {
-    setHomeProfileError(null);
-    const { householdId } = getAgentSetup();
-    if (!householdId) {
-      setHomeProfileError("Missing household_id. Click Agent Setup to confirm your home is linked.");
-      setAgentDialogOpen(true);
-      return;
-    }
-
-    setHomeProfileBusy(true);
-    let { data, error } = await supabase
-      .from("home_profiles")
-      .select("home_type, bhk, square_feet, floors, spaces, space_counts, has_balcony, has_pets, has_kids, flooring_type, num_bathrooms")
-      .eq("household_id", householdId)
-      .maybeSingle();
-
-    // Backward-compatible fallback if migrations haven't been applied yet.
-    const msg = (error as any)?.message ? String((error as any).message) : "";
-    if (error && /schema cache/i.test(msg) && /(floors|square_feet|spaces|space_counts)/i.test(msg)) {
-      const legacy = await supabase
-        .from("home_profiles")
-        .select("home_type, bhk, has_balcony, has_pets, has_kids, flooring_type, num_bathrooms")
-        .eq("household_id", householdId)
-        .maybeSingle();
-      data = legacy.data as any;
-      error = legacy.error as any;
-      if (!legacy.error) {
-        setHomeProfileError(
-          "Your database is missing the latest home profile fields (floors/square feet/spaces). Apply the latest Supabase migration to enable these fields.",
-        );
-      }
-    }
-    setHomeProfileBusy(false);
-
-    if (error) {
-      setHomeProfileError("We couldn't load your home profile right now. Please try again.");
-      return;
-    }
-
-    if (!data) {
-      setHomeProfileExists(false);
-      setHomeProfileError("You don't have a home profile yet. Click 'Create home profile' to set it up.");
-      return;
-    }
-
-    setHomeProfileExists(true);
-
-    setHomeProfileDraft({
-      id: `${Date.now()}`,
-      action: {
-        type: "create",
-        table: "home_profiles",
-        record: {
-          home_type: data?.home_type ?? "apartment",
-          bhk: typeof data?.bhk === "number" ? data.bhk : 2,
-          square_feet: typeof (data as any)?.square_feet === "number" ? (data as any).square_feet : null,
-          floors: typeof (data as any)?.floors === "number" ? (data as any).floors : null,
-          spaces: Array.isArray((data as any)?.spaces) ? (data as any).spaces : [],
-          space_counts: (data as any)?.space_counts && typeof (data as any).space_counts === "object" ? (data as any).space_counts : {},
-          has_balcony: typeof data?.has_balcony === "boolean" ? data.has_balcony : false,
-          has_pets: typeof data?.has_pets === "boolean" ? data.has_pets : false,
-          has_kids: typeof data?.has_kids === "boolean" ? data.has_kids : false,
-          flooring_type: data?.flooring_type ?? null,
-          num_bathrooms: typeof data?.num_bathrooms === "number" ? data.num_bathrooms : null,
-        },
-        reason: "Review and update home profile",
-      },
-    });
-    setHomeProfileMode("view");
-    setHomeProfileWizardStep(0);
-    setHomeProfileWizardOpen(true);
-  }, [getAgentSetup]);
 
   const ensureHomeSpacesForValidation = useCallback(
     async (householdId: string): Promise<string[]> => {
@@ -1177,74 +1156,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         .maybeSingle();
       if (error) return [];
       const spacesRaw = Array.isArray((data as any)?.spaces) ? ((data as any).spaces as unknown[]).map(String).filter(Boolean) : [];
-      const countsRaw = (data as any)?.space_counts;
-      const counts = countsRaw && typeof countsRaw === "object" && !Array.isArray(countsRaw) ? (countsRaw as Record<string, unknown>) : {};
-      const balconyCount = Math.max(0, Math.floor(asNumberOrNull(counts.balcony) ?? 0));
-      const terraceCount = Math.max(0, Math.floor(asNumberOrNull(counts.terrace) ?? 0));
-      const bedroomCount0 = Math.max(0, Math.floor(asNumberOrNull((counts as any).bedroom ?? (counts as any).bedrooms) ?? 0));
-      const bhkBedrooms = Math.max(0, Math.floor(asNumberOrNull((data as any)?.bhk) ?? 0));
-      const bedroomCount = Math.max(bedroomCount0, bhkBedrooms);
-      const kitchenCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).kitchen ?? (counts as any).kitchens) ?? 0));
-      const livingCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).living ?? (counts as any).living_room ?? (counts as any).living_rooms) ?? 0));
-      const diningCount = Math.max(0, Math.floor(asNumberOrNull((counts as any).dining ?? (counts as any).dining_room ?? (counts as any).dining_rooms) ?? 0));
-      const numBathrooms = Math.max(0, Math.floor(asNumberOrNull((data as any)?.num_bathrooms) ?? 0));
-
-      const synthetic: string[] = [];
-      const countDistinctBy = (predicate: (norm: string) => boolean): number => {
-        const set = new Set<string>();
-        for (const s of spacesRaw) {
-          const n = normalizeSpaceName(String(s));
-          if (!n) continue;
-          if (predicate(n)) set.add(n);
-        }
-        return set.size;
-      };
-      if (balconyCount > 1) {
-        const distinctBalconyLabels = countDistinctBy((n) => n.includes("balcony") || n.includes("terrace") || n.includes("deck"));
-        if (distinctBalconyLabels < 2) {
-          for (let i = 1; i <= balconyCount; i += 1) synthetic.push(`Balcony ${i}`);
-        }
-      }
-      if (terraceCount > 1) {
-        const distinctTerraceLabels = countDistinctBy((n) => n.includes("terrace") || n.includes("deck"));
-        if (distinctTerraceLabels < 2) {
-          for (let i = 1; i <= terraceCount; i += 1) synthetic.push(`Terrace ${i}`);
-        }
-      }
-
-      const distinctBedroomLabels = countDistinctBy((n) => n.includes("bed"));
-      if (bedroomCount > 1 && distinctBedroomLabels < 2) {
-        for (let i = 1; i <= bedroomCount; i += 1) synthetic.push(`Bedroom ${i}`);
-      }
-
-      const distinctKitchenLabels = countDistinctBy((n) => n.includes("kitchen") || n.includes("pantry"));
-      if (kitchenCount > 1 && distinctKitchenLabels < 2) {
-        for (let i = 1; i <= kitchenCount; i += 1) synthetic.push(`Kitchen ${i}`);
-      }
-
-      const distinctLivingLabels = countDistinctBy((n) => n.includes("living") || n.includes("hall") || n.includes("lounge"));
-      if (livingCount > 1 && distinctLivingLabels < 2) {
-        for (let i = 1; i <= livingCount; i += 1) synthetic.push(`Living Room ${i}`);
-      }
-
-      const distinctDiningLabels = countDistinctBy((n) => n.includes("dining"));
-      if (diningCount > 1 && distinctDiningLabels < 2) {
-        for (let i = 1; i <= diningCount; i += 1) synthetic.push(`Dining Area ${i}`);
-      }
-
-      // If there are multiple bathrooms but the spaces list doesn't contain any specific bathroom labels,
-      // synthesize common bathroom names so we can ask "Which bathroom?".
-      const hasAnyBathroomLabel = spacesRaw.some((s) => {
-        const n = normalizeSpaceName(String(s));
-        return n.includes("bath") || n.includes("wash") || n.includes("toilet") || n.includes("powder");
-      });
-      if (!hasAnyBathroomLabel && numBathrooms > 1) {
-        synthetic.push("Master Bathroom");
-        synthetic.push("Common Bathroom");
-        for (let i = 3; i <= numBathrooms; i += 1) synthetic.push(`Bathroom ${i}`);
-      }
-
-      const spaces = uniqStrings([...spacesRaw, ...synthetic]);
+      const spaces = uniqStrings(spacesRaw);
       setHomeSpacesCache((prev) => ({ ...prev, [hid]: spaces }));
       return spaces;
     },
@@ -1309,32 +1221,70 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     [],
   );
 
-  const refreshHomeProfileExists = useCallback(async () => {
-    const { householdId } = getAgentSetup();
-    if (!householdId) {
-      setHomeProfileExists(false);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("home_profiles")
-      .select("household_id")
-      .eq("household_id", householdId)
-      .limit(1);
-
-    if (error) {
-      return;
-    }
-
-    setHomeProfileExists(Array.isArray(data) && data.length > 0);
-  }, [getAgentSetup]);
-
   function withHouseholdId(tc: ToolCall, householdId: string): ToolCall {
     const args = (tc.args ?? {}) as Record<string, unknown>;
     return { ...tc, args: { ...args, household_id: householdId } };
   }
 
-  const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat();
+  const onboardingPrompt = isOnboarding ? ONBOARDING_SYSTEM_PROMPT : undefined;
+  const { messages, sendMessage, appendUserMessage, isStreaming, error: chatError, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, clearHistory, conversationId } = useSarvamChat(onboardingPrompt ? { systemPrompt: onboardingPrompt } : undefined);
+
+  // Auto-trigger the agent greeting when onboarding starts, with state context
+  const onboardingSentRef = useRef(false);
+  useEffect(() => {
+    if (isOnboarding && !onboardingSentRef.current && memoryReady && !props.startAssignment) {
+      onboardingSentRef.current = true;
+      const hid = authedHouseholdId.trim() || agentHouseholdId.trim();
+      const uid = authedUser?.id ?? "";
+      if (hid && uid) {
+        // Detect current state and include it in the opening message
+        void (async () => {
+          const { detectOnboardingState, buildOnboardingContext } = await import("../../services/onboardingState");
+          const state = await detectOnboardingState(hid, uid);
+          const context = buildOnboardingContext(state);
+          const greeting = state.homeProfileExists
+            ? `I'm continuing my home setup. Here's what's done so far:\n\n${context}`
+            : "Hi, I'm new here. Help me set up my home.";
+          void sendMessage(greeting);
+        })();
+      } else {
+        void sendMessage("Hi, I'm new here. Help me set up my home.");
+      }
+    }
+  }, [isOnboarding, memoryReady, sendMessage, authedHouseholdId, agentHouseholdId, authedUser?.id]);
+
+  const homeProfileWizardHook = useHomeProfileWizard({
+    getAgentSetup: () => {
+      const token = authedAccessToken.trim() || agentAccessToken.trim();
+      const householdId = authedHouseholdId.trim() || agentHouseholdId.trim();
+      return { token, householdId };
+    },
+    memoryScope,
+    appendAssistantMessage,
+    setToolBusy,
+    setToolError,
+    setToolSuccess,
+  });
+  const {
+    homeProfileDraft, setHomeProfileDraft,
+    homeProfileBusy, homeProfileError,
+    homeProfileWizardOpen, setHomeProfileWizardOpen,
+    homeProfileWizardStep, setHomeProfileWizardStep,
+    homeProfileNewSpace, setHomeProfileNewSpace,
+    homeProfileMode, setHomeProfileMode,
+    homeProfileExists,
+    reviewHomeProfile, refreshHomeProfileExists,
+    saveHomeProfileDraft, openHomeProfileWizard, closeHomeProfileWizard,
+    updateHomeProfileRecord, goNextHomeProfileStep, goBackHomeProfileStep,
+  } = homeProfileWizardHook;
+
+  const latestUserText = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m: any = messages[i];
+      if (m?.role === "user" && typeof m?.content === "string") return String(m.content);
+    }
+    return "";
+  }, [messages]);
 
   const [clientConversationId] = useState<string>(() => {
     try {
@@ -1448,6 +1398,13 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const which = clientChoreSession.category === "living" ? "living room" : clientChoreSession.category === "dining" ? "dining area" : clientChoreSession.category;
     const title = `Which ${which}?`;
     const options = allLabel ? [allLabel, ...clientChoreSession.spaceOptions] : clientChoreSession.spaceOptions;
+
+    const inferred = inferSpaceFromText(options, clientChoreSession.requestText);
+    if (inferred) {
+      const sels = normalizeSpaceName(inferred).startsWith("all ") ? clientChoreSession.spaceOptions : [inferred];
+      dispatchClientChore({ type: "SET_SPACES", selectedSpaces: sels });
+      return;
+    }
 
     openSpaceClarification({
       title,
@@ -1814,11 +1771,8 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
   const approveClientChore = useCallback(async () => {
     try {
-      console.log("approveClientChore clicked", clientChoreSession.toolCall);
       setToolError(null);
       setToolSuccess(null);
-      setToolSuccess("Approve clicked (client chore)");
-      appendAssistantMessage("Approve clicked (client chore)");
 
       if (!clientChoreSession.toolCall) return;
       dispatchClientChore({ type: "EXECUTING" });
@@ -1869,11 +1823,11 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         setDeleteChoresFlowSynced({ phase: "idle" });
         return;
       }
-      // Keep the flow deterministic: re-ask for a valid scope.
-      appendUserMessage(trimmed);
-      setInput("");
-      appendAssistantMessage("Please reply with one of: overdue, completed, all, or specific ones.");
-      return;
+      // If the message doesn’t look like a delete scope response at all,
+      // reset the stale delete flow and let the message proceed normally
+      // (e.g., the user changed their mind and is asking something else).
+      setDeleteChoresFlowSynced({ phase: "idle" });
+      // Fall through to normal message handling below.
     }
 
     if (deleteChoresFlow.phase === "awaiting_confirm") {
@@ -1916,6 +1870,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       const t = (text || "").trim().toLowerCase();
       if (!t) return false;
       if (!/\bchore(s)?\b/.test(t)) return false;
+      // Only match when "delete/remove" refers to the chores themselves,
+      // not to a field within a chore (e.g., "remove the description" or
+      // "remove from the title" should NOT trigger the delete flow).
+      const isFieldEdit = /\b(description|title|name|text|wording)\b/.test(t)
+        || /\b(change|update|edit|modify|replace|instead|mention)\b/.test(t);
+      if (isFieldEdit) return false;
       if (/\b(delete|remove|clear|erase)\b/.test(t)) return true;
       if (/\bmark\s+as\s+deleted\b/.test(t)) return true;
       return false;
@@ -1931,211 +1891,26 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       return;
     }
 
-    const isQueryIntent = (text: string): boolean => {
-      const t = (text || "").trim().toLowerCase();
-      if (!t) return false;
-      // Query/analytics questions should never start the client chore create flow.
-      if (t.includes("?")) return true;
-      if (/\bhow\s+many\b/.test(t)) return true;
-      if (/\b(count|number\s+of|total)\b/.test(t)) return true;
-      if (/\b(list|show|get|fetch)\b/.test(t)) return true;
-      if (/\b(exist|exists|existing|created|already)\b/.test(t)) return true;
-      if (/\b(status|pending|completed|overdue|due)\b/.test(t)) return true;
-      return false;
-    };
-
-    const isChoreCreateImperative = (text: string): boolean => {
-      const t = (text || "").trim().toLowerCase();
-      if (!t) return false;
-      // If it's a query, do not treat as a create request.
-      if (isQueryIntent(t)) return false;
-      // Strong signals for creation/planning.
-      if (/\b(add|create|schedule|plan|set\s*up|book)\b/.test(t) && /\bchore\b/.test(t)) return true;
-      if (/\b(remind\s+me\s+to)\b/.test(t)) return true;
-      // Imperative verb at the start is treated as a create request.
-      if (/^\s*(deep\s*clean|deepclean|clean|mop|sweep)\b/i.test(t)) return true;
-      return false;
-    };
-    const isHelpersQuery = /\bhelpers?\b/.test(lower) && /\b(list|show|get|what|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-    const isChoresQuery = /\bchores?\b/.test(lower) && /\b(list|show|get|what|pending|overdue|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-    const isAlertsQuery = /\balerts?\b/.test(lower) && /\b(list|show|get|what|how\s+many|count|number\s+of|total|exist|existing|created)\b/.test(lower);
-
-    const directTables: Array<"chores" | "helpers" | "alerts"> = [];
-    if (isChoresQuery) directTables.push("chores");
-    if (isHelpersQuery) directTables.push("helpers");
-    if (isAlertsQuery) directTables.push("alerts");
-
-    // If the assistant is currently streaming, still allow deterministic direct-table queries
-    // (e.g., "show chores") to run. For other messages, ignore sends while streaming.
-    if (isStreaming && directTables.length === 0) return;
-
-    if (directTables.length > 0) {
-      // Add the user message to the chat UI/history without starting an LLM stream.
-      // This prevents the UI from showing typing dots for direct DB queries.
-      appendUserMessage(trimmed);
-      setInput("");
-
-      const { token, householdId } = getAgentSetup();
-      if (!token || !householdId) {
-        appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        return;
-      }
-
-      void (async () => {
-        setToolError(null);
-        const summaries: string[] = [];
-        const wantsCount = /\b(how\s+many|count|number\s+of|total)\b/.test(lower);
-        const actionKeyword = (() => {
-          const k = lower;
-          if (/\bdeep\s*clean|deepclean\b/.test(k)) return "deep clean";
-          if (/\bclean(ing)?\b/.test(k)) return "clean";
-          if (/\bmop(ping)?\b/.test(k)) return "mop";
-          if (/\bsweep(ing)?\b/.test(k)) return "sweep";
-          if (/\bvacuum(ing)?\b/.test(k)) return "vacuum";
-          return "";
-        })();
-        const choreKeyword = (() => {
-          const k = lower;
-          if (/\bbalcony\b/.test(k)) return "balcony";
-          if (/\bterrace\b/.test(k)) return "terrace";
-          if (/\bbath(room)?\b|\btoilet\b|\bwash(room)?\b/.test(k)) return "bathroom";
-          if (/\bbed(room)?\b/.test(k)) return "bedroom";
-          if (/\bkitchen\b/.test(k)) return "kitchen";
-          if (/\bliving\b|\bhall\b|\blounge\b/.test(k)) return "living";
-          if (/\bdining\b/.test(k)) return "dining";
-          return "";
-        })();
-        for (const table of directTables) {
-          if (table === "chores" && wantsCount && choreKeyword) {
-            // If the user also included an action verb (clean/sweep/mop/etc.), prefer semantic search.
-            // This lets us match "clean balcony" instead of matching everything that mentions "balcony".
-            if (actionKeyword) {
-              const sem = await semanticSearch({
-                accessToken: token,
-                householdId,
-                query: trimmed,
-                entityTypes: ["chores"],
-                matchCount: 50,
-                minSimilarity: 0.25,
-              });
-              if (sem.ok) {
-                const matches = (sem.matches ?? []).filter((m: any) => (m as any)?.entity_type === "chores");
-                const n = matches.length;
-                summaries.push(`Found ${n} chores matching ${actionKeyword} + ${choreKeyword}.`);
-                continue;
-              }
-            }
-
-            const { count, error } = await supabase
-              .from("chores")
-              .select("id", { count: "exact", head: true })
-              .eq("household_id", householdId)
-              .is("deleted_at", null)
-              .or(`title.ilike.%${choreKeyword}%,metadata->>space.ilike.%${choreKeyword}%`);
-            if (error) {
-              setToolError(error.message || "Couldn’t fetch the information");
-              return;
-            }
-            const n = typeof count === "number" ? count : 0;
-            summaries.push(`Found ${n} chores matching ${choreKeyword}.`);
-            continue;
-          }
-          const tc: ToolCall = {
-            id: `direct_${table}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-            tool: "db.select",
-            args: {
-              table,
-              limit: 50,
-            },
-            reason: `Fetch ${table} from the database`,
-          };
-          const res = await executeToolCall({
-            accessToken: token,
-            householdId,
-            scope: memoryScope,
-            toolCall: withHouseholdId(tc, householdId),
-          });
-          if (!res.ok) {
-            setToolError("error" in res ? res.error : "Couldn’t fetch the information");
-            return;
-          }
-          summaries.push(res.summary);
-        }
-
-        appendAssistantMessage(summaries.join("\n\n"));
-      })();
-
-      return;
-    }
-
-    // Fuzzy query routing: if this looks like a question (and isn't a deterministic direct-table query),
-    // try semantic search across entities before calling the LLM.
-    if (isQueryIntent(trimmed) && !isChoreCreateImperative(trimmed)) {
-      appendUserMessage(trimmed);
-      setInput("");
-
-      const { token, householdId } = getAgentSetup();
-      if (!token || !householdId) {
-        setToolError("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session.");
-        return;
-      }
-
-      try {
-        const res = await semanticSearch({
-          accessToken: token,
-          householdId,
-          query: trimmed,
-          entityTypes: ["chores", "helpers", "alerts"],
-          matchCount: 10,
-          minSimilarity: 0.15,
-        });
-        if (res.ok) {
-          const matches = res.matches ?? [];
-          const top = matches.length > 0 ? matches[0] : null;
-          const topSim = top && typeof (top as any).similarity === "number" ? Number((top as any).similarity) : 0;
-          if (matches.length > 0 && topSim >= 0.15) {
-            const lines = matches.slice(0, 10).map((m: any) => {
-              const et = typeof m?.entity_type === "string" ? m.entity_type : "";
-              const title = typeof m?.title === "string" ? m.title : "";
-              const sim = typeof m?.similarity === "number" ? m.similarity.toFixed(3) : "";
-              return `- [${et}] ${title}${sim ? ` (sim=${sim})` : ""}`;
-            });
-            appendAssistantMessage(lines.length > 0 ? lines.join("\n") : "No semantic matches found.");
-            return;
-          }
-
-          if (matches.length > 0) {
-            const lines = matches.slice(0, 5).map((m: any) => {
-              const et = typeof m?.entity_type === "string" ? m.entity_type : "";
-              const title = typeof m?.title === "string" ? m.title : "";
-              const sim = typeof m?.similarity === "number" ? m.similarity.toFixed(3) : "";
-              return `- [${et}] ${title}${sim ? ` (sim=${sim})` : ""}`;
-            });
-            appendAssistantMessage(`Best semantic candidates (low confidence):\n${lines.join("\n")}`);
-          }
-        }
-      } catch {
-        // fall back to LLM
-      }
-
-      // No confident semantic match: fall back to LLM, but don't duplicate the user message.
-      sendMessage(trimmed, { silent: true });
-      return;
-    }
-
-    if (isChoreCreateImperative(trimmed)) {
-      appendUserMessage(trimmed);
-      setInput("");
-      if (threadKey) clearThreadAnswers(threadKey);
-      dispatchClientChore({ type: "RESET" });
-      await startClientChoreSession(trimmed);
-      return;
-    }
+    // If the assistant is currently streaming, ignore sends.
+    if (isStreaming) return;
 
     sendMessage(trimmed);
     setInput("");
-  }, [input, isStreaming, sendMessage, memoryScope, appendAssistantMessage, lang, appendUserMessage, getAgentSetup, startClientChoreSession, threadKey, clearThreadAnswers, semanticSearch]);
+  }, [
+    input,
+    isStreaming,
+    sendMessage,
+    appendAssistantMessage,
+    lang,
+    appendUserMessage,
+    setDeleteChoresFlowSynced,
+    deleteChoresFlow.phase,
+    deleteChoresFlow.phase === "awaiting_confirm" ? deleteChoresFlow.scope : "",
+    deleteChoresFlow.phase === "awaiting_confirm" ? stableStringify(deleteChoresFlow.choreIds) : "",
+    runDeleteChores,
+    runDeleteScopePreview,
+    loadSpecificChoresPreview,
+  ]);
 
   const handleQuickAction = useCallback((prompt: string) => {
     setInput(prompt);
@@ -2166,6 +1941,8 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   const proposedAutomationSuggestions = parseAutomationSuggestionsFromAssistantText(latestAssistantText);
   const proposedToolCalls = parseToolCallsFromAssistantText(latestAssistantText);
   const proposedClarification = parseClarificationFromAssistantText(latestAssistantText);
+  // Onboarding state is now managed by OnboardingPanel (state machine),
+  // not keyword detection. The panel is rendered below the messages.
 
   const proposedClarificationKey = useMemo(() => {
     if (!proposedClarification) return "";
@@ -2179,8 +1956,26 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     () => proposedActions.some((a) => a.type === "create" && a.table === "chores"),
     [proposedActions],
   );
+  const isReadOnlyRpc = (tc: ToolCall): boolean => {
+    if (tc.tool !== "query.rpc") return false;
+    const nm = (tc.args as any)?.name;
+    return (
+      nm === "resolve_helper" ||
+      nm === "resolve_space" ||
+      nm === "count_chores_assigned_to" ||
+      nm === "count_chores" ||
+      nm === "group_chores_by_status" ||
+      nm === "group_chores_by_assignee" ||
+      nm === "list_chores_enriched"
+    );
+  };
+
   const proposedWriteToolCalls = proposedToolCalls
     .filter((tc) => tc.tool !== "db.select")
+    .filter((tc) => !isReadOnlyRpc(tc))
+    // ui.* pseudo tools are dispatched client-side; never go through the
+    // plan-confirm / executeToolCall path.
+    .filter((tc) => !tc.tool.startsWith("ui."))
     // If the model emits BOTH actions (for chore drafts) and tool_calls (db.insert chores),
     // hide the insert tool calls to avoid duplicate approvals.
     .filter((tc) => {
@@ -2200,6 +1995,35 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     }
     return out;
   }, [proposedWriteToolCalls]);
+
+  // Dispatch ui.* pseudo tool calls as they arrive. The Python intent
+  // `start_elicitation` emits `ui.open_elicitation` — we map that to the
+  // ElicitationFlow dialog, scoped to args.scope if present.
+  useEffect(() => {
+    const uiCalls = proposedToolCalls.filter((tc) => tc.tool.startsWith("ui."));
+    if (uiCalls.length === 0) return;
+    let next: typeof processedUiToolCallIds = processedUiToolCallIds;
+    let touched = false;
+    for (const tc of uiCalls) {
+      const key = typeof tc.id === "string" ? tc.id : JSON.stringify({ tool: tc.tool, args: tc.args });
+      if (processedUiToolCallIds[key]) continue;
+      if (tc.tool === "ui.open_elicitation") {
+        const rawScope = (tc.args as { scope?: unknown })?.scope;
+        const scope =
+          rawScope === "specialty_kitchen" ||
+          rawScope === "specialty_cleaning" ||
+          rawScope === "specialty_outdoor" ||
+          rawScope === "specialty_laundry"
+            ? (rawScope as ElicitationTemplateId)
+            : null;
+        setElicitationUiScope(scope ?? "__unscoped__");
+        setUiToolCallOpenCounter((n) => n + 1);
+      }
+      next = { ...next, [key]: true };
+      touched = true;
+    }
+    if (touched) setProcessedUiToolCallIds(next);
+  }, [proposedToolCalls, processedUiToolCallIds]);
 
   const [toolCallOverridesByKey, setToolCallOverridesByKey] = useState<Record<string, ToolCall>>({});
   const pendingSpaceToolCallKeyRef = useRef<string | null>(null);
@@ -2259,6 +2083,33 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         if (cancelled) return;
         const ambiguous = detectAmbiguousAreaChoreClient(record, spaces);
         if (ambiguous.ok) continue;
+
+        const recordTitle = typeof record.title === "string" ? record.title : "";
+        const recordDesc = typeof record.description === "string" ? record.description : "";
+        const recordText = `${recordTitle} ${recordDesc}`.trim();
+        const inferred =
+          inferSpaceFromText((ambiguous as any).options ?? [], recordText) ||
+          inferSpaceFromText((ambiguous as any).options ?? [], latestUserText);
+        if (inferred) {
+          if (threadKey) setThreadAnswer(threadKey, { spaces: [inferred] });
+          const args2: any = tc.args ?? {};
+          const rec2 = args2.record && typeof args2.record === "object" && !Array.isArray(args2.record) ? args2.record : {};
+          const meta2 =
+            rec2?.metadata && typeof rec2.metadata === "object" && !Array.isArray(rec2.metadata) ? { ...rec2.metadata } : {};
+          const patched: ToolCall = {
+            ...tc,
+            args: {
+              ...args2,
+              record: {
+                ...rec2,
+                metadata: { ...meta2, space: inferred },
+              },
+            },
+          };
+          setToolCallOverridesByKey((prev) => ({ ...prev, [key]: patched }));
+          pendingSpaceToolCallKeyRef.current = null;
+          continue;
+        }
 
         if (storedSpaces.length > 0) {
           const space = storedSpaces.join(", ");
@@ -2321,7 +2172,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [spaceClarifyOpen, dedupedWriteToolCalls, toolCallOverridesByKey, ensureHomeSpacesForValidation, openSpaceClarification, getAgentSetup]);
+  }, [spaceClarifyOpen, dedupedWriteToolCalls, toolCallOverridesByKey, ensureHomeSpacesForValidation, openSpaceClarification, getAgentSetup, latestUserText]);
 
   const hasProposals =
     proposedActions.length > 0 ||
@@ -2332,14 +2183,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   const [autoExecutedToolCallIds, setAutoExecutedToolCallIds] = useState<Record<string, boolean>>({});
 
   const [automationSuggestionBusyId, setAutomationSuggestionBusyId] = useState<string | null>(null);
-
-  const latestUserText = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const m: any = messages[i];
-      if (m?.role === "user" && typeof m?.content === "string") return String(m.content);
-    }
-    return "";
-  }, [messages]);
 
   const recentUserTextWindow = useMemo(() => {
     const parts: string[] = [];
@@ -2537,180 +2380,38 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const latestRecord = (latest.record ?? {}) as Record<string, unknown>;
     const nextHomeType = typeof latestRecord.home_type === "string" ? latestRecord.home_type : "apartment";
     const nextBhk = asNumberOrNull(latestRecord.bhk) ?? 2;
-    const latestSpaces = Array.isArray(latestRecord.spaces)
-      ? (latestRecord.spaces as unknown[]).map(String).filter(Boolean)
-      : [];
-    const baseline = getBaselineSpaces(nextHomeType, nextBhk);
-    const mergedSpaces = latestSpaces.length > 0 ? latestSpaces : baseline;
+    // Find the best matching template, fall back to 2BHK apartment.
+    const matchedTemplate =
+      HOME_PROFILE_TEMPLATES.find((t) => t.home_type === nextHomeType && t.bhk === nextBhk) ??
+      HOME_PROFILE_TEMPLATES.find((t) => t.home_type === nextHomeType) ??
+      HOME_PROFILE_TEMPLATES.find((t) => t.key === "2bhk_apartment")!;
+    const rooms = normalizeSpacesToRooms(latestRecord.spaces).length > 0
+      ? normalizeSpacesToRooms(latestRecord.spaces)
+      : matchedTemplate.rooms;
     setHomeProfileDraft({
       id: `${Date.now()}`,
       action: {
         ...latest,
-        record: { ...latest.record, spaces: mergedSpaces },
-      },
-    });
-    setHomeProfileMode("edit");
-    setHomeProfileWizardStep(0);
-    setHomeProfileWizardOpen(true);
-  }, [latestAssistantText, isStreaming, getBaselineSpaces, homeProfileExists, reviewHomeProfile]);
-
-  const saveHomeProfileDraft = useCallback(async () => {
-    if (!homeProfileDraft) return;
-    setToolError(null);
-    setToolSuccess(null);
-    setHomeProfileError(null);
-    const { token, householdId } = getAgentSetup();
-    if (!token || !householdId) {
-      setToolError("Missing access_token or household_id. Click Agent Setup to confirm your session token + household id.");
-      return;
-    }
-
-    setToolBusy(true);
-    const tc: ToolCall = {
-      id: `hp_${Date.now()}`,
-      tool: "db.insert",
-      args: {
-        table: "home_profiles",
-        record: homeProfileDraft.action.record,
-      },
-      reason: homeProfileDraft.action.reason,
-    };
-
-    const res = await executeToolCall({
-      accessToken: token,
-      householdId,
-      scope: memoryScope,
-      toolCall: withHouseholdId(tc, householdId),
-    });
-    setToolBusy(false);
-
-    if (!res.ok) {
-      setToolError("error" in res ? res.error : "Couldn’t save the home profile");
-      return;
-    }
-
-    setToolSuccess(res.summary);
-    appendAssistantMessage(res.summary);
-    setHomeProfileDraft(null);
-    setHomeProfileExists(true);
-  }, [homeProfileDraft, memoryScope, appendAssistantMessage, getAgentSetup]);
-
-  useEffect(() => {
-    void refreshHomeProfileExists();
-  }, [authedHouseholdId, agentHouseholdId, refreshHomeProfileExists]);
-
-  const HOME_SPACE_SUGGESTIONS = useMemo(
-    () => [
-      "living room",
-      "dining area",
-      "work area",
-      "study",
-      "powder room",
-      "utility room",
-      "store room",
-      "pantry",
-      "pooja room",
-      "balcony",
-      "terrace",
-      "deck",
-      "home office",
-      "gym",
-      "basement",
-      "lift",
-      "battery room",
-      "solar storage",
-      "servant room",
-      "laundry",
-      "garden",
-      "parking",
-      "car porch",
-    ],
-    [],
-  );
-
-  const openHomeProfileWizard = useCallback(() => {
-    if (homeProfileExists) {
-      void reviewHomeProfile();
-      return;
-    }
-    if (!homeProfileDraft) {
-      const baseline = getBaselineSpaces("apartment", 2);
-      setHomeProfileDraft({
-        id: `${Date.now()}`,
-        action: {
-          type: "create",
-          table: "home_profiles",
-          record: {
-            home_type: "apartment",
-            bhk: 2,
-            square_feet: null,
-            floors: null,
-            spaces: baseline,
-            space_counts: {},
-            has_balcony: false,
-            has_pets: false,
-            has_kids: false,
-            flooring_type: null,
-            num_bathrooms: null,
-          },
-          reason: "Draft home profile",
+        record: {
+          ...latest.record,
+          home_type: nextHomeType,
+          bhk: nextBhk,
+          spaces: rooms,
+          floors: matchedTemplate.floors_default,
+          square_feet: asNumberOrNull(latestRecord.square_feet) ?? matchedTemplate.square_feet_min ?? null,
         },
-      });
-    }
+      },
+    });
     setHomeProfileMode("edit");
-    setHomeProfileWizardStep(0);
+    setHomeProfileWizardStep(1); // Skip template picker; agent already chose a type.
     setHomeProfileWizardOpen(true);
-  }, [homeProfileDraft, getBaselineSpaces, homeProfileExists, reviewHomeProfile]);
+  }, [latestAssistantText, isStreaming, homeProfileExists, reviewHomeProfile]);
 
-  const closeHomeProfileWizard = useCallback(() => {
-    setHomeProfileWizardOpen(false);
-    setHomeProfileNewSpace("");
-  }, []);
-
-  const updateHomeProfileRecord = useCallback((patch: Record<string, unknown>) => {
-    setHomeProfileDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            action: {
-              ...prev.action,
-              record: { ...(prev.action.record as Record<string, unknown>), ...patch },
-            },
-          }
-        : prev,
-    );
-  }, []);
-
-  const goNextHomeProfileStep = useCallback(() => {
-    setHomeProfileWizardStep((s) => Math.min(3, s + 1));
-  }, []);
-
-  const goBackHomeProfileStep = useCallback(() => {
-    setHomeProfileWizardStep((s) => Math.max(0, s - 1));
-  }, []);
-
-  // Load helpers list for household
   useEffect(() => {
-    const token = agentAccessToken.trim();
     const householdId = agentHouseholdId.trim();
-    if (!token || !householdId) return;
-
-    let cancelled = false;
-    (async () => {
-      setHelperLoadError(null);
-      const res = await agentListHelpers({ accessToken: token, householdId });
-      if (cancelled) return;
-      if (!res.ok) {
-        setHelperLoadError("error" in res ? res.error : "Failed to load helpers");
-        setHelpers([]);
-        return;
-      }
-      setHelpers(res.helpers);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [agentAccessToken, agentHouseholdId]);
+    if (!householdId) return;
+    void loadHelpersFromStore(householdId);
+  }, [agentHouseholdId, loadHelpersFromStore]);
 
   const applyAction = useCallback(async (action: AgentCreateAction) => {
     setAgentError(null);
@@ -2968,11 +2669,8 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
   const approveToolCall = useCallback(async (tc: ToolCall) => {
     try {
-      console.log("approveToolCall clicked", tc);
       setToolError(null);
       setToolSuccess(null);
-      setToolSuccess(`Approve clicked: ${tc.tool}`);
-      appendAssistantMessage(`Approve clicked: ${tc.tool}`);
 
       const { token, householdId } = getAgentSetup();
       if (!token || !householdId) {
@@ -2980,7 +2678,6 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         appendAssistantMessage("Missing access_token or household_id. Click Agent Setup to confirm your session token + household id.");
         return;
       }
-      appendAssistantMessage(`Executing ${tc.tool}...`);
       setToolBusy(true);
       const tcWithHousehold = withHouseholdId(tc, householdId);
 
@@ -3123,7 +2820,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       }
       const res = await semanticReindex({ accessToken: token, householdId, entityTypes: ["chores", "helpers", "alerts"] });
       if (!res.ok) {
-        setSemanticDebugError(res.error);
+        setSemanticDebugError("error" in res ? res.error : "Semantic reindex failed.");
         return;
       }
       setSemanticDebugLastReindex(`Indexed ${res.indexed} rows in ${res.batches} batches.`);
@@ -3156,7 +2853,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         minSimilarity: 0.15,
       });
       if (!res.ok) {
-        setSemanticDebugError(res.error);
+        setSemanticDebugError("error" in res ? res.error : "Semantic search failed.");
         return;
       }
       setSemanticDebugMatches(res.matches as any[]);
@@ -3271,11 +2968,27 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   }, [approveToolCall, scheduleDialogValue, scheduleDialogDate, scheduleDialogTime, schedulePendingToolCall, schedulePendingDraftIds, pendingClarification, sendMessage, proposedClarification, proposedClarificationKey, threadKey, setThreadAnswer]);
 
   const executeReadOnlyToolCall = useCallback(async (tc: ToolCall) => {
-    if (tc.tool !== "db.select") return;
+    const isReadOnlyRpc = (v: ToolCall): boolean => {
+      if (v.tool !== "query.rpc") return false;
+      const nm = (v.args as any)?.name;
+      return (
+        nm === "resolve_helper" ||
+        nm === "resolve_space" ||
+        nm === "count_chores_assigned_to" ||
+        nm === "count_chores" ||
+        nm === "group_chores_by_status" ||
+        nm === "group_chores_by_assignee" ||
+        nm === "list_chores_enriched"
+      );
+    };
 
-    const table = typeof (tc.args as any)?.table === "string" ? String((tc.args as any).table) : "";
-    const allowlistedTables = new Set<string>(["chores", "helpers", "alerts", "automations", "automation_suggestions", "home_profiles"]);
-    if (table && !allowlistedTables.has(table)) return;
+    if (tc.tool !== "db.select" && !isReadOnlyRpc(tc)) return;
+
+    if (tc.tool === "db.select") {
+      const table = typeof (tc.args as any)?.table === "string" ? String((tc.args as any).table) : "";
+      const allowlistedTables = new Set<string>(["chores", "helpers", "alerts", "automations", "automation_suggestions", "home_profiles"]);
+      if (table && !allowlistedTables.has(table)) return;
+    }
 
     const key = toolCallKey(tc);
     if (autoExecutedToolCallIds[key]) return;
@@ -3296,6 +3009,12 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
     if (!res.ok) {
       setToolError("error" in res ? res.error : t("chat.could_not_fetch"));
+      try {
+        const msg = "error" in res ? res.error : t("chat.could_not_fetch");
+        appendAssistantMessage(`⚠️ ${msg}`);
+      } catch {
+        // ignore
+      }
       setAutoExecutedToolCallIds((prev) => {
         const next = { ...prev };
         delete next[key];
@@ -3315,7 +3034,9 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
   }, [isStreaming, latestAssistantText]);
 
   // Orchestrator clarification handling: open the right UI when agent-service emits a structured clarification.
+  // Skip in onboarding mode — the inline forms handle all structured input.
   useEffect(() => {
+    if (isOnboarding) return;
     if (isStreaming) return;
     if (!proposedClarification) return;
 
@@ -3351,6 +3072,20 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
       const title = proposedClarification.title || "Choose spaces";
       const options = filterBathroomOptionsIfNeeded(optionsClean, title);
       if (options.length === 0) return;
+
+      const inferred = inferSpaceFromText(options, latestUserText);
+      if (inferred) {
+        const resp: any = { spaces: [inferred] };
+        const dueAt = pendingClarificationRef.current?.due_at;
+        if (dueAt) resp.due_at = dueAt;
+        if (threadKey) setThreadAnswer(threadKey, { spaces: [inferred] });
+        if (clarificationKey) {
+          dismissedClarificationKeyRef.current = clarificationKey;
+          if (threadKey) setDismissedClarificationKey(threadKey, clarificationKey);
+        }
+        sendMessage(JSON.stringify({ clarification_response: resp }), { silent: true, allowWhileStreaming: true });
+        return;
+      }
 
       openedSpaceClarificationKeyRef.current = clarificationKey;
       setPendingClarification((prev) =>
@@ -3479,87 +3214,155 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
     const { token, householdId } = getAgentSetup();
     if (!token || !householdId) return;
     // Auto-run at most one read-only tool call per assistant turn.
-    const firstSelect = proposedToolCalls.find((tc) => tc.tool === "db.select");
-    if (firstSelect) void executeReadOnlyToolCall(firstSelect);
+    const isReadOnlyRpc = (v: ToolCall): boolean => {
+      if (v.tool !== "query.rpc") return false;
+      const nm = (v.args as any)?.name;
+      return (
+        nm === "resolve_helper" ||
+        nm === "resolve_space" ||
+        nm === "count_chores_assigned_to" ||
+        nm === "count_chores" ||
+        nm === "group_chores_by_status" ||
+        nm === "group_chores_by_assignee" ||
+        nm === "list_chores_enriched"
+      );
+    };
+
+    const firstRead = proposedToolCalls.find((tc) => tc.tool === "db.select" || isReadOnlyRpc(tc));
+    if (firstRead) void executeReadOnlyToolCall(firstRead);
   }, [proposedToolCalls, executeReadOnlyToolCall, getAgentSetup]);
 
   const confirmClearChat = useCallback(() => {
     setClearChatConfirmOpen(false);
     clearHistory();
+    setAssignmentNudgeDismissed(false);
   }, [clearHistory]);
 
   return (
     <Stack sx={{ height: "100%", overflow: "hidden" }}>
-      {/* ── Page header ──────────────────────────────────────────────────── */}
-      <Stack
-        direction="row"
-        justifyContent="space-between"
-        alignItems="flex-end"
-        sx={{ mb: 2.5, flexShrink: 0 }}
-      >
-        <Box>
-          <Typography variant="h5" fontWeight={700} lineHeight={1.2}>
-            Chat Assistant
-          </Typography>
-          <Typography variant="body2" color="text.secondary" mt={0.25}>
-            Use natural language to manage your household
-          </Typography>
-        </Box>
+      {/* ── Page header (hidden when embedded in drawer) ─────────────────── */}
+      {!props.embedded && (
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="flex-end"
+          sx={{ mb: 2.5, flexShrink: 0 }}
+        >
+          <Box>
+            <Typography variant="h5" fontWeight={700} lineHeight={1.2}>
+              AI Agent
+            </Typography>
+            <Typography variant="body2" color="text.secondary" mt={0.25}>
+              Use natural language to manage your household
+            </Typography>
+          </Box>
 
-        <Stack direction="row" spacing={1.5} alignItems="center">
-          <FormControl size="small" sx={{ minWidth: 150 }}>
-            <InputLabel>Memory</InputLabel>
-            <Select
-              value={memoryScope}
-              label="Memory"
-              onChange={(e) => setMemoryScope(e.target.value === "household" ? "household" : "user")}
-            >
-              <MenuItem value="user">Personal</MenuItem>
-              <MenuItem value="household">Household</MenuItem>
-            </Select>
-          </FormControl>
-
-          {/* Language / STT picker */}
-          <ToggleButtonGroup
-            value={lang}
-            exclusive
-            onChange={handleLangChange}
-            size="small"
-            aria-label="Speech recognition language"
-            sx={{ height: 32 }}
-          >
-            {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
-              <ToggleButton
-                key={l}
-                value={l}
-                aria-label={l}
-                sx={{ px: 1.5, fontSize: "0.72rem", fontWeight: 600, lineHeight: 1 }}
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Memory</InputLabel>
+              <Select
+                value={memoryScope}
+                label="Memory"
+                onChange={(e) => setMemoryScope(e.target.value === "household" ? "household" : "user")}
               >
-                {LANG_LABELS[l]}
-              </ToggleButton>
-            ))}
-          </ToggleButtonGroup>
+                <MenuItem value="user">Personal</MenuItem>
+                <MenuItem value="household">Household</MenuItem>
+              </Select>
+            </FormControl>
 
-          <Button
-            size="small"
-            variant="outlined"
-            disabled={isStreaming}
-            onClick={() => setClearChatConfirmOpen(true)}
-            sx={{ textTransform: "none" }}
-          >
-            Clear Chat
-          </Button>
+            {/* Language / STT picker */}
+            <ToggleButtonGroup
+              value={lang}
+              exclusive
+              onChange={handleLangChange}
+              size="small"
+              aria-label="Speech recognition language"
+              sx={{ height: 32 }}
+            >
+              {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
+                <ToggleButton
+                  key={l}
+                  value={l}
+                  aria-label={l}
+                  sx={{ px: 1.5, fontSize: "0.72rem", fontWeight: 600, lineHeight: 1 }}
+                >
+                  {LANG_LABELS[l]}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
 
-          <Button
-            size="small"
-            variant={showSemanticDebug ? "contained" : "outlined"}
-            onClick={() => setShowSemanticDebug((prev) => !prev)}
-            sx={{ textTransform: "none" }}
-          >
-            Debug
-          </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={isStreaming}
+              onClick={() => setClearChatConfirmOpen(true)}
+              sx={{ textTransform: "none" }}
+            >
+              Clear Chat
+            </Button>
+
+            <Button
+              size="small"
+              variant={showSemanticDebug ? "contained" : "outlined"}
+              onClick={() => setShowSemanticDebug((prev) => !prev)}
+              sx={{ textTransform: "none" }}
+            >
+              Debug
+            </Button>
+          </Stack>
         </Stack>
-      </Stack>
+      )}
+
+      {/* ── Embedded toolbar (compact controls for drawer mode) ──────────── */}
+      {props.embedded && (
+        <Stack
+          direction="row"
+          spacing={0.75}
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ px: 1.5, py: 0.5, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0, bgcolor: "grey.50" }}
+        >
+          <Button
+            size="small"
+            variant={drawerQuickCommandsOpen ? "contained" : "text"}
+            onClick={() => setDrawerQuickCommandsOpen((v) => !v)}
+            startIcon={drawerQuickCommandsOpen ? <ExpandLess sx={{ fontSize: 14 }} /> : <Bolt sx={{ fontSize: 14 }} />}
+            sx={{ textTransform: "none", fontSize: "0.72rem", minWidth: 0, px: 1 }}
+          >
+            Quick actions
+          </Button>
+
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <ToggleButtonGroup
+              value={lang}
+              exclusive
+              onChange={handleLangChange}
+              size="small"
+              sx={{ height: 26 }}
+            >
+              {(Object.keys(LANG_LABELS) as SpeechLang[]).map((l) => (
+                <ToggleButton
+                  key={l}
+                  value={l}
+                  sx={{ px: 0.75, fontSize: "0.6rem", fontWeight: 600 }}
+                >
+                  {LANG_LABELS[l]}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+
+            <Button
+              size="small"
+              variant="text"
+              disabled={isStreaming}
+              onClick={() => setClearChatConfirmOpen(true)}
+              sx={{ textTransform: "none", fontSize: "0.7rem", minWidth: 0, px: 0.5, color: "text.secondary" }}
+            >
+              Clear
+            </Button>
+          </Stack>
+        </Stack>
+      )}
 
       {/* ── API key / error banners ───────────────────────────────────────── */}
       <Collapse in={!hasKey}>
@@ -3668,71 +3471,57 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
             borderRadius: "12px",
           }}
         >
-          {/* Chat header */}
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={1.5}
-            sx={{
-              px: 2,
-              py: 1.5,
-              borderBottom: "1px solid",
-              borderColor: "divider",
-              flexShrink: 0,
-            }}
-          >
-            <Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main" }}>
-              <SmartToy sx={{ fontSize: 19 }} />
-            </Avatar>
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="subtitle1" fontWeight={600} lineHeight={1.2}>
-                Home Assistant
-              </Typography>
-              <Stack direction="row" alignItems="center" spacing={0.5}>
-                <Typography variant="caption" color="text.secondary">
-                  Powered by Sarvam AI
-                </Typography>
-                {sttMode === "sarvam" && voiceSupported && (
-                  <Tooltip title="Using Sarvam Saaras v3 for voice transcription">
-                    <GraphicEq sx={{ fontSize: 13, color: "primary.main" }} />
-                  </Tooltip>
-                )}
-              </Stack>
-            </Box>
-            <Chip
-              label={hasKey ? "AI Connected" : "Demo Mode"}
-              size="small"
-              color={hasKey ? "success" : "default"}
-              variant="outlined"
-              sx={{ fontSize: "0.7rem", height: 22 }}
-            />
-
-            {props.embedded ? (
-              <Tooltip title={drawerQuickCommandsOpen ? "Hide quick commands" : "Show quick commands"}>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={() => setDrawerQuickCommandsOpen((v) => !v)}
-                  aria-label={drawerQuickCommandsOpen ? "Hide quick commands" : "Show quick commands"}
-                  startIcon={drawerQuickCommandsOpen ? <ExpandLess fontSize="small" /> : <Bolt fontSize="small" />}
-                  sx={{ textTransform: "none", px: 1, minWidth: 0, ml: 0.5 }}
-                >
-                  Quick commands
-                </Button>
-              </Tooltip>
-            ) : null}
-
-            <IconButton
-              size="small"
-              onClick={(e) => openAccountMenu(e.currentTarget)}
-              sx={{ ml: 0.5 }}
-              aria-label="Account"
+          {/* Chat header — hidden when embedded (drawer has its own header) */}
+          {!props.embedded && (
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={1.5}
+              sx={{
+                px: 2,
+                py: 1.5,
+                borderBottom: "1px solid",
+                borderColor: "divider",
+                flexShrink: 0,
+              }}
             >
-              <Avatar sx={{ width: 28, height: 28, bgcolor: "grey.200", color: "text.primary" }}>
-                <Person sx={{ fontSize: 18 }} />
+              <Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main" }}>
+                <SmartToy sx={{ fontSize: 19 }} />
               </Avatar>
-            </IconButton>
-          </Stack>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="subtitle1" fontWeight={600} lineHeight={1.2}>
+                  AI Agent
+                </Typography>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <Typography variant="caption" color="text.secondary">
+                    Powered by Sarvam AI
+                  </Typography>
+                  {sttMode === "sarvam" && voiceSupported && (
+                    <Tooltip title="Using Sarvam Saaras v3 for voice transcription">
+                      <GraphicEq sx={{ fontSize: 13, color: "primary.main" }} />
+                    </Tooltip>
+                  )}
+                </Stack>
+              </Box>
+              <Chip
+                label={hasKey ? "AI Connected" : "Demo Mode"}
+                size="small"
+                color={hasKey ? "success" : "default"}
+                variant="outlined"
+                sx={{ fontSize: "0.7rem", height: 22 }}
+              />
+              <IconButton
+                size="small"
+                onClick={(e) => openAccountMenu(e.currentTarget)}
+                sx={{ ml: 0.5 }}
+                aria-label="Account"
+              >
+                <Avatar sx={{ width: 28, height: 28, bgcolor: "grey.200", color: "text.primary" }}>
+                  <Person sx={{ fontSize: 18 }} />
+                </Avatar>
+              </IconButton>
+            </Stack>
+          )}
 
           {props.embedded ? (
             <Collapse in={drawerQuickCommandsOpen} timeout="auto" unmountOnExit>
@@ -3810,7 +3599,41 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
             </DialogActions>
           </Dialog>
 
-          {/* Messages area */}
+          {/* Assignment nudge — fixed above messages */}
+          {unassignedChoreCount > 5 && !assignmentNudgeDismissed && !assignmentPanelOpen && (
+            <Paper variant="outlined" sx={{ px: 2, py: 1, mx: 2, mt: 1, borderRadius: 2, bgcolor: "info.50", borderColor: "info.200" }}>
+              <Stack direction="row" spacing={1.5} alignItems="center">
+                <Box flex={1}>
+                  <Typography variant="body2" fontWeight={600}>
+                    {unassignedChoreCount} chore{unassignedChoreCount === 1 ? "" : "s"} not yet assigned to helpers
+                  </Typography>
+                </Box>
+                <Button size="small" variant="contained" onClick={() => setAssignmentPanelOpen(true)}>
+                  Assign now
+                </Button>
+                <Button size="small" onClick={() => setAssignmentNudgeDismissed(true)} sx={{ minWidth: 0, color: "text.secondary" }}>
+                  ✕
+                </Button>
+              </Stack>
+            </Paper>
+          )}
+
+          {/* Assignment panel — takes over the full chat area when open */}
+          {assignmentPanelOpen && (
+            <Box sx={{ flex: 1, overflowY: "auto", px: 2, py: 2, minHeight: 0 }}>
+              <AssignmentPanel
+                onDismiss={() => { setAssignmentPanelOpen(false); setAssignmentNudgeDismissed(true); }}
+                onComplete={(count) => {
+                  setAssignmentPanelOpen(false);
+                  setAssignmentNudgeDismissed(true);
+                  setUnassignedChoreCount((prev) => Math.max(0, prev - count));
+                  navigate("/chores");
+                }}
+              />
+            </Box>
+          )}
+
+          {/* Messages area — hidden when assignment panel is open */}
           <Box
             ref={messagesScrollRef}
             sx={{
@@ -3819,6 +3642,7 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
               px: 2,
               py: 2,
               minHeight: 0,
+              display: assignmentPanelOpen ? "none" : undefined,
               "&::-webkit-scrollbar": { width: 4 },
               "&::-webkit-scrollbar-track": { bgcolor: "transparent" },
               "&::-webkit-scrollbar-thumb": {
@@ -4638,26 +4462,78 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
 
             {showTypingDots && <TypingIndicator />}
 
+            {/* State-driven onboarding panel — replaces keyword-based form detection */}
+            {isOnboarding && (
+              <Box sx={{ my: 1 }}>
+                <OnboardingPanel
+                  householdId={(authedHouseholdId || agentHouseholdId || "").trim()}
+                  userId={authedUser?.id ?? ""}
+                  onFormSubmitted={(msg) => void sendMessage(msg, { silent: true })}
+                  onComplete={() => {
+                    // Navigate away from onboarding mode
+                    navigate("/", { replace: true });
+                  }}
+                />
+              </Box>
+            )}
+
             <div ref={messagesEndRef} />
           </Box>
 
-          {/* Input */}
-          <ChatInput
-            value={input}
-            onChange={setInput}
-            onSend={handleSend}
-            isListening={isListening}
-            isTranscribing={isTranscribing}
-            onMicToggle={toggleMic}
-            voiceSupported={voiceSupported}
-            lang={lang}
-            transliterationMode={lang === "hi-IN" ? "hi" : lang === "kn-IN" ? "kn" : "off"}
-            disabled={!!chatError}
-          />
+          {/* Quick commands — hidden during onboarding and assignment */}
+          {onboardingResolved === false && !assignmentPanelOpen && (
+            <Box px={1} pb={0.5}>
+              <Button
+                size="small"
+                onClick={() => setQuickCommandsCollapsed((p) => !p)}
+                sx={{ textTransform: "none", color: "text.secondary", fontSize: "0.75rem", minWidth: 0, p: 0.5 }}
+              >
+                {quickCommandsCollapsed ? "▸ Quick actions" : "▾ Quick actions"}
+              </Button>
+              {!quickCommandsCollapsed && (
+                <Stack direction="row" spacing={1} mt={0.5} flexWrap="wrap">
+                  <Chip
+                    icon={<Home sx={{ fontSize: 16 }} />}
+                    label={homeProfileExists ? "Home Profile" : "Create Home Profile"}
+                    size="small"
+                    variant="outlined"
+                    clickable
+                    onClick={() => (homeProfileExists ? reviewHomeProfile() : openHomeProfileWizard())}
+                    sx={{ fontSize: "0.78rem" }}
+                  />
+                  <Chip
+                    icon={<BarChart sx={{ fontSize: 16 }} />}
+                    label="Coverage Planner"
+                    size="small"
+                    variant="outlined"
+                    clickable
+                    onClick={() => setCoverageExperimentOpen(true)}
+                    sx={{ fontSize: "0.78rem" }}
+                  />
+                </Stack>
+              )}
+            </Box>
+          )}
+
+          {/* Input — hidden when assignment panel is open */}
+          {!assignmentPanelOpen && (
+            <ChatInput
+              value={input}
+              onChange={setInput}
+              onSend={handleSend}
+              isListening={isListening}
+              isTranscribing={isTranscribing}
+              onMicToggle={toggleMic}
+              voiceSupported={voiceSupported}
+              lang={lang}
+              transliterationMode={lang === "hi-IN" ? "hi" : lang === "kn-IN" ? "kn" : "off"}
+              disabled={!!chatError}
+            />
+          )}
         </Paper>
 
-        {/* Quick commands panel (desktop / non-embedded) */}
-        {!props.embedded ? (
+        {/* Quick commands panel (desktop / non-embedded, hidden during onboarding or while detecting) */}
+        {!props.embedded && onboardingResolved === false ? (
           <Paper
             variant="outlined"
             sx={{
@@ -4821,416 +4697,25 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
         <CoverageExperimentEntry householdId={authedHouseholdId.trim() || agentHouseholdId.trim()} onClose={() => setCoverageExperimentOpen(false)} />
       </Dialog>
 
-      <Dialog open={homeProfileWizardOpen} onClose={closeHomeProfileWizard} maxWidth="sm" fullWidth>
-        <DialogTitle>Home Profile</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} mt={1}>
-            {homeProfileMode === "edit" && (
-              <Stepper activeStep={homeProfileWizardStep} alternativeLabel>
-                <Step>
-                  <StepLabel>Basics</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Spaces</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Household</StepLabel>
-                </Step>
-                <Step>
-                  <StepLabel>Review</StepLabel>
-                </Step>
-              </Stepper>
-            )}
-
-            {homeProfileDraft && (() => {
-              const r = homeProfileDraft.action.record as Record<string, unknown>;
-              const homeType = typeof r.home_type === "string" ? r.home_type : "apartment";
-              const bhk = asNumberOrNull(r.bhk) ?? 2;
-              const squareFeet = asNumberOrNull(r.square_feet);
-              const floors = asNumberOrNull(r.floors);
-              const spaces = Array.isArray(r.spaces) ? (r.spaces as unknown[]).map(String).filter(Boolean) : [];
-              const spaceCountsRaw = r.space_counts && typeof r.space_counts === "object" ? (r.space_counts as Record<string, unknown>) : {};
-              const balconyCount = asNumberOrNull(spaceCountsRaw.balcony);
-              const terraceCount = asNumberOrNull(spaceCountsRaw.terrace);
-              const hasBalcony = typeof r.has_balcony === "boolean" ? r.has_balcony : false;
-              const hasPets = typeof r.has_pets === "boolean" ? r.has_pets : false;
-              const hasKids = typeof r.has_kids === "boolean" ? r.has_kids : false;
-              const flooringType = typeof r.flooring_type === "string" ? r.flooring_type : "";
-              const numBathrooms = asNumberOrNull(r.num_bathrooms);
-
-              const reviewLines: string[] = [];
-              reviewLines.push(`Type: ${homeType}`);
-              reviewLines.push(`BHK: ${bhk}`);
-              if (typeof squareFeet === "number") reviewLines.push(`Area: ${squareFeet} sq ft`);
-              if (typeof floors === "number") reviewLines.push(`Floors: ${floors}`);
-              reviewLines.push(`Balcony: ${hasBalcony ? "Yes" : "No"}`);
-              if (typeof balconyCount === "number") reviewLines.push(`Balconies: ${balconyCount}`);
-              if (typeof terraceCount === "number") reviewLines.push(`Terraces: ${terraceCount}`);
-              reviewLines.push(`Pets: ${hasPets ? "Yes" : "No"}`);
-              reviewLines.push(`Kids: ${hasKids ? "Yes" : "No"}`);
-              if (spaces.length > 0) reviewLines.push(`Spaces: ${spaces.join(", ")}`);
-              if (typeof numBathrooms === "number") reviewLines.push(`Bathrooms: ${numBathrooms}`);
-              if (flooringType.trim()) reviewLines.push(`Flooring: ${flooringType.trim()}`);
-
-              if (homeProfileMode === "view") {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Here’s what’s saved for your home.
-                    </Typography>
-                    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
-                      <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
-                        {reviewLines.map((l) => `- ${l}`).join("\n")}
-                      </Typography>
-                    </Paper>
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 0) {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Quick basics — you can add more details in the next steps.
-                    </Typography>
-                    <Stack spacing={1.5}>
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                          Home type
-                        </Typography>
-                        <ToggleButtonGroup
-                          exclusive
-                          value={homeType}
-                          onChange={(_, v) => {
-                            if (!v) return;
-                            const nextType = String(v);
-                            const baseline = getBaselineSpaces(nextType, bhk);
-                            const nextSpaces = spaces.length > 0 ? spaces : baseline;
-                            updateHomeProfileRecord({ home_type: nextType, spaces: nextSpaces });
-                          }}
-                          fullWidth
-                          size="small"
-                        >
-                          <ToggleButton value="apartment">Apartment</ToggleButton>
-                          <ToggleButton value="villa">Villa</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Box>
-
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                          BHK
-                        </Typography>
-                        <ToggleButtonGroup
-                          exclusive
-                          value={String(bhk)}
-                          onChange={(_, v) => {
-                            if (!v) return;
-                            const nextBhk = Number(v);
-                            const baseline = getBaselineSpaces(homeType, nextBhk);
-                            const nextSpaces = spaces.length > 0 ? spaces : baseline;
-                            updateHomeProfileRecord({ bhk: nextBhk, spaces: nextSpaces });
-                          }}
-                          fullWidth
-                          size="small"
-                        >
-                          <ToggleButton value="1">1</ToggleButton>
-                          <ToggleButton value="2">2</ToggleButton>
-                          <ToggleButton value="3">3</ToggleButton>
-                          <ToggleButton value="4">4</ToggleButton>
-                          <ToggleButton value="5">5+</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Box>
-
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                        <TextField
-                          label="Area (sq ft) (optional)"
-                          type="number"
-                          value={typeof squareFeet === "number" ? squareFeet : ""}
-                          onChange={(e) => updateHomeProfileRecord({ square_feet: asNumberOrNull(e.target.value) })}
-                          fullWidth
-                          size="small"
-                          inputProps={{ min: 0, max: 200000 }}
-                        />
-                        <TextField
-                          label="Floors (optional)"
-                          type="number"
-                          value={typeof floors === "number" ? floors : ""}
-                          onChange={(e) => updateHomeProfileRecord({ floors: asNumberOrNull(e.target.value) })}
-                          fullWidth
-                          size="small"
-                          inputProps={{ min: 0, max: 50 }}
-                        />
-                      </Stack>
-                    </Stack>
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 1) {
-                const hasBalconySpace = spaces.some((s) => s.toLowerCase().includes("balcony"));
-                const hasTerraceSpace = spaces.some((s) => s.toLowerCase().includes("terrace"));
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Add notable spaces. You can select suggestions or type your own.
-                    </Typography>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                      <TextField
-                        label="Add a space (free text)"
-                        value={homeProfileNewSpace}
-                        onChange={(e) => setHomeProfileNewSpace(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key !== "Enter") return;
-                          e.preventDefault();
-                          const next = homeProfileNewSpace.trim();
-                          if (!next) return;
-                          const nextSpaces = Array.from(new Set([...spaces, next]));
-                          const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                          updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                          setHomeProfileNewSpace("");
-                        }}
-                        fullWidth
-                        size="small"
-                        placeholder="e.g. battery room"
-                      />
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          const next = homeProfileNewSpace.trim();
-                          if (!next) return;
-                          const nextSpaces = Array.from(new Set([...spaces, next]));
-                          const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                          updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                          setHomeProfileNewSpace("");
-                        }}
-                        disabled={!homeProfileNewSpace.trim()}
-                        sx={{ flexShrink: 0 }}
-                      >
-                        Add
-                      </Button>
-                    </Stack>
-
-                    <Box>
-                      <Typography variant="caption" color="text.secondary" display="block" mb={0.75}>
-                        Common spaces (tap to select)
-                      </Typography>
-                      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                        {HOME_SPACE_SUGGESTIONS.map((opt) => {
-                          const selected = spaces.some((s) => s.toLowerCase() === opt.toLowerCase());
-                          return (
-                            <Chip
-                              key={opt}
-                              label={opt}
-                              size="small"
-                              color={selected ? "primary" : "default"}
-                              variant={selected ? "filled" : "outlined"}
-                              onClick={() => {
-                                const nextSpaces = selected
-                                  ? spaces.filter((s) => s.toLowerCase() !== opt.toLowerCase())
-                                  : Array.from(new Set([...spaces, opt]));
-                                const hasBalconyFromSpaces = nextSpaces.some((s) => s.toLowerCase().includes("balcony"));
-                                updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                              }}
-                            />
-                          );
-                        })}
-                      </Stack>
-                    </Box>
-
-                    {spaces.length > 0 && (
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" display="block" mb={0.75}>
-                          Selected spaces
-                        </Typography>
-                        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                          {spaces.map((s, idx) => (
-                            <Chip
-                              key={`${s}-${idx}`}
-                              label={s}
-                              size="small"
-                              variant="outlined"
-                              onDelete={() => {
-                                const nextSpaces = spaces.filter((_, i) => i !== idx);
-                                const hasBalconyFromSpaces = nextSpaces.some((x) => x.toLowerCase().includes("balcony"));
-                                updateHomeProfileRecord({ spaces: nextSpaces, has_balcony: hasBalcony || hasBalconyFromSpaces });
-                              }}
-                            />
-                          ))}
-                        </Stack>
-                      </Box>
-                    )}
-
-                    {(hasBalconySpace || hasTerraceSpace) && (
-                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                        {hasBalconySpace && (
-                          <TextField
-                            label="Number of balconies (optional)"
-                            type="number"
-                            value={typeof balconyCount === "number" ? balconyCount : ""}
-                            onChange={(e) => {
-                              const next = asNumberOrNull(e.target.value);
-                              updateHomeProfileRecord({
-                                space_counts: { ...spaceCountsRaw, balcony: next ?? undefined },
-                                has_balcony: true,
-                              });
-                            }}
-                            fullWidth
-                            size="small"
-                            inputProps={{ min: 0, max: 50 }}
-                          />
-                        )}
-                        {hasTerraceSpace && (
-                          <TextField
-                            label="Number of terraces (optional)"
-                            type="number"
-                            value={typeof terraceCount === "number" ? terraceCount : ""}
-                            onChange={(e) => {
-                              const next = asNumberOrNull(e.target.value);
-                              updateHomeProfileRecord({
-                                space_counts: { ...spaceCountsRaw, terrace: next ?? undefined },
-                              });
-                            }}
-                            fullWidth
-                            size="small"
-                            inputProps={{ min: 0, max: 50 }}
-                          />
-                        )}
-                      </Stack>
-                    )}
-
-                    <FormControlLabel
-                      control={<Switch checked={hasBalcony} onChange={(e) => updateHomeProfileRecord({ has_balcony: e.target.checked })} />}
-                      label="Has balcony"
-                    />
-                  </Stack>
-                );
-              }
-
-              if (homeProfileWizardStep === 2) {
-                return (
-                  <Stack spacing={2}>
-                    <Typography variant="body2" color="text.secondary">
-                      Household context — helps personalize schedules and recommendations.
-                    </Typography>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                      <FormControlLabel
-                        control={<Switch checked={hasPets} onChange={(e) => updateHomeProfileRecord({ has_pets: e.target.checked })} />}
-                        label="Pets"
-                      />
-                      <FormControlLabel
-                        control={<Switch checked={hasKids} onChange={(e) => updateHomeProfileRecord({ has_kids: e.target.checked })} />}
-                        label="Kids"
-                      />
-                    </Stack>
-                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-                      <TextField
-                        label="Balconies (optional)"
-                        type="number"
-                        value={typeof balconyCount === "number" ? balconyCount : ""}
-                        onChange={(e) => {
-                          const next = asNumberOrNull(e.target.value);
-                          updateHomeProfileRecord({
-                            space_counts: { ...spaceCountsRaw, balcony: next ?? undefined },
-                            has_balcony: hasBalcony || (typeof next === "number" && next > 0),
-                          });
-                        }}
-                        fullWidth
-                        size="small"
-                        inputProps={{ min: 0, max: 50 }}
-                      />
-                      <TextField
-                        label="Bathrooms (optional)"
-                        type="number"
-                        value={typeof numBathrooms === "number" ? numBathrooms : ""}
-                        onChange={(e) => updateHomeProfileRecord({ num_bathrooms: asNumberOrNull(e.target.value) })}
-                        fullWidth
-                        size="small"
-                        inputProps={{ min: 0, max: 20 }}
-                      />
-                      <TextField
-                        label="Flooring type (optional)"
-                        value={flooringType}
-                        onChange={(e) => updateHomeProfileRecord({ flooring_type: e.target.value || null })}
-                        fullWidth
-                        size="small"
-                      />
-                    </Stack>
-                  </Stack>
-                );
-              }
-
-              return (
-                <Stack spacing={2}>
-                  <Typography variant="body2" color="text.secondary">
-                    Review your home profile. You can go back to edit anything.
-                  </Typography>
-                  <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
-                    <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
-                      {reviewLines.map((l) => `- ${l}`).join("\n")}
-                    </Typography>
-                  </Paper>
-                </Stack>
-              );
-            })()}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          {homeProfileMode === "view" ? (
-            <>
-              <Button variant="outlined" disabled={toolBusy || homeProfileBusy} onClick={closeHomeProfileWizard}>
-                Close
-              </Button>
-              <Button
-                variant="contained"
-                disabled={toolBusy || homeProfileBusy || !homeProfileDraft}
-                onClick={() => {
-                  setHomeProfileMode("edit");
-                  setHomeProfileWizardStep(0);
-                }}
-              >
-                Edit
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                variant="outlined"
-                disabled={toolBusy || homeProfileBusy}
-                onClick={() => {
-                  setHomeProfileDraft(null);
-                  closeHomeProfileWizard();
-                }}
-              >
-                Discard
-              </Button>
-              <Box sx={{ flex: 1 }} />
-              <Button
-                variant="text"
-                disabled={homeProfileWizardStep === 0 || toolBusy || homeProfileBusy}
-                onClick={goBackHomeProfileStep}
-              >
-                Back
-              </Button>
-              {homeProfileWizardStep < 3 ? (
-                <Button variant="contained" disabled={toolBusy || homeProfileBusy || !homeProfileDraft} onClick={goNextHomeProfileStep}>
-                  Next
-                </Button>
-              ) : (
-                <Button
-                  variant="contained"
-                  disabled={toolBusy || homeProfileBusy || !homeProfileDraft}
-                  onClick={async () => {
-                    await saveHomeProfileDraft();
-                    closeHomeProfileWizard();
-                  }}
-                >
-                  Save
-                </Button>
-              )}
-            </>
-          )}
-        </DialogActions>
-      </Dialog>
+      <HomeProfileWizard
+        open={homeProfileWizardOpen}
+        onClose={closeHomeProfileWizard}
+        draft={homeProfileDraft}
+        setDraft={setHomeProfileDraft}
+        mode={homeProfileMode}
+        setMode={setHomeProfileMode}
+        step={homeProfileWizardStep}
+        setStep={setHomeProfileWizardStep}
+        newSpace={homeProfileNewSpace}
+        setNewSpace={setHomeProfileNewSpace}
+        busy={homeProfileBusy}
+        error={homeProfileError}
+        toolBusy={toolBusy}
+        updateRecord={updateHomeProfileRecord}
+        goNext={goNextHomeProfileStep}
+        goBack={goBackHomeProfileStep}
+        onSave={saveHomeProfileDraft}
+      />
 
       <Dialog open={profileDialogOpen} onClose={() => setProfileDialogOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Profile</DialogTitle>
@@ -5304,6 +4789,18 @@ export function ChatInterface(props: { embedded?: boolean } = {}) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* ── ui.open_elicitation dispatcher ──────────────────────────────── */}
+      {elicitationUiScope !== null && (
+        <ElicitationFlow
+          key={`chat-elicit-${uiToolCallOpenCounter}`}
+          autoOpen
+          hideBanner
+          scopedTemplateId={elicitationUiScope === "__unscoped__" ? null : elicitationUiScope}
+          onAllAnswered={() => setElicitationUiScope(null)}
+          onClose={() => setElicitationUiScope(null)}
+        />
+      )}
     </Stack>
   );
 }

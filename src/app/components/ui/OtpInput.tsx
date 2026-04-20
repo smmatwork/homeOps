@@ -17,15 +17,17 @@ export function OtpInput({ length, value, onChange, disabled }: OtpInputProps) {
     onChange(newValue.join(""));
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>, index: number) => {
     if (event.key === "Backspace" && !value[index] && index > 0) {
       handleChange(index - 1, "");
     }
   };
 
-  const handleFocus = (event: React.FocusEvent<HTMLInputElement>, index: number) => {
-    if (value[index] === "") {
-      event.target.select();
+  const handleFocus = (event: React.FocusEvent<HTMLElement>, index: number) => {
+    if (value[index] !== "") return;
+    const t = event.target;
+    if (t && typeof (t as any).select === "function") {
+      (t as any).select();
     }
   };
 

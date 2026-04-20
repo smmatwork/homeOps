@@ -1,0 +1,58 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.95.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    environment:
+      HONEYCOMB_API_KEY: ${HONEYCOMB_API_KEY}
+      HONEYCOMB_TRACES_DATASET: ${HONEYCOMB_TRACES_DATASET:-homeops-prod}
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+
+  agent-service:
+    build:
+      context: ../services/agent-service
+      dockerfile: Dockerfile
+    environment:
+      OTEL_SERVICE_NAME: homeops-agent-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      HOMEOPS_ENV: ${HOMEOPS_ENV:-prod}
+      AGENT_SERVICE_KEY: ${AGENT_SERVICE_KEY}
+      # Supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      EDGE_BASE_URL: ${EDGE_BASE_URL}
+      EDGE_BEARER_TOKEN: ${EDGE_BEARER_TOKEN}
+      # LLM providers
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      SARVAM_MODEL_DEFAULT: ${SARVAM_MODEL_DEFAULT:-sarvam-m}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      # WhatsApp Business API
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      HELPER_MAGIC_LINK_BASE_URL: ${HELPER_MAGIC_LINK_BASE_URL:-}
+      # SMS
+      SMS_PROVIDER: ${SMS_PROVIDER:-}
+      SMS_API_KEY: ${SMS_API_KEY:-}
+      # Observability
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8011:8011"
+    depends_on:
+      - otel-collector
+
+  supabase-log-forwarder:
+    build:
+      context: ./supabase-log-forwarder
+      dockerfile: Dockerfile
+    environment:
+      HONEYCOMB_API_KEY: ${HONEYCOMB_API_KEY}
+      HONEYCOMB_LOGS_DATASET: ${HONEYCOMB_LOGS_DATASET:-homeops-prod-logs}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8088:8088"

@@ -18,8 +18,11 @@ import {
   Download,
   People,
 } from "@mui/icons-material";
+import { useI18n } from "../../i18n";
+import { CognitiveLoadCard } from "./CognitiveLoadCard";
 
 export function OwnerAnalytics() {
+  const { t } = useI18n();
   const usageStats = [
     { label: "Total Households", value: "1,247", change: "+12.5%", trend: "up" },
     { label: "Active Users", value: "4,891", change: "+8.3%", trend: "up" },
@@ -50,24 +53,24 @@ export function OwnerAnalytics() {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box>
           <Typography variant="h4" fontWeight="bold">
-            Analytics & Usage
+            {t("analytics.title")}
           </Typography>
           <Typography color="textSecondary">
-            Monitor app performance and user engagement
+            {t("analytics.subtitle")}
           </Typography>
         </Box>
         <Box display="flex" gap={2}>
           <FormControl size="small">
-            <InputLabel>Time Range</InputLabel>
+            <InputLabel>{t("analytics.time_range")}</InputLabel>
             <Select defaultValue="7days">
-              <MenuItem value="24hours">Last 24 Hours</MenuItem>
-              <MenuItem value="7days">Last 7 Days</MenuItem>
-              <MenuItem value="30days">Last 30 Days</MenuItem>
-              <MenuItem value="90days">Last 90 Days</MenuItem>
+              <MenuItem value="24hours">{t("analytics.last_24_hours")}</MenuItem>
+              <MenuItem value="7days">{t("analytics.last_7_days")}</MenuItem>
+              <MenuItem value="30days">{t("analytics.last_30_days")}</MenuItem>
+              <MenuItem value="90days">{t("analytics.last_90_days")}</MenuItem>
             </Select>
           </FormControl>
           <Button variant="outlined" startIcon={<Download />}>
-            Export
+            {t("analytics.export")}
           </Button>
         </Box>
       </Box>
@@ -90,19 +93,24 @@ export function OwnerAnalytics() {
                 variant="body2"
                 color={stat.trend === "up" ? "success.main" : "error.main"}
               >
-                {stat.change} from last period
+                {stat.change} {t("analytics.from_last_period")}
               </Typography>
             </CardContent>
           </Card>
         ))}
       </Box>
 
+      {/* O1 Cognitive Load Metric */}
+      <Box mb={4}>
+        <CognitiveLoadCard />
+      </Box>
+
       <Box display="grid" gridTemplateColumns="repeat(auto-fit, minmax(300px, 1fr))" gap={4}>
         {/* Feature Usage */}
         <Card>
           <CardHeader
-            title="Feature Usage"
-            subheader="Most popular features by adoption rate"
+            title={t("analytics.feature_usage")}
+            subheader={t("analytics.feature_usage_subtitle")}
           />
           <Divider />
           <CardContent>
@@ -113,7 +121,7 @@ export function OwnerAnalytics() {
                     {feature.name}
                   </Typography>
                   <Typography variant="body2" color="textSecondary">
-                    {feature.users.toLocaleString()} users
+                    {feature.users.toLocaleString()} {t("analytics.users")}
                   </Typography>
                 </Box>
                 <Box
@@ -134,7 +142,7 @@ export function OwnerAnalytics() {
                   />
                 </Box>
                 <Typography variant="caption" color="textSecondary">
-                  {feature.usage}% adoption rate
+                  {feature.usage}% {t("analytics.adoption_rate")}
                 </Typography>
               </Box>
             ))}
@@ -144,8 +152,8 @@ export function OwnerAnalytics() {
         {/* Recent Activity */}
         <Card>
           <CardHeader
-            title="Recent Activity"
-            subheader="Live updates from households"
+            title={t("analytics.recent_activity")}
+            subheader={t("analytics.recent_activity_subtitle")}
           />
           <Divider />
           <CardContent>
@@ -169,8 +177,8 @@ export function OwnerAnalytics() {
       {/* User Growth Chart Placeholder */}
       <Card>
         <CardHeader
-          title="User Growth Over Time"
-          subheader="New user registrations and household growth"
+          title={t("analytics.user_growth")}
+          subheader={t("analytics.user_growth_subtitle")}
         />
         <Divider />
         <CardContent>
@@ -187,7 +195,7 @@ export function OwnerAnalytics() {
             <Box textAlign="center">
               <BarChart color="disabled" fontSize="large" />
               <Typography variant="body2" color="textSecondary">
-                Chart visualization would appear here
+                {t("analytics.chart_placeholder")}
               </Typography>
             </Box>
           </Box>

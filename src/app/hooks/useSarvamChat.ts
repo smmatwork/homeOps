@@ -77,11 +77,16 @@ function sanitizeForSarvam(messages: ChatMessage[]): ChatMessage[] {
     .filter(Boolean)
     .join("\n\n");
 
-  // Sarvam requires the system message to appear only once, at the beginning.
+  // Sarvam requires the system message first, then user message.
+  // If no user messages survived, add a minimal one to satisfy the API.
+  if (out.length === 0 || out[0].role !== "user") {
+    out.unshift({ role: "user", content: "Hello" });
+  }
   return [{ role: "system", content: mergedSystemContent }, ...out];
 }
 
-export function useSarvamChat() {
+export function useSarvamChat(opts?: { systemPrompt?: string }) {
+  const systemPrompt = opts?.systemPrompt ?? HOMEOPS_SYSTEM_PROMPT;
   const { accessToken: authedAccessToken, householdId: authedHouseholdId } = useAuth();
   const [messages, setMessages] = useState<ChatEntry[]>(INITIAL_MESSAGES);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -101,7 +106,7 @@ export function useSarvamChat() {
 
   // Keep a ref to the full conversation for the API (includes system prompt)
   const historyRef = useRef<ChatMessage[]>([
-    { role: "system", content: HOMEOPS_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
   ]);
 
   const memorySummaryRef = useRef<string>("");
@@ -116,6 +121,16 @@ export function useSarvamChat() {
   const chatSyncChannelName = "homeops:chat-sync";
   const chatSyncChannelRef = useRef<BroadcastChannel | null>(null);
   const chatSyncStorageKey = "homeops.chat.last_sync";
+
+  // Monotonic high-water mark for sync broadcasts. Survives effect re-runs so
+  // a clearHistory() can advance it and permanently drop any older in-flight
+  // broadcasts (prevents old messages from flashing back after clear).
+  const lastSyncTsRef = useRef(0);
+
+  // Timestamp of the most recent clearHistory(). loadMemory() skips within the
+  // guard window so in-flight server clears don't race with scheduled reloads.
+  const clearedAtRef = useRef(0);
+  const CLEAR_GUARD_MS = 3000;
 
   const broadcastChatSync = useCallback(() => {
     try {
@@ -277,13 +292,35 @@ export function useSarvamChat() {
         }
       }
 
-      const res = await appendChatMessages({
+      let res = await appendChatMessages({
         accessToken,
         householdId,
         scope: memoryScopeRef.current,
         messages: items,
         summary: memorySummaryRef.current,
       });
+
+      // The cached accessToken may be expired. On 401, force a refresh and
+      // retry once before surfacing the error to the user.
+      if (res.ok === false && res.status === 401) {
+        try {
+          const refresh = await supabase.auth.refreshSession();
+          const nextToken = refresh.data.session?.access_token
+            ? String(refresh.data.session.access_token).trim()
+            : "";
+          if (nextToken) {
+            res = await appendChatMessages({
+              accessToken: nextToken,
+              householdId,
+              scope: memoryScopeRef.current,
+              messages: items,
+              summary: memorySummaryRef.current,
+            });
+          }
+        } catch {
+          // fall through and surface the original 401 below
+        }
+      }
 
       if (res.ok === false) {
         const msg = `Chat history couldn't be saved. (${res.error}${typeof res.status === "number" ? `, status=${res.status}` : ""})`;
@@ -303,6 +340,12 @@ export function useSarvamChat() {
   };
 
   const loadMemory = useCallback(async (scope: ChatScope) => {
+    // Don't reload within the clear guard window — it would restore old messages
+    // before the server finishes processing the clear.
+    if (clearedAtRef.current > 0 && Date.now() - clearedAtRef.current < CLEAR_GUARD_MS) {
+      setMemoryReady(true);
+      return;
+    }
     setMemoryReady(false);
     setError(null);
     let { accessToken, householdId } = getAgentSetup();
@@ -335,7 +378,7 @@ export function useSarvamChat() {
       }
 
       if (!accessToken || !householdId) {
-        historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+        historyRef.current = [{ role: "system", content: systemPrompt }];
         setMessages((prev) => (prev.length > 0 ? prev : INITIAL_MESSAGES));
         if (!accessToken) {
           setError("Chat history isn't loading because you're not logged in (missing access token). Please log in again.");
@@ -365,10 +408,11 @@ export function useSarvamChat() {
       limit: 50,
     });
 
-    // If user JWT expired, refresh once and retry.
+    // If user JWT expired/invalid, refresh once and retry.
     if (res.ok === false) {
       const errRes = res as { ok: false; error: string; status?: number };
-      if (errRes.status === 401) {
+      const invalidToken = typeof errRes.error === "string" && /invalid token/i.test(errRes.error);
+      if (errRes.status === 401 || invalidToken) {
         try {
           const refresh = await supabase.auth.refreshSession();
           const nextToken = refresh.data.session?.access_token ? String(refresh.data.session.access_token).trim() : "";
@@ -429,7 +473,7 @@ export function useSarvamChat() {
       ? `Long-term memory summary (authoritative):\n${memorySummaryRef.current.trim()}`
       : "";
 
-    const ctx: ChatMessage[] = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+    const ctx: ChatMessage[] = [{ role: "system", content: systemPrompt }];
     if (memoryBlock) ctx.push({ role: "system", content: memoryBlock });
     for (const m of res.messages.slice(-MAX_CONTEXT_MESSAGES)) {
       if (m.role !== "system" && m.role !== "user" && m.role !== "assistant") continue;
@@ -439,10 +483,9 @@ export function useSarvamChat() {
 
     setError(null);
     setMemoryReady(true);
-  }, []);
+  }, [authedHouseholdId, authedAccessToken]);
 
   useEffect(() => {
-    let last = 0;
     let timer: any = null;
 
     const scheduleReload = () => {
@@ -458,8 +501,8 @@ export function useSarvamChat() {
       const source = typeof detail?.source === "string" ? detail.source : "";
       const ts = typeof detail?.ts === "number" ? detail.ts : Date.now();
       if (source && source === instanceIdRef.current) return;
-      if (ts <= last) return;
-      last = ts;
+      if (ts <= lastSyncTsRef.current) return;
+      lastSyncTsRef.current = ts;
       scheduleReload();
     };
 
@@ -554,7 +597,7 @@ export function useSarvamChat() {
     memorySummaryRef.current = trimmedSummary;
 
     const memoryBlock = `Long-term memory summary (authoritative):\n${trimmedSummary}`;
-    historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }, { role: "system", content: memoryBlock }, ...keep];
+    historyRef.current = [{ role: "system", content: systemPrompt }, { role: "system", content: memoryBlock }, ...keep];
 
     // Persist updated summary
     const { accessToken, householdId } = getAgentSetup();
@@ -622,13 +665,17 @@ export function useSarvamChat() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const timeoutMsRaw = (import.meta as any)?.env?.VITE_CHAT_TIMEOUT_MS;
+    const timeoutMsNum = typeof timeoutMsRaw === "string" ? Number(timeoutMsRaw) : NaN;
+    const timeoutMs = Number.isFinite(timeoutMsNum) && timeoutMsNum > 0 ? timeoutMsNum : 90000;
+
     const watchdog = window.setTimeout(() => {
       try {
         controller.abort();
       } catch {
         // ignore
       }
-    }, 25000);
+    }, timeoutMs);
 
     let fullResponse = "";
     try {
@@ -655,8 +702,13 @@ export function useSarvamChat() {
         );
         return;
       }
-      const errMsg =
-        err instanceof Error ? err.message : "Unknown error from Sarvam AI";
+      const rawMsg = err instanceof Error ? err.message : "Unknown error";
+      // Sanitize internal errors — never show stack traces or variable names to users
+      const isInternal = /cannot access|traceback|TypeError|KeyError|AttributeError|undefined is not/i.test(rawMsg);
+      const errMsg = isInternal
+        ? "The assistant encountered a temporary issue. Please try again."
+        : rawMsg;
+      console.error("Chat error:", rawMsg);
       setError(errMsg);
       setMessages((prev) =>
         prev.map((m) =>
@@ -699,18 +751,31 @@ export function useSarvamChat() {
     abortRef.current?.abort();
     abortRef.current = null;
     setMessages(INITIAL_MESSAGES);
-    historyRef.current = [{ role: "system", content: HOMEOPS_SYSTEM_PROMPT }];
+    historyRef.current = [{ role: "system", content: systemPrompt }];
     memorySummaryRef.current = "";
     conversationIdRef.current = "";
     setConversationId("");
     setError(null);
     setIsStreaming(false);
 
+    // Advance both refs synchronously so any in-flight broadcast with an
+    // earlier timestamp is dropped, and loadMemory() skips within the guard
+    // window.
+    const now = Date.now();
+    clearedAtRef.current = now;
+    lastSyncTsRef.current = now;
+
     const { accessToken, householdId } = getAgentSetup();
     if (accessToken && householdId) {
-      void clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
+      void (async () => {
+        const res = await clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
+        if (res.ok) {
+          conversationIdRef.current = res.conversationId;
+          setConversationId(res.conversationId);
+        }
+      })();
     }
-  }, []);
+  }, [systemPrompt]);
 
   return { messages, sendMessage, appendUserMessage, isStreaming, error, clearHistory, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, conversationId };
 }

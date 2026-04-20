@@ -1,17 +1,12 @@
 "use client";
 
 import * as React from "react";
-import {
-  Popover,
-  PopoverProps,
-  PopoverTrigger,
-  PopoverContent,
-} from "@mui/material";
+import { Box, Popover } from "@mui/material";
 
-interface HoverCardProps extends PopoverProps {
+type HoverCardProps = {
   trigger: React.ReactNode;
   content: React.ReactNode;
-}
+};
 
 export function HoverCard({ trigger, content, ...props }: HoverCardProps) {
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
@@ -26,21 +21,20 @@ export function HoverCard({ trigger, content, ...props }: HoverCardProps) {
 
   return (
     <>
-      <PopoverTrigger
+      <Box
         onMouseEnter={handleOpen}
         onMouseLeave={handleClose}
         sx={{ display: "inline-block" }}
       >
         {trigger}
-      </PopoverTrigger>
+      </Box>
       <Popover
         open={Boolean(anchorEl)}
         anchorEl={anchorEl}
         onClose={handleClose}
         disableRestoreFocus
-        {...props}
       >
-        <PopoverContent>{content}</PopoverContent>
+        <Box p={1.5}>{content}</Box>
       </Popover>
     </>
   );

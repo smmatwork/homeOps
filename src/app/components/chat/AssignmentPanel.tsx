@@ -1,0 +1,1098 @@
+/**
+ * Assignment panel — two assignment patterns:
+ * 1. By helper specialty (cook → kitchen, maid → cleaning)
+ * 2. By floor/area (ground floor → Roopa, first floor → Bhimappa)
+ * Then: editable assignment list with frequency dropdowns.
+ */
+
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  LinearProgress,
+  MenuItem,
+  Paper,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { CheckCircle, Edit, Person, Layers, EditNote } from "@mui/icons-material";
+import { useAuth } from "../../auth/AuthProvider";
+import { supabase } from "../../services/supabaseClient";
+import { agentCreate, executeToolCall } from "../../services/agentApi";
+import { reassignChore, broadcastNudgeAvailable, fetchAssignmentRules, type OperatingMode, type AssignmentRuleRow } from "../../services/assignmentApi";
+import { ASSIGNMENT_MODE_CHANGED_EVENT } from "../chores/AssignmentModeChip";
+import { ElicitationFlow } from "../helpers/ElicitationFlow";
+import type { ElicitationTemplateId } from "../../services/elicitationApi";
+import { useHelpersStore } from "../../stores/helpersStore";
+import {
+  buildAssignmentPlan,
+  inferRoleTags,
+  type AssignableChore,
+  type AssignableHelper,
+  type AssignmentPlan,
+} from "../../services/choreAssigner";
+import { floorLabel } from "../../config/homeProfileTemplates";
+import { useI18n } from "../../i18n";
+
+interface AssignmentPanelProps {
+  onDismiss: () => void;
+  onComplete: (count: number) => void;
+}
+
+interface HelperInfo {
+  id: string;
+  name: string;
+  type: string;
+  capacityMinutes: number;
+  kind: "helper" | "member";
+  workDays: string[]; // ["mon","tue","wed","thu","fri"]
+  startTime: string;  // "10:30"
+  endTime: string;    // "12:30"
+}
+interface RoomInfo { displayName: string; floor: number | null; }
+
+type Step = "pick_pattern" | "by_specialty" | "by_floor" | "assignments" | "applying" | "done";
+
+const CADENCE_OPTIONS = [
+  { value: "daily", label: "Daily" },
+  { value: "alternate_days", label: "Alternate days" },
+  { value: "every_3_days", label: "Every 3 days" },
+  { value: "every_4_days", label: "Every 4 days" },
+  { value: "weekly_mon", label: "Weekly — Mon" },
+  { value: "weekly_tue", label: "Weekly — Tue" },
+  { value: "weekly_wed", label: "Weekly — Wed" },
+  { value: "weekly_thu", label: "Weekly — Thu" },
+  { value: "weekly_fri", label: "Weekly — Fri" },
+  { value: "weekly_sat", label: "Weekly — Sat" },
+  { value: "weekly_sun", label: "Weekly — Sun" },
+  { value: "biweekly_mon", label: "Alternate week — Mon" },
+  { value: "biweekly_sat", label: "Alternate week — Sat" },
+  { value: "monthly_1st_sat", label: "Monthly — 1st Sat" },
+  { value: "monthly_1st_sun", label: "Monthly — 1st Sun" },
+  { value: "monthly_2nd_sat", label: "Monthly — 2nd Sat" },
+  { value: "monthly_3rd_sat", label: "Monthly — 3rd Sat" },
+  { value: "monthly_last_sat", label: "Monthly — Last Sat" },
+] as const;
+
+/** Map legacy cadence values to the new day-specific format */
+function normalizeCadence(raw: string): string {
+  switch (raw) {
+    case "weekly": return "weekly_sat";
+    case "biweekly": return "biweekly_sat";
+    case "every_2_days": return "alternate_days";
+    case "monthly": return "monthly_1st_sat";
+    default: return CADENCE_OPTIONS.some((o) => o.value === raw) ? raw : "weekly_sat";
+  }
+}
+
+const SPECIALTY_AREAS = [
+  { key: "all_cleaning", label: "All cleaning (sweep, mop, dust)", tags: ["cleaning", "sweeping", "mopping", "dusting", "bathroom", "bedroom", "living", "general"] },
+  { key: "kitchen", label: "Kitchen & cooking", tags: ["kitchen", "cooking", "dining"] },
+  { key: "bedrooms", label: "Bedrooms & living areas", tags: ["bedroom", "living", "dusting"] },
+  { key: "bathrooms", label: "Bathrooms", tags: ["bathroom", "cleaning"] },
+  { key: "outdoor", label: "Outdoor & garden", tags: ["garden", "outdoor", "balcony", "garage"] },
+  { key: "laundry", label: "Laundry & ironing", tags: ["laundry", "washing", "ironing"] },
+];
+
+export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps) {
+  const { householdId, accessToken, user } = useAuth();
+  const { lang } = useI18n();
+  const [step, setStep] = useState<Step>("pick_pattern");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const [members, setMembers] = useState<HelperInfo[]>([]);
+  const helperInfos = useMemo<HelperInfo[]>(() => storeHelpers.map((r) => {
+    const meta = (r.metadata ?? {}) as Record<string, unknown>;
+    const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
+    const days = (schedule.days ?? {}) as Record<string, boolean>;
+    const workDays = Object.entries(days).filter(([, v]) => v).map(([k]) => k);
+    const startTime = typeof schedule.start === "string" ? schedule.start : "";
+    const endTime = typeof schedule.end === "string" ? schedule.end : "";
+    let capacityMinutes = Number(r.daily_capacity_minutes ?? 120);
+    if (startTime && endTime) {
+      const [sh, sm] = startTime.split(":").map(Number);
+      const [eh, em] = endTime.split(":").map(Number);
+      const scheduleMins = (eh * 60 + em) - (sh * 60 + sm);
+      if (scheduleMins > 0) capacityMinutes = scheduleMins;
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      type: String(r.type ?? "General"),
+      capacityMinutes,
+      kind: "helper" as const,
+      workDays,
+      startTime,
+      endTime,
+    };
+  }), [storeHelpers]);
+  const helpers = useMemo<HelperInfo[]>(() => [...helperInfos, ...members], [helperInfos, members]);
+  const [rawChores, setRawChores] = useState<AssignableChore[]>([]);
+  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [assignmentRules, setAssignmentRules] = useState<AssignmentRuleRow[]>([]);
+  const [unresolvedTemplates, setUnresolvedTemplates] = useState<string[]>([]);
+  const [elicitationScopedTemplate, setElicitationScopedTemplate] = useState<ElicitationTemplateId | null>(null);
+
+  // Specialty preferences: helperId → selected area keys
+  const [specialtyPrefs, setSpecialtyPrefs] = useState<Record<string, string[]>>({});
+
+  // Floor preferences: floor number → helperId
+  const [floorPrefs, setFloorPrefs] = useState<Record<string, string>>({});
+
+  // Editable assignments: choreId → { helperId, cadence }
+  const [assignments, setAssignments] = useState<Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }>>({});
+
+  const [applyProgress, setApplyProgress] = useState(0);
+  const [applyTotal, setApplyTotal] = useState(0);
+
+  // Inline chore edit state
+  const [editChoreId, setEditChoreId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ title: "", description: "", space: "", category: "" });
+  const [editBusy, setEditBusy] = useState(false);
+  const [splitMode, setSplitMode] = useState(false);
+  const [splitTasks, setSplitTasks] = useState<Array<{ title: string }>>([{ title: "" }, { title: "" }]);
+
+  // ── Load data ───────────────────────────────────────────────────
+
+  const loadData = useCallback(async () => {
+    if (!householdId) { setLoading(false); return; }
+    setLoading(true);
+
+    await loadHelpersFromStore(householdId);
+
+    const [choresRes, profileRes, membersRes] = await Promise.all([
+      supabase.from("chores").select("id,title,metadata,helper_id,status")
+        .eq("household_id", householdId).is("helper_id", null).is("deleted_at", null).neq("status", "completed"),
+      supabase.from("home_profiles").select("spaces").eq("household_id", householdId).maybeSingle(),
+      supabase.from("household_people").select("id,display_name,person_type").eq("household_id", householdId),
+    ]);
+
+    setLoading(false);
+    if (choresRes.error) {
+      setError(choresRes.error.message);
+      return;
+    }
+
+    // Household members (adults only) as potential assignees — merged with
+    // helpers (sourced from helpersStore) via the `helpers` useMemo above.
+    const memberList: HelperInfo[] = ((membersRes.data ?? []) as Array<Record<string, unknown>>)
+      .filter((m) => String(m.person_type) === "adult")
+      .map((m) => ({
+        id: `member_${m.id}`,
+        name: `${String(m.display_name)} (Self)`,
+        type: "Household member",
+        capacityMinutes: 60,
+        kind: "member" as const,
+        workDays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        startTime: "",
+        endTime: "",
+      }));
+
+    const c: AssignableChore[] = (choresRes.data ?? []).map((r: Record<string, unknown>) => {
+      const meta = (r.metadata ?? {}) as Record<string, unknown>;
+      return {
+        id: String(r.id), title: String(r.title ?? ""),
+        space: typeof meta.space === "string" ? meta.space : "",
+        cadence: typeof meta.cadence === "string" ? meta.cadence : "weekly",
+        estimatedMinutes: typeof meta.estimated_minutes === "number" ? meta.estimated_minutes : 0,
+        currentHelperId: null,
+      };
+    });
+
+    // Parse rooms with floors
+    let spaces = profileRes.data?.spaces;
+    if (typeof spaces === "string") { try { spaces = JSON.parse(spaces); } catch { spaces = []; } }
+    const roomList: RoomInfo[] = Array.isArray(spaces) ? spaces.map((s: unknown) => {
+      if (typeof s === "string") return { displayName: s, floor: null };
+      if (s && typeof s === "object") {
+        const o = s as Record<string, unknown>;
+        return {
+          displayName: String(o.display_name ?? o.template_name ?? ""),
+          floor: typeof o.floor === "number" ? o.floor : null,
+        };
+      }
+      return { displayName: "", floor: null };
+    }).filter((r: RoomInfo) => r.displayName) : [];
+
+    setMembers(memberList);
+    setRawChores(c);
+    setRooms(roomList);
+
+    // Load full rules via the shared fetcher so the engine can consume them.
+    const rulesResult = await fetchAssignmentRules(householdId);
+    const savedRules = rulesResult.ok === true ? rulesResult.rules : [];
+    setAssignmentRules(savedRules);
+
+    if (savedRules.length > 0) {
+      // Restore specialty prefs from persisted rules
+      const sp: Record<string, string[]> = {};
+      const fp: Record<string, string> = {};
+      for (const rule of savedRules) {
+        if (!rule.helper_id) continue;
+        if (rule.template_id.startsWith("specialty_")) {
+          const areaKey = String((rule.template_params as Record<string, unknown>).area_key ?? "");
+          if (!sp[rule.helper_id]) sp[rule.helper_id] = [];
+          if (areaKey && !sp[rule.helper_id].includes(areaKey)) sp[rule.helper_id].push(areaKey);
+        } else if (rule.template_id.startsWith("floor_")) {
+          const floor = String(rule.template_id.slice(6));
+          fp[floor] = rule.helper_id;
+        }
+      }
+      if (Object.keys(sp).length > 0) setSpecialtyPrefs(sp);
+      if (Object.keys(fp).length > 0) setFloorPrefs(fp);
+    } else {
+      // Default: infer from helper type
+      const sp: Record<string, string[]> = {};
+      for (const helper of useHelpersStore.getState().helpers) {
+        const tags = inferRoleTags(helper.type || null);
+        let bestKey = "all_cleaning";
+        let bestScore = 0;
+        for (const area of SPECIALTY_AREAS) {
+          const score = area.tags.filter((t) => tags.includes(t)).length;
+          if (score > bestScore) { bestScore = score; bestKey = area.key; }
+        }
+        sp[helper.id] = [bestKey];
+      }
+      setSpecialtyPrefs(sp);
+    }
+  }, [householdId, loadHelpersFromStore]);
+
+  useEffect(() => { void loadData(); }, [loadData]);
+
+  // ── Floors available ────────────────────────────────────────────
+
+  const floors = useMemo(() => {
+    const floorSet = new Set<number>();
+    for (const r of rooms) { if (r.floor !== null) floorSet.add(r.floor); }
+    return [...floorSet].sort((a, b) => a - b);
+  }, [rooms]);
+
+  // Room names by floor
+  const roomsByFloor = useMemo(() => {
+    const map: Record<number, string[]> = {};
+    for (const r of rooms) {
+      if (r.floor === null) continue;
+      if (!map[r.floor]) map[r.floor] = [];
+      map[r.floor].push(r.displayName);
+    }
+    return map;
+  }, [rooms]);
+
+  // ── Generate assignments ────────────────────────────────────────
+
+  const generateBySpecialty = () => {
+    const assignableHelpers: AssignableHelper[] = helpers.map((h) => {
+      const selectedKeys = specialtyPrefs[h.id] ?? [];
+      const tags: string[] = [];
+      for (const key of selectedKeys) {
+        const area = SPECIALTY_AREAS.find((a) => a.key === key);
+        if (area) tags.push(...area.tags);
+      }
+      return {
+        id: h.id, name: h.name, type: h.type || null,
+        dailyCapacityMinutes: h.capacityMinutes,
+        roleTags: tags.length > 0 ? [...new Set(tags)] : inferRoleTags(h.type || null),
+        kind: h.kind,
+        workDays: h.workDays,
+      };
+    });
+    const result = buildAssignmentPlan(rawChores, assignableHelpers, assignmentRules);
+    setUnresolvedTemplates(result.unresolvedTemplates ?? []);
+    applyPlanToState(result);
+    setStep("assignments");
+  };
+
+  const generateByFloor = () => {
+    // Build a map: room name → helperId based on floor assignment
+    const roomToHelper: Record<string, string> = {};
+    for (const [floorStr, helperId] of Object.entries(floorPrefs)) {
+      const floorNum = Number(floorStr);
+      for (const roomName of (roomsByFloor[floorNum] ?? [])) {
+        roomToHelper[roomName.toLowerCase()] = helperId;
+      }
+    }
+
+    // Assign chores based on their space matching a room's floor
+    const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
+    for (const chore of rawChores) {
+      const spaceLower = chore.space.toLowerCase();
+      const helperId = roomToHelper[spaceLower] ?? null;
+      map[chore.id] = { helperId, cadence: normalizeCadence(chore.cadence), proposedHelperId: helperId };
+    }
+    setAssignments(map);
+    setStep("assignments");
+  };
+
+  const applyPlanToState = (result: AssignmentPlan) => {
+    const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
+    for (const a of result.assignments) {
+      const chore = rawChores.find((c) => c.id === a.choreId);
+      // For person assignments, use the member_ prefix so we can distinguish
+      // in applyAssignments
+      const assigneeId = a.assigneePersonId
+        ? `member_${a.assigneePersonId}`
+        : a.helperId;
+      map[a.choreId] = { helperId: assigneeId, cadence: normalizeCadence(chore?.cadence ?? "weekly"), proposedHelperId: assigneeId };
+    }
+    setAssignments(map);
+  };
+
+  // ── Apply ───────────────────────────────────────────────────────
+
+  const applyAssignments = async () => {
+    if (!householdId || !accessToken) return;
+    const actorId = user?.id;
+    if (!actorId) {
+      setError("Not signed in");
+      return;
+    }
+    const toApply = Object.entries(assignments).filter(([, v]) => v.helperId);
+    setStep("applying");
+    setApplyTotal(toApply.length);
+    setApplyProgress(0);
+    setError(null);
+
+    let lastNudgeOverrideId: number | null = null;
+    const modeChanges: Array<{ choreId: string; helperId: string; mode: OperatingMode }> = [];
+
+    for (let i = 0; i < toApply.length; i++) {
+      const [choreId, { helperId, cadence, proposedHelperId }] = toApply[i];
+      const chore = rawChores.find((c) => c.id === choreId);
+
+      // Determine if assignee is a household person (member_xxx) or a helper
+      const isPerson = helperId?.startsWith("member_") ?? false;
+      const realId = isPerson ? helperId!.replace("member_", "") : helperId;
+
+      // Metadata update goes through the standard db.update path.
+      const metaPatch: Record<string, unknown> = {
+        metadata: { ...(chore ? { space: chore.space } : {}), cadence, source: "assignment_panel" },
+      };
+      if (isPerson) {
+        metaPatch.assignee_person_id = realId;
+        metaPatch.helper_id = null;
+      }
+      const res = await executeToolCall({
+        accessToken, householdId, scope: "household",
+        toolCall: {
+          id: `assign_${choreId}_${Date.now()}`,
+          tool: "db.update",
+          args: { table: "chores", id: choreId, patch: metaPatch },
+          reason: isPerson ? "Assign chore to household member" : "Update chore assignment metadata",
+        },
+      });
+      if (!res.ok) {
+        setError(`Failed: ${"error" in res ? res.error : "unknown"}`);
+        setStep("assignments");
+        return;
+      }
+
+      // Helper assignments go through reassignChore so overrides are tracked
+      // and the learning-nudge flow fires. Person (member) assignments stay
+      // on the db.update path above since they aren't helpers.
+      if (!isPerson && realId) {
+        const proposedPersonPrefix = proposedHelperId?.startsWith("member_") ?? false;
+        const proposedRealId = proposedPersonPrefix
+          ? null
+          : proposedHelperId ?? null;
+        const r = await reassignChore({
+          householdId,
+          actorUserId: actorId,
+          choreId,
+          newHelperId: realId,
+          mode: "one_tap",
+          proposedHelperId: proposedRealId,
+        });
+        if (r.ok === false) {
+          setError(`Failed: ${r.error}`);
+          setStep("assignments");
+          return;
+        }
+        if (r.shouldNudge && r.overrideId != null) {
+          lastNudgeOverrideId = r.overrideId;
+        }
+        if (r.modeChangedTo) {
+          modeChanges.push({ choreId, helperId: realId, mode: r.modeChangedTo });
+        }
+      }
+      setApplyProgress(i + 1);
+    }
+
+    if (lastNudgeOverrideId != null) {
+      broadcastNudgeAvailable(lastNudgeOverrideId);
+    }
+    for (const c of modeChanges) {
+      try {
+        window.dispatchEvent(new CustomEvent(ASSIGNMENT_MODE_CHANGED_EVENT, {
+          detail: { choreId: c.choreId, helperId: c.helperId, mode: c.mode },
+        }));
+      } catch {
+        // non-browser
+      }
+    }
+    // Persist assignment preferences as rules for future auto-assignment
+    if (householdId) {
+      try {
+        // Delete existing rules for this household, then insert fresh
+        await supabase.from("assignment_rules").delete().eq("household_id", householdId);
+        const rules: Array<Record<string, unknown>> = [];
+
+        if (Object.keys(specialtyPrefs).length > 0) {
+          // Save specialty preferences
+          for (const [helperId, areaKeys] of Object.entries(specialtyPrefs)) {
+            for (const areaKey of areaKeys) {
+              const area = SPECIALTY_AREAS.find((a) => a.key === areaKey);
+              if (!area) continue;
+              rules.push({
+                household_id: householdId,
+                template_id: `specialty_${areaKey}`,
+                template_params: { area_key: areaKey, area_tags: area.tags },
+                helper_id: helperId,
+                weight: 1.0,
+                source: "elicitation",
+              });
+            }
+          }
+        }
+
+        if (Object.keys(floorPrefs).length > 0) {
+          // Save floor preferences
+          for (const [floorStr, helperId] of Object.entries(floorPrefs)) {
+            if (!helperId) continue;
+            rules.push({
+              household_id: householdId,
+              template_id: `floor_${floorStr}`,
+              template_params: { floor: Number(floorStr), rooms: roomsByFloor[Number(floorStr)] ?? [] },
+              helper_id: helperId,
+              weight: 1.0,
+              source: "elicitation",
+            });
+          }
+        }
+
+        if (rules.length > 0) {
+          await supabase.from("assignment_rules").insert(rules);
+        }
+      } catch {
+        // Non-critical — assignments were already applied
+      }
+    }
+
+    setStep("done");
+    onComplete(toApply.length);
+  };
+
+  // ── Inline chore edit ───────────────────────────────────────────
+
+  const openEditChore = (choreId: string) => {
+    const chore = rawChores.find((c) => c.id === choreId);
+    if (!chore) return;
+    setEditForm({
+      title: chore.title,
+      description: "",
+      space: chore.space,
+      category: "",
+    });
+    setSplitMode(false);
+    setSplitTasks([{ title: "" }, { title: "" }]);
+    setEditChoreId(choreId);
+  };
+
+  const saveEditChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    setEditBusy(true);
+    const currentAssignment = assignments[editChoreId];
+    const patch: Record<string, unknown> = {
+      title: editForm.title.trim() || chore.title,
+      metadata: {
+        space: editForm.space || chore.space,
+        cadence: currentAssignment?.cadence ?? chore.cadence,
+        category: editForm.category || undefined,
+      },
+    };
+
+    const res = await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `edit_chore_${editChoreId}_${Date.now()}`,
+        tool: "db.update",
+        args: { table: "chores", id: editChoreId, patch },
+        reason: "Edit chore from assignment panel",
+      },
+    });
+    setEditBusy(false);
+
+    if (!res.ok) {
+      setError(`Edit failed: ${"error" in res ? res.error : "unknown"}`);
+      return;
+    }
+
+    // Update local state
+    setRawChores((prev) => prev.map((c) =>
+      c.id === editChoreId
+        ? { ...c, title: editForm.title.trim() || c.title, space: editForm.space || c.space }
+        : c,
+    ));
+    setEditChoreId(null);
+  };
+
+  const deleteEditChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    setEditBusy(true);
+    const res = await executeToolCall({
+      accessToken, householdId, scope: "household",
+      toolCall: {
+        id: `delete_chore_${editChoreId}_${Date.now()}`,
+        tool: "db.delete",
+        args: { table: "chores", id: editChoreId },
+        reason: `Delete chore "${chore.title}" from assignment panel`,
+      },
+    });
+    setEditBusy(false);
+
+    if (!res.ok) {
+      setError(`Delete failed: ${"error" in res ? res.error : "unknown"}`);
+      return;
+    }
+
+    setRawChores((prev) => prev.filter((c) => c.id !== editChoreId));
+    setAssignments((prev) => {
+      const next = { ...prev };
+      delete next[editChoreId];
+      return next;
+    });
+    setEditChoreId(null);
+  };
+
+  const splitChore = async () => {
+    if (!editChoreId || !householdId || !accessToken) return;
+    const chore = rawChores.find((c) => c.id === editChoreId);
+    if (!chore) return;
+
+    const validSubs = splitTasks.filter((s) => s.title.trim());
+    if (validSubs.length < 2) return;
+
+    setEditBusy(true);
+    try {
+      // Create each sub-task as an independent chore
+      const newChores: AssignableChore[] = [];
+      for (const sub of validSubs) {
+        const res = await agentCreate({
+          accessToken,
+          table: "chores",
+          record: {
+            household_id: householdId,
+            title: sub.title.trim(),
+            status: "pending",
+            priority: 1,
+            due_at: null,
+            helper_id: null,
+            metadata: {
+              space: editForm.space || chore.space,
+              cadence: chore.cadence,
+              category: editForm.category || null,
+              split_from: editChoreId,
+            },
+          },
+          reason: `Split from "${chore.title}"`,
+        });
+        if (res.ok) {
+          const created = res.created as Record<string, unknown> | null;
+          newChores.push({
+            id: String(created?.id ?? `new_${Date.now()}_${Math.random()}`),
+            title: sub.title.trim(),
+            space: editForm.space || chore.space,
+            cadence: chore.cadence,
+            estimatedMinutes: chore.estimatedMinutes,
+            currentHelperId: null,
+          });
+        } else {
+          setError("error" in res ? res.error : "Failed to create sub-task");
+          setEditBusy(false);
+          return;
+        }
+      }
+
+      // Soft-delete the original
+      await executeToolCall({
+        accessToken, householdId, scope: "household",
+        toolCall: {
+          id: `split_delete_${editChoreId}_${Date.now()}`,
+          tool: "db.delete",
+          args: { table: "chores", id: editChoreId },
+          reason: `Split "${chore.title}" into ${validSubs.length} tasks`,
+        },
+      });
+
+      // Update local state: remove original, add new chores
+      setRawChores((prev) => {
+        const without = prev.filter((c) => c.id !== editChoreId);
+        return [...without, ...newChores];
+      });
+
+      // Add new chores to assignments (unassigned)
+      setAssignments((prev) => {
+        const next = { ...prev };
+        delete next[editChoreId];
+        for (const nc of newChores) {
+          next[nc.id] = { helperId: null, cadence: normalizeCadence(nc.cadence), proposedHelperId: null };
+        }
+        return next;
+      });
+
+      setEditChoreId(null);
+      setSplitMode(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Split failed");
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  // ── Stats ───────────────────────────────────────────────────────
+
+  const assignedCount = Object.values(assignments).filter((v) => v.helperId).length;
+  const statCounts: Record<string, number> = {};
+  for (const [, v] of Object.entries(assignments)) {
+    if (v.helperId) statCounts[v.helperId] = (statCounts[v.helperId] ?? 0) + 1;
+  }
+
+  // ── Render ──────────────────────────────────────────────────────
+
+  if (loading) {
+    return <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+      <Box display="flex" justifyContent="center" py={2}><CircularProgress size={24} /></Box>
+    </Paper>;
+  }
+
+  if (step === "done") {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", bgcolor: "success.50" }}>
+        <Stack spacing={1} alignItems="center" py={1}>
+          <CheckCircle color="success" sx={{ fontSize: 36 }} />
+          <Typography variant="subtitle1" fontWeight={700}>{applyProgress} chore{applyProgress === 1 ? "" : "s"} assigned!</Typography>
+          <Button size="small" variant="contained" onClick={onDismiss}>Done</Button>
+        </Stack>
+      </Paper>
+    );
+  }
+
+  if (step === "applying") {
+    return (
+      <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+        <Stack spacing={2} alignItems="center">
+          <CircularProgress size={28} />
+          <Typography variant="body2">Assigning... {applyProgress}/{applyTotal}</Typography>
+          <LinearProgress variant="determinate" value={applyTotal > 0 ? (applyProgress / applyTotal) * 100 : 0} sx={{ width: "100%", height: 5, borderRadius: 1 }} />
+        </Stack>
+      </Paper>
+    );
+  }
+
+  // ── Step 1: Pick pattern ────────────────────────────────────────
+
+  if (step === "pick_pattern") {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+        <Stack spacing={2}>
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>How should chores be assigned?</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Pick a pattern that matches how your household works.
+            </Typography>
+          </Box>
+
+          <Stack spacing={1.5}>
+            <Card
+              variant="outlined"
+              sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
+              onClick={() => setStep("by_specialty")}
+            >
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <Person color="primary" />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>By helper's specialty</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Maid handles cleaning, cook handles kitchen, driver handles outdoor — assign based on what each person does best.
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+
+            <Card
+              variant="outlined"
+              sx={{
+                cursor: floors.length > 1 ? "pointer" : "default",
+                opacity: floors.length > 1 ? 1 : 0.5,
+                "&:hover": floors.length > 1 ? { borderColor: "primary.main", bgcolor: "action.hover" } : {},
+              }}
+              onClick={() => { if (floors.length > 1) setStep("by_floor"); }}
+            >
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <Layers color={floors.length > 1 ? "primary" : "disabled"} />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>By floor / area</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {floors.length > 1
+                        ? `Your home has ${floors.length} floors. Assign one helper per floor.`
+                        : "Your home has a single floor — this pattern works with multi-floor homes."}
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+            <Card
+              variant="outlined"
+              sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
+              onClick={() => {
+                // Go straight to assignments with no pre-assignment — all chores unassigned
+                const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
+                for (const c of rawChores) {
+                  map[c.id] = { helperId: null, cadence: normalizeCadence(c.cadence), proposedHelperId: null };
+                }
+                setAssignments(map);
+                setStep("assignments");
+              }}
+            >
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <EditNote color="primary" />
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>Direct assignment</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Manually pick a helper for each chore yourself. No auto-suggestion — full control.
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+
+            {/* "Other" conversational option removed — the form-based patterns
+                (specialty, floor, direct) are more reliable than the LLM-based
+                conversational flow which has routing and result-display issues. */}
+          </Stack>
+
+          <Button variant="text" size="small" onClick={onDismiss} sx={{ alignSelf: "flex-start", color: "text.secondary" }}>
+            Not now
+          </Button>
+        </Stack>
+      </Paper>
+    );
+  }
+
+  // ── Step 2a: By specialty ───────────────────────────────────────
+
+  if (step === "by_specialty") {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        <Stack spacing={2}>
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>What does each helper handle?</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Select the areas each helper covers. Chores will be matched accordingly.
+            </Typography>
+          </Box>
+
+          {helpers.map((h) => (
+            <Card key={h.id} variant="outlined">
+              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                <Stack direction="row" spacing={1} alignItems="center" mb={0.5}>
+                  <Typography variant="subtitle2" fontWeight={700}>{h.name}</Typography>
+                  <Chip size="small" label={h.type} variant="outlined" sx={{ fontSize: 11 }} />
+                  <Chip size="small" label={`${h.capacityMinutes} min/day`} variant="outlined" sx={{ fontSize: 10 }} />
+                </Stack>
+                {h.workDays.length > 0 && (
+                  <Typography variant="caption" color="text.secondary" mb={1} display="block">
+                    {h.workDays.map((d) => d.charAt(0).toUpperCase() + d.slice(1, 3)).join(", ")}
+                    {h.startTime && h.endTime ? ` · ${h.startTime}–${h.endTime}` : ""}
+                  </Typography>
+                )}
+                <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                  {SPECIALTY_AREAS.map((area) => {
+                    const selected = (specialtyPrefs[h.id] ?? []).includes(area.key);
+                    return (
+                      <Chip
+                        key={area.key} label={area.label} size="small"
+                        color={selected ? "primary" : "default"}
+                        variant={selected ? "filled" : "outlined"}
+                        onClick={() => {
+                          setSpecialtyPrefs((prev) => {
+                            const cur = prev[h.id] ?? [];
+                            return { ...prev, [h.id]: selected ? cur.filter((k) => k !== area.key) : [...cur, area.key] };
+                          });
+                        }}
+                        sx={{ cursor: "pointer" }}
+                      />
+                    );
+                  })}
+                </Stack>
+              </CardContent>
+            </Card>
+          ))}
+
+          <Stack direction="row" spacing={1}>
+            <Button variant="contained" size="small" onClick={generateBySpecialty}>Show assignments</Button>
+            <Button variant="outlined" size="small" onClick={() => setStep("pick_pattern")}>Back</Button>
+          </Stack>
+        </Stack>
+      </Paper>
+    );
+  }
+
+  // ── Step 2b: By floor ───────────────────────────────────────────
+
+  if (step === "by_floor") {
+    return (
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+        <Stack spacing={2}>
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>Assign a helper to each floor</Typography>
+            <Typography variant="body2" color="text.secondary">
+              All chores on a floor will be assigned to the selected helper.
+            </Typography>
+          </Box>
+
+          {floors.map((f) => {
+            const floorRooms = roomsByFloor[f] ?? [];
+            return (
+              <Card key={f} variant="outlined">
+                <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                  <Stack spacing={1}>
+                    <Typography variant="subtitle2" fontWeight={700}>
+                      {floorLabel(f, lang as "en" | "hi" | "kn")}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {floorRooms.slice(0, 6).join(", ")}{floorRooms.length > 6 ? ` +${floorRooms.length - 6} more` : ""}
+                    </Typography>
+                    <TextField
+                      select size="small" fullWidth
+                      label="Assign to"
+                      value={floorPrefs[String(f)] ?? ""}
+                      onChange={(e) => setFloorPrefs((prev) => ({ ...prev, [String(f)]: e.target.value }))}
+                    >
+                      <MenuItem value="" sx={{ color: "text.secondary" }}><em>Not assigned</em></MenuItem>
+                      {helpers.map((h) => (
+                        <MenuItem key={h.id} value={h.id}>{h.name} ({h.type})</MenuItem>
+                      ))}
+                    </TextField>
+                  </Stack>
+                </CardContent>
+              </Card>
+            );
+          })}
+
+          <Stack direction="row" spacing={1}>
+            <Button variant="contained" size="small" onClick={generateByFloor}
+              disabled={Object.values(floorPrefs).every((v) => !v)}>
+              Show assignments
+            </Button>
+            <Button variant="outlined" size="small" onClick={() => setStep("pick_pattern")}>Back</Button>
+          </Stack>
+        </Stack>
+      </Paper>
+    );
+  }
+
+  // ── Step 3: Editable assignment list ────────────────────────────
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, maxWidth: 600, mx: "auto", maxHeight: "70vh", overflowY: "auto" }}>
+      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      <Stack spacing={2}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap>
+          <Typography variant="subtitle1" fontWeight={700}>Review & edit assignments</Typography>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {helpers.map((h) => (
+              <Chip key={h.id} size="small" label={`${h.name}: ${statCounts[h.id] ?? 0}`} variant="outlined" sx={{ fontSize: 11 }} />
+            ))}
+          </Stack>
+        </Stack>
+
+        <Typography variant="body2" color="text.secondary">
+          Change the helper or frequency for any chore. Unassigned chores are highlighted.
+        </Typography>
+
+        {unresolvedTemplates.length > 0 && (
+          <Alert
+            severity="info"
+            action={
+              <Button
+                size="small"
+                color="inherit"
+                onClick={() => setElicitationScopedTemplate(unresolvedTemplates[0] as ElicitationTemplateId)}
+              >
+                Set preference
+              </Button>
+            }
+          >
+            {unresolvedTemplates.length === 1
+              ? `No preference set for ${unresolvedTemplates[0].replace(/^specialty_/, "")} chores. Set one and I'll remember it for future assignments.`
+              : `${unresolvedTemplates.length} chore categories have no preference set yet. Setting them helps the agent auto-assign later.`}
+          </Alert>
+        )}
+
+        <Box sx={{ maxHeight: 400, overflowY: "auto" }}>
+          <Stack spacing={0.5}>
+            {Object.entries(assignments).map(([choreId, { helperId, cadence }]) => {
+              const chore = rawChores.find((c) => c.id === choreId);
+              if (!chore) return null;
+              return (
+                <Stack key={choreId} direction="row" spacing={0.75} alignItems="center"
+                  sx={{ py: 0.5, px: 1, borderRadius: 1, bgcolor: helperId ? "transparent" : "warning.50" }}>
+                  <Box flex={1} minWidth={0}>
+                    <Typography variant="body2" noWrap fontWeight={500} sx={{ fontSize: 13 }}>{chore.title}</Typography>
+                    {chore.space && <Typography variant="caption" color="text.secondary">{chore.space}</Typography>}
+                  </Box>
+                  <TextField select size="small" value={cadence}
+                    onChange={(e) => setAssignments((prev) => ({ ...prev, [choreId]: { ...prev[choreId], cadence: e.target.value } }))}
+                    sx={{ minWidth: 140 }} SelectProps={{ native: true, sx: { fontSize: 11 } }}>
+                    {CADENCE_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </TextField>
+                  <TextField select size="small" value={helperId ?? ""}
+                    onChange={(e) => setAssignments((prev) => ({ ...prev, [choreId]: { ...prev[choreId], helperId: e.target.value || null } }))}
+                    sx={{ minWidth: 120 }} SelectProps={{ sx: { fontSize: 12 } }}>
+                    <MenuItem value="" sx={{ fontSize: 12, color: "text.secondary" }}><em>Unassigned</em></MenuItem>
+                    {helpers.map((h) => <MenuItem key={h.id} value={h.id} sx={{ fontSize: 12 }}>{h.name}</MenuItem>)}
+                  </TextField>
+                  <IconButton size="small" onClick={() => openEditChore(choreId)} title="Edit chore">
+                    <Edit sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Stack>
+              );
+            })}
+          </Stack>
+        </Box>
+
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" size="small" disabled={assignedCount === 0} onClick={() => void applyAssignments()}>
+            Apply ({assignedCount})
+          </Button>
+          <Button variant="outlined" size="small" onClick={() => setStep("pick_pattern")}>Change pattern</Button>
+          <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>Not now</Button>
+        </Stack>
+      </Stack>
+
+      {/* ── JIT elicitation (single-question mode) ─────────────────── */}
+      {elicitationScopedTemplate && (
+        <ElicitationFlow
+          key={`jit-${elicitationScopedTemplate}`}
+          scopedTemplateId={elicitationScopedTemplate}
+          autoOpen
+          hideBanner
+          onAllAnswered={() => {
+            setElicitationScopedTemplate(null);
+            // Refresh rules so the unresolvedTemplates hint re-evaluates.
+            if (householdId) {
+              void (async () => {
+                const r = await fetchAssignmentRules(householdId);
+                if (r.ok === true) {
+                  setAssignmentRules(r.rules);
+                  const covered = new Set(r.rules.filter((x) => x.active).map((x) => x.template_id));
+                  setUnresolvedTemplates((prev) => prev.filter((t) => !covered.has(t)));
+                }
+              })();
+            }
+          }}
+        />
+      )}
+
+      {/* ── Inline chore edit dialog ──────────────────────────────── */}
+      <Dialog open={!!editChoreId} onClose={() => setEditChoreId(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>{splitMode ? "Split Chore" : "Edit Chore"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            {!splitMode && (
+              <>
+                <TextField size="small" label="Title" fullWidth value={editForm.title}
+                  onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))} />
+                <TextField size="small" label="Space / Room" fullWidth value={editForm.space}
+                  onChange={(e) => setEditForm((f) => ({ ...f, space: e.target.value }))} />
+                <TextField size="small" select label="Category" fullWidth value={editForm.category}
+                  onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}>
+                  <MenuItem value="">—</MenuItem>
+                  <MenuItem value="cleaning">Cleaning</MenuItem>
+                  <MenuItem value="kitchen">Kitchen & cooking</MenuItem>
+                  <MenuItem value="bathroom">Bathroom</MenuItem>
+                  <MenuItem value="laundry">Laundry & ironing</MenuItem>
+                  <MenuItem value="outdoor">Outdoor & garden</MenuItem>
+                  <MenuItem value="maintenance">Maintenance</MenuItem>
+                  <MenuItem value="other">Other</MenuItem>
+                </TextField>
+                <Button size="small" variant="text" onClick={() => setSplitMode(true)} sx={{ alignSelf: "flex-start" }}>
+                  Split into sub-tasks
+                </Button>
+              </>
+            )}
+
+            {splitMode && (
+              <Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 1 }}>
+                <Typography variant="caption" fontWeight={600} mb={1} display="block">
+                  Break &quot;{editForm.title}&quot; into independent tasks:
+                </Typography>
+                <Stack spacing={0.75}>
+                  {splitTasks.map((st, i) => (
+                    <Stack key={i} direction="row" spacing={0.5} alignItems="center">
+                      <TextField
+                        size="small" fullWidth variant="standard"
+                        placeholder={`Sub-task ${i + 1}`}
+                        value={st.title}
+                        onChange={(e) => setSplitTasks((prev) => prev.map((s, j) => j === i ? { title: e.target.value } : s))}
+                        InputProps={{ sx: { fontSize: 13 } }}
+                      />
+                      {splitTasks.length > 2 && (
+                        <Button size="small" sx={{ minWidth: 0, p: 0 }} onClick={() => setSplitTasks((prev) => prev.filter((_, j) => j !== i))}>✕</Button>
+                      )}
+                    </Stack>
+                  ))}
+                </Stack>
+                <Stack direction="row" spacing={1} mt={1}>
+                  <Button size="small" onClick={() => setSplitTasks((prev) => [...prev, { title: "" }])}>+ Add</Button>
+                  <Button size="small" variant="text" onClick={() => setSplitMode(false)}>Cancel split</Button>
+                </Stack>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ justifyContent: "space-between" }}>
+          <Button color="error" onClick={() => void deleteEditChore()} disabled={editBusy}>Delete</Button>
+          <Stack direction="row" spacing={1}>
+          <Button onClick={() => { setEditChoreId(null); setSplitMode(false); }} disabled={editBusy}>Cancel</Button>
+          {splitMode ? (
+            <Button
+              variant="contained" color="secondary"
+              disabled={editBusy || splitTasks.filter((s) => s.title.trim()).length < 2}
+              onClick={() => void splitChore()}
+            >
+              Split into {splitTasks.filter((s) => s.title.trim()).length} tasks
+            </Button>
+          ) : (
+            <Button variant="contained" onClick={() => void saveEditChore()} disabled={editBusy || !editForm.title.trim()}>Save</Button>
+          )}
+          </Stack>
+        </DialogActions>
+      </Dialog>
+    </Paper>
+  );
+}

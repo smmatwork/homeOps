@@ -3,8 +3,10 @@
 import { Box, Typography, Button } from "@mui/material";
 import { Home as HomeIcon } from "@mui/icons-material";
 import { Link } from "react-router";
+import { useI18n } from "../i18n";
 
 export function NotFound() {
+  const { t } = useI18n();
   return (
     <Box
       display="flex"
@@ -21,10 +23,10 @@ export function NotFound() {
           404
         </Typography>
         <Typography variant="h4" fontWeight="bold" color="text.primary" mt={2}>
-          Page Not Found
+          {t("not_found.title")}
         </Typography>
         <Typography variant="body1" color="text.secondary" mt={1} mb={4}>
-          Sorry, the page you're looking for doesn't exist or has been moved.
+          {t("not_found.subtitle")}
         </Typography>
         <Link to="/">
           <Button
@@ -33,7 +35,7 @@ export function NotFound() {
             startIcon={<HomeIcon />}
             sx={{ textTransform: "none" }}
           >
-            Back to Dashboard
+            {t("not_found.back_to_dashboard")}
           </Button>
         </Link>
       </Box>

@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npx vitest run
+
+  agent-service-check:
+    name: Agent Service (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/agent-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m py_compile main.py
+
+      - name: Check channel adapters
+        run: |
+          python -m py_compile channel_dispatcher.py
+          python -m py_compile intent_registry.py
+          python -m py_compile channel_adapters/base.py
+          python -m py_compile channel_adapters/whatsapp.py
+          python -m py_compile channel_adapters/sms.py
+          python -m py_compile channel_adapters/voice.py
+          python -m py_compile channel_adapters/web.py
+
+  build:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    needs: [lint-and-test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || 'placeholder' }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: dist/
+          retention-days: 7
+
+  # ── Deploy: Supabase migrations (main only) ────────────────────────────
+  # Runs `supabase db push` on every main commit. Idempotent: only applies
+  # migrations missing on the remote. Secrets required in GitHub repo:
+  #   • SUPABASE_ACCESS_TOKEN   (supabase.com/dashboard/account/tokens)
+  #   • SUPABASE_PROJECT_REF    (vkonfuaqwgotohwaplfr for HomeOpsManager)
+  #   • SUPABASE_DB_PASSWORD    (Supabase project settings → database)
+  deploy-supabase-migrations:
+    name: Deploy Supabase Migrations
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, agent-service-check]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+      - name: Push migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase db push --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
+
+  # ── Deploy: Supabase edge functions (main only) ────────────────────────
+  # Deploys the single edge function (services/functions/server). Runs
+  # after migrations so edge code never references missing DB objects.
+  deploy-edge-functions:
+    name: Deploy Supabase Edge Functions
+    runs-on: ubuntu-latest
+    needs: [deploy-supabase-migrations]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Deploy server function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy server --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+
+  # ── Deploy: Agent service (Render, auto-deploy) ────────────────────────
+  # Render watches this repo directly via its GitHub integration. No job
+  # needed here — pushing to main triggers Render's build + deploy. See
+  # render.yaml at the repo root for the service blueprint.

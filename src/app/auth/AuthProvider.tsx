@@ -94,6 +94,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const baseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? "").trim().replace(/\/$/, "");
       if (!baseUrl) return { ok: false as const, error: "App setup is incomplete (missing server URL)." };
 
+      const anon = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? "").trim();
+      if (!anon) return { ok: false as const, error: "App setup is incomplete (missing anon key)." };
+
       const fullName = typeof params?.fullName === "string" ? params.fullName.trim() : "";
       const householdName = typeof params?.householdName === "string" ? params.householdName.trim() : "";
 
@@ -103,7 +106,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+            apikey: anon,
+            Authorization: `Bearer ${anon}`,
+            "x-user-authorization": `Bearer ${token}`,
           },
           body: JSON.stringify({
             full_name: fullName,
@@ -188,10 +193,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLocalStorageSafe("homeops.agent.access_token", accessToken);
   }, [accessToken]);
 
+  // Ensure the logged-in user exists in household_people (auto-sync).
+  // Uses a ref to guarantee we only attempt once per user+household pair.
+  const syncAttemptedRef = useRef("");
+  const ensureUserInHouseholdPeople = useCallback(async (uid: string, hid: string) => {
+    if (!uid || !hid) return;
+    const key = `${uid}:${hid}`;
+    if (syncAttemptedRef.current === key) return;
+    syncAttemptedRef.current = key;
+
+    const { data } = await supabase
+      .from("household_people")
+      .select("id")
+      .eq("household_id", hid)
+      .eq("linked_user_id", uid)
+      .limit(1);
+    if (data && data.length > 0) return; // already exists
+
+    // Get user's name from profile or auth metadata
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("full_name")
+      .eq("id", uid)
+      .maybeSingle();
+    const displayName = profile?.full_name
+      ? String(profile.full_name)
+      : user?.user_metadata?.full_name
+        ? String(user.user_metadata.full_name)
+        : "Me";
+
+    await supabase.from("household_people").insert({
+      household_id: hid,
+      display_name: displayName,
+      person_type: "adult",
+      linked_user_id: uid,
+    });
+  }, [user]);
+
   useEffect(() => {
     if (!user) return;
     void refreshHouseholdId();
   }, [user, refreshHouseholdId]);
+
+  // Auto-sync: once we have both user and householdId, ensure user is in household_people
+  useEffect(() => {
+    if (!user?.id || !householdId) return;
+    void ensureUserInHouseholdPeople(user.id, householdId);
+  }, [user?.id, householdId, ensureUserInHouseholdPeople]);
 
   useEffect(() => {
     if (!user) {

@@ -34,22 +34,44 @@ import {
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
+import { useI18n } from "../../i18n";
 
 type AlertRow = {
   id: string;
+  household_id: string;
   title: string;
   body: string | null;
   severity: number;
   status: string;
   created_at: string;
   metadata: Record<string, unknown> | null;
+  justification: string | null;
+  category: string | null;
+  read_at: string | null;
+  dismissed_at: string | null;
 };
+
+function localDateTimeLabel(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(d);
+}
 
 export function Alerts() {
   const [filter, setFilter] = useState<"all" | "critical" | "warning" | "info">("all");
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const { householdId } = useAuth();
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<AlertRow[]>([]);
@@ -63,7 +85,7 @@ export function Alerts() {
       setLoadError(null);
       const { data, error } = await supabase
         .from("alerts")
-        .select("id,title,body,severity,status,created_at,metadata")
+        .select("id,title,body,severity,status,created_at,metadata,justification,category,read_at,dismissed_at")
         .eq("household_id", householdId.trim())
         .order("created_at", { ascending: false })
         .limit(50);
@@ -107,7 +129,24 @@ export function Alerts() {
     () => (filter === "all" ? alerts : alerts.filter((a) => alertType(a) === filter)),
     [alerts, filter],
   );
-  const unreadCount = 0;
+  const unreadCount = alerts.filter((a) => !a.read_at && !a.dismissed_at).length;
+
+  const markAsRead = async (alertId: string) => {
+    await supabase.from("alerts").update({ read_at: new Date().toISOString() }).eq("id", alertId);
+    setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, read_at: new Date().toISOString() } : a));
+  };
+
+  const dismissAlert = async (alertId: string) => {
+    await supabase.from("alerts").update({ dismissed_at: new Date().toISOString() }).eq("id", alertId);
+    setAlerts((prev) => prev.map((a) => a.id === alertId ? { ...a, dismissed_at: new Date().toISOString() } : a));
+  };
+
+  const markAllRead = async () => {
+    const unreadIds = alerts.filter((a) => !a.read_at).map((a) => a.id);
+    if (unreadIds.length === 0) return;
+    await supabase.from("alerts").update({ read_at: new Date().toISOString() }).in("id", unreadIds);
+    setAlerts((prev) => prev.map((a) => ({ ...a, read_at: a.read_at ?? new Date().toISOString() })));
+  };
 
   return (
     <Box p={4}>
@@ -115,33 +154,33 @@ export function Alerts() {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
         <Box>
           <Typography variant="h4" fontWeight="bold">
-            Alerts & Notifications
+            {t("alerts.title")}
           </Typography>
           <Typography color="textSecondary">
-            Stay informed about household activities and reminders
+            {t("alerts.subtitle")}
           </Typography>
           {unreadCount > 0 && (
             <Badge badgeContent={unreadCount} color="error" sx={{ mt: 1 }}>
-              Unread
+              {t("alerts.unread")}
             </Badge>
           )}
         </Box>
         <Box display="flex" gap={2}>
-          <Button variant="outlined" startIcon={<CheckCircle />}>
-            Mark All Read
+          <Button variant="outlined" startIcon={<CheckCircle />} onClick={() => void markAllRead()} disabled={unreadCount === 0}>
+            {t("alerts.mark_all_read")}
           </Button>
           <Button variant="contained" startIcon={<AddAlert />} onClick={() => setDialogOpen(true)}>
-            Create Alert
+            {t("alerts.create")}
           </Button>
         </Box>
       </Box>
 
       {/* Filter Tabs */}
       <Tabs value={filter} onChange={(e, newValue) => setFilter(newValue)} variant="scrollable">
-        <Tab label={`All (${alerts.length})`} value="all" />
-        <Tab label={`Critical (${alerts.filter((a) => alertType(a) === "critical").length})`} value="critical" />
-        <Tab label={`Warning (${alerts.filter((a) => alertType(a) === "warning").length})`} value="warning" />
-        <Tab label={`Info (${alerts.filter((a) => alertType(a) === "info").length})`} value="info" />
+        <Tab label={`${t("alerts.all")} (${alerts.length})`} value="all" />
+        <Tab label={`${t("alerts.critical_tab")} (${alerts.filter((a) => alertType(a) === "critical").length})`} value="critical" />
+        <Tab label={`${t("alerts.warning_tab")} (${alerts.filter((a) => alertType(a) === "warning").length})`} value="warning" />
+        <Tab label={`${t("alerts.info_tab")} (${alerts.filter((a) => alertType(a) === "info").length})`} value="info" />
       </Tabs>
 
       {/* Alerts List */}
@@ -154,23 +193,36 @@ export function Alerts() {
         {loadError ? (
           <Typography color="error">{loadError}</Typography>
         ) : null}
-        {filteredAlerts.map((alert) => (
-          <Card key={alert.id} variant="outlined">
+        {filteredAlerts.filter((a) => !a.dismissed_at).map((alert) => (
+          <Card key={alert.id} variant="outlined" sx={{ opacity: alert.read_at ? 0.75 : 1 }}>
             <CardContent>
-              <Box display="flex" alignItems="center" gap={2}>
+              <Box display="flex" alignItems="flex-start" gap={2}>
                 {getAlertIcon(alertType(alert))}
                 <Box flex={1}>
-                  <Typography variant="h6">{alert.title}</Typography>
+                  <Typography variant="h6" fontWeight={alert.read_at ? 400 : 700}>{alert.title}</Typography>
                   <Typography variant="body2" color="textSecondary">
                     {alert.body ?? ""}
                   </Typography>
-                  <Typography variant="caption" color="textSecondary">
-                    {new Date(alert.created_at).toLocaleString()}
+                  {alert.justification && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontStyle: "italic" }}>
+                      Why: {alert.justification}
+                    </Typography>
+                  )}
+                  <Typography variant="caption" color="textSecondary" sx={{ display: "block", mt: 0.5 }}>
+                    {localDateTimeLabel(alert.created_at)}
+                    {alert.category && ` · ${alert.category}`}
                   </Typography>
                 </Box>
-                <IconButton>
-                  <MoreVert />
-                </IconButton>
+                <Box display="flex" gap={0.5}>
+                  {!alert.read_at && (
+                    <IconButton size="small" title="Mark as read" onClick={() => void markAsRead(alert.id)}>
+                      <CheckCircle fontSize="small" />
+                    </IconButton>
+                  )}
+                  <IconButton size="small" title="Dismiss" onClick={() => void dismissAlert(alert.id)}>
+                    <Delete fontSize="small" />
+                  </IconButton>
+                </Box>
               </Box>
             </CardContent>
           </Card>
@@ -180,42 +232,42 @@ export function Alerts() {
       {filteredAlerts.length === 0 && (
         <Box textAlign="center" py={4}>
           <NotificationsActive fontSize="large" color="disabled" />
-          <Typography variant="h6">No alerts</Typography>
-          <Typography color="textSecondary">You're all caught up!</Typography>
+          <Typography variant="h6">{t("alerts.no_alerts")}</Typography>
+          <Typography color="textSecondary">{t("alerts.caught_up")}</Typography>
         </Box>
       )}
 
       {/* Create Alert Dialog */}
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
-        <DialogTitle>Create Custom Alert</DialogTitle>
+        <DialogTitle>{t("alerts.create_custom")}</DialogTitle>
         <DialogContent>
           <Box display="flex" flexDirection="column" gap={2}>
-            <TextField label="Alert Title" fullWidth />
-            <TextField label="Message" fullWidth multiline rows={3} />
+            <TextField label={t("alerts.alert_title")} fullWidth />
+            <TextField label={t("alerts.message")} fullWidth multiline rows={3} />
             <FormControl fullWidth>
-              <InputLabel>Priority</InputLabel>
+              <InputLabel>{t("alerts.priority")}</InputLabel>
               <Select>
-                <MenuItem value="critical">Critical</MenuItem>
-                <MenuItem value="warning">Warning</MenuItem>
-                <MenuItem value="info">Info</MenuItem>
+                <MenuItem value="critical">{t("alerts.critical")}</MenuItem>
+                <MenuItem value="warning">{t("alerts.warning")}</MenuItem>
+                <MenuItem value="info">{t("alerts.info")}</MenuItem>
               </Select>
             </FormControl>
             <FormControl fullWidth>
-              <InputLabel>Category</InputLabel>
+              <InputLabel>{t("alerts.category")}</InputLabel>
               <Select>
-                <MenuItem value="maintenance">Maintenance</MenuItem>
-                <MenuItem value="bills">Bills</MenuItem>
-                <MenuItem value="inventory">Inventory</MenuItem>
-                <MenuItem value="safety">Safety</MenuItem>
-                <MenuItem value="reminders">Reminders</MenuItem>
+                <MenuItem value="maintenance">{t("alerts.maintenance")}</MenuItem>
+                <MenuItem value="bills">{t("alerts.bills")}</MenuItem>
+                <MenuItem value="inventory">{t("alerts.inventory")}</MenuItem>
+                <MenuItem value="safety">{t("alerts.safety")}</MenuItem>
+                <MenuItem value="reminders">{t("alerts.reminders")}</MenuItem>
               </Select>
             </FormControl>
-            <TextField label="Alert Date & Time" type="datetime-local" fullWidth />
+            <TextField label={t("alerts.alert_date_time")} type="datetime-local" fullWidth />
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>Cancel</Button>
-          <Button variant="contained">Create Alert</Button>
+          <Button onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
+          <Button variant="contained">{t("alerts.create")}</Button>
         </DialogActions>
       </Dialog>
     </Box>

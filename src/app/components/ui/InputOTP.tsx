@@ -17,7 +17,7 @@ export function InputOTP({ length, value, onChange, disabled }: InputOTPProps) {
     onChange(newValue.join(""));
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>, index: number) => {
     if (event.key === "Backspace" && !value[index] && index > 0) {
       handleChange(index - 1, "");
     }

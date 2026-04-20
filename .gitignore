@@ -7,3 +7,13 @@ dist/
 build/
 .vite/
 .DS_Store
+.venv-agent/
+.venv/
+__pycache__/
+remote.dump
+test-results/
+supabase/.temp/
+supabase/snippets/Untitled\ query\ *.sql
+
+# Local Netlify folder
+.netlify

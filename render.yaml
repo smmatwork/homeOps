@@ -1,0 +1,97 @@
+# Render Blueprint — declarative service setup for HomeOps.
+#
+# Apply this via Render Dashboard → New → Blueprint → Connect this repo.
+# Render reads this file and creates the service. Secrets declared with
+# `sync: false` are placeholders — fill them in on the Render dashboard
+# after the service is created.
+#
+# Deploys:
+#   • agent-service — FastAPI container backing the chat agent
+#
+# Not deployed here (intentional):
+#   • Frontend (Vite) — lives on Netlify via its own Git integration
+#   • Supabase edge functions + migrations — deployed via GitHub Actions
+#     (see .github/workflows/ci.yml)
+
+services:
+  - type: web
+    name: homeops-agent-service
+    runtime: docker
+    dockerfilePath: services/agent-service/Dockerfile
+    dockerContext: services/agent-service
+    region: singapore          # closest Render region to India-based users
+    plan: starter              # $7/mo, no cold starts. Switch to "free" for testing.
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /health
+
+    envVars:
+      # ── Runtime identity ───────────────────────────────────────────
+      - key: HOMEOPS_ENV
+        value: prod
+      - key: OTEL_SERVICE_NAME
+        value: homeops-agent-service
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEBUG_INTENT_ROUTING
+        value: "false"
+
+      # ── Edge function contract (agent ↔ Supabase edge fn) ──────────
+      - key: EDGE_BASE_URL
+        sync: false            # e.g. https://vkonfuaqwgotohwaplfr.supabase.co/functions/v1/server
+      - key: EDGE_BEARER_TOKEN
+        sync: false            # service_role-signed token (rotate)
+      - key: AGENT_SERVICE_KEY
+        sync: false            # must match the Supabase edge fn secret of the same name
+
+      # ── Supabase ─────────────────────────────────────────────────────
+      - key: SUPABASE_URL
+        sync: false            # https://vkonfuaqwgotohwaplfr.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # ── LLM providers ────────────────────────────────────────────────
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: SARVAM_MODEL_DEFAULT
+        value: sarvam-m
+      - key: SARVAM_BASE_URL
+        value: https://api.sarvam.ai
+      - key: SARVAM_TIMEOUT_MS
+        value: "20000"
+      - key: SARVAM_MAX_RETRIES
+        value: "2"
+      - key: SARVAM_REASONING_LEVEL
+        value: low
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-1.5-flash
+      - key: SANITIZER_ALWAYS
+        value: "true"
+
+      # ── Observability (Honeycomb + Langfuse) ─────────────────────────
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: https://api.honeycomb.io/v1/traces
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false            # x-honeycomb-team=...,x-honeycomb-dataset=homeops-prod
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+
+      # ── WhatsApp Business API ────────────────────────────────────────
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: HELPER_MAGIC_LINK_BASE_URL
+        sync: false            # e.g. https://homeops.thelivingcraft.ai/h
+
+      # ── SMS (optional — leave blank if not configured) ───────────────
+      - key: SMS_PROVIDER
+        sync: false
+      - key: SMS_API_KEY
+        sync: false
