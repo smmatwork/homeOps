@@ -8,7 +8,7 @@
  * Step 4: After adjustments, offer redistribution
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -28,6 +28,8 @@ import { ArrowForward, CheckCircle, TrendingDown } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
+import { useHelpersStore } from "../../stores/helpersStore";
+import { fetchAssignmentRules, type AssignmentRuleRow } from "../../services/assignmentApi";
 import {
   buildAssignmentPlan,
   inferRoleTags,
@@ -119,8 +121,26 @@ export function WorkloadOptimizer({ onDone, initialHelperFilter }: WorkloadOptim
   const [error, setError] = useState<string | null>(null);
 
   const [chores, setChores] = useState<ChoreEntry[]>([]);
-  const [helpers, setHelpers] = useState<HelperEntry[]>([]);
-  const [totalCapacity, setTotalCapacity] = useState(0);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const helpers = useMemo<HelperEntry[]>(() => storeHelpers.map((h) => {
+    const meta = (h.metadata ?? {}) as Record<string, unknown>;
+    const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
+    const startTime = typeof schedule.start === "string" ? schedule.start : "";
+    const endTime = typeof schedule.end === "string" ? schedule.end : "";
+    let cap = Number(h.daily_capacity_minutes ?? 120);
+    if (startTime && endTime) {
+      const [sh, sm] = startTime.split(":").map(Number);
+      const [eh, em] = endTime.split(":").map(Number);
+      const mins = (eh * 60 + em) - (sh * 60 + sm);
+      if (mins > 0) cap = mins;
+    }
+    return { id: h.id, name: h.name, type: String(h.type ?? "General"), capacityMinutes: cap };
+  }), [storeHelpers]);
+  const totalCapacity = useMemo(
+    () => helpers.reduce((sum, h) => sum + h.capacityMinutes, 0),
+    [helpers],
+  );
 
   // Cadence changes: choreId → new cadence
   const [cadenceChanges, setCadenceChanges] = useState<Record<string, string>>({});
@@ -139,34 +159,25 @@ export function WorkloadOptimizer({ onDone, initialHelperFilter }: WorkloadOptim
   const load = useCallback(async () => {
     if (!householdId) return;
 
-    const [helpersRes, choresRes] = await Promise.all([
-      supabase.from("helpers").select("id,name,type,daily_capacity_minutes,metadata").eq("household_id", householdId),
-      supabase.from("chores").select("id,title,helper_id,metadata,priority,status")
-        .eq("household_id", householdId).is("deleted_at", null).neq("status", "completed"),
-    ]);
+    void loadHelpersFromStore(householdId);
 
-    if (helpersRes.error || choresRes.error) {
-      setError(helpersRes.error?.message ?? choresRes.error?.message ?? "Load failed");
+    const choresRes = await supabase
+      .from("chores")
+      .select("id,title,helper_id,metadata,priority,status")
+      .eq("household_id", householdId)
+      .is("deleted_at", null)
+      .neq("status", "completed");
+
+    if (choresRes.error) {
+      setError(choresRes.error.message);
       setStep("gap");
       return;
     }
 
     const helperNameMap = new Map<string, string>();
-    const hs: HelperEntry[] = ((helpersRes.data ?? []) as Array<Record<string, unknown>>).map((r) => {
-      const meta = (r.metadata ?? {}) as Record<string, unknown>;
-      const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
-      const startTime = typeof schedule.start === "string" ? schedule.start : "";
-      const endTime = typeof schedule.end === "string" ? schedule.end : "";
-      let cap = Number(r.daily_capacity_minutes ?? 120);
-      if (startTime && endTime) {
-        const [sh, sm] = startTime.split(":").map(Number);
-        const [eh, em] = endTime.split(":").map(Number);
-        const mins = (eh * 60 + em) - (sh * 60 + sm);
-        if (mins > 0) cap = mins;
-      }
-      helperNameMap.set(String(r.id), String(r.name));
-      return { id: String(r.id), name: String(r.name), type: String(r.type ?? "General"), capacityMinutes: cap };
-    });
+    for (const h of useHelpersStore.getState().helpers) {
+      helperNameMap.set(h.id, h.name);
+    }
 
     const cs: ChoreEntry[] = ((choresRes.data ?? []) as Array<Record<string, unknown>>).map((r) => {
       const meta = (r.metadata ?? {}) as Record<string, unknown>;
@@ -186,11 +197,9 @@ export function WorkloadOptimizer({ onDone, initialHelperFilter }: WorkloadOptim
       };
     });
 
-    setHelpers(hs);
     setChores(cs);
-    setTotalCapacity(hs.reduce((sum, h) => sum + h.capacityMinutes, 0));
     setStep(initialHelperFilter ? "cadence" : "gap");
-  }, [householdId]);
+  }, [householdId, initialHelperFilter, loadHelpersFromStore]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -435,7 +444,13 @@ export function WorkloadOptimizer({ onDone, initialHelperFilter }: WorkloadOptim
       kind: "helper" as const,
     }));
 
-    const plan = buildAssignmentPlan(remaining, assignableHelpers);
+    // Fetch owner-declared rules so redistribution respects explicit
+    // preferences (e.g., kitchen goes to cook even if another helper has
+    // more headroom).
+    const rulesResult = await fetchAssignmentRules(householdId);
+    const rules: AssignmentRuleRow[] = rulesResult.ok === true ? rulesResult.rules : [];
+
+    const plan = buildAssignmentPlan(remaining, assignableHelpers, rules);
 
     // Apply reassignments
     const toApply = plan.assignments.filter((a) => {

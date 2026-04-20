@@ -36,7 +36,9 @@ import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
+import { useHelpersStore } from "../../stores/helpersStore";
 import { WeeklyPlanCard } from "./WeeklyPlanCard";
+import { LearningNudgeCard } from "../owner/LearningNudgeCard";
 
 type ChoreRow = {
   id: string;
@@ -48,16 +50,6 @@ type ChoreRow = {
   completed_at: string | null;
   helper_id: string | null;
   metadata: Record<string, unknown> | null;
-  created_at: string;
-};
-
-type HelperRow = {
-  id: string;
-  household_id: string;
-  name: string;
-  type: string | null;
-  phone: string | null;
-  notes: string | null;
   created_at: string;
 };
 
@@ -87,7 +79,8 @@ export function Dashboard() {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [chores, setChores] = useState<ChoreRow[]>([]);
-  const [helpers, setHelpers] = useState<HelperRow[]>([]);
+  const helpers = useHelpersStore((s) => s.helpers);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
   const [busy, setBusy] = useState(false);
   const [editBusy, setEditBusy] = useState(false);
   const [setupState, setSetupState] = useState<{ loaded: boolean; remaining: string[] }>({ loaded: false, remaining: [] });
@@ -123,13 +116,13 @@ export function Dashboard() {
   }, [chores]);
 
   useEffect(() => {
-    if (!householdId.trim()) return;
+    const hid = householdId.trim();
+    if (!hid) return;
     let cancelled = false;
+    void loadHelpersFromStore(hid);
     (async () => {
       setBusy(true);
-      const hid = householdId.trim();
-
-      const choresReq = supabase
+      const { data, error } = await supabase
         .from("chores")
         .select("id,household_id,title,status,priority,due_at,completed_at,helper_id,metadata,created_at")
         .eq("household_id", hid)
@@ -138,32 +131,19 @@ export function Dashboard() {
         .order("created_at", { ascending: false })
         .limit(50);
 
-      const helpersReq = supabase
-        .from("helpers")
-        .select("id,household_id,name,type,phone,notes,created_at")
-        .eq("household_id", hid)
-        .order("created_at", { ascending: false });
-
-      const [choresRes, helpersRes] = await Promise.all([choresReq, helpersReq]);
-
       if (cancelled) return;
       setBusy(false);
-      if (choresRes.error) {
+      if (error) {
         setChores([]);
       } else {
-        setChores((choresRes.data ?? []) as ChoreRow[]);
-      }
-      if (helpersRes.error) {
-        setHelpers([]);
-      } else {
-        setHelpers((helpersRes.data ?? []) as HelperRow[]);
+        setChores((data ?? []) as ChoreRow[]);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [householdId]);
+  }, [householdId, loadHelpersFromStore]);
 
   // Detect onboarding setup state for the "Continue Setup" banner
   useEffect(() => {
@@ -341,6 +321,11 @@ export function Dashboard() {
           </CardContent>
         </Card>
       )}
+
+      {/* Learning nudge — surfaces when override count hits the threshold */}
+      <Box mb={3}>
+        <LearningNudgeCard />
+      </Box>
 
       {/* Weekly Plan — single-tap approval for the upcoming week */}
       <Box mb={3}>

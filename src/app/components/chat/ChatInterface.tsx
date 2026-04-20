@@ -61,7 +61,10 @@ import { parseAgentActionsFromAssistantText, parseAutomationSuggestionsFromAssis
 import { OnboardingPanel } from "./OnboardingPanel";
 import { AssignmentPanel } from "./AssignmentPanel";
 import { loadCoverageDraft } from "../../experiments/coverage/coverageDraftStorage";
-import { agentCreate, agentListHelpers, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
+import { agentCreate, executeToolCall, semanticReindex, semanticSearch } from "../../services/agentApi";
+import { useHelpersStore } from "../../stores/helpersStore";
+import { ElicitationFlow } from "../helpers/ElicitationFlow";
+import type { ElicitationTemplateId } from "../../services/elicitationApi";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { supabase } from "../../services/supabaseClient";
@@ -1038,8 +1041,19 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
     return () => window.removeEventListener("homeops:delete-chores-flow", handler as EventListener);
   }, [toolBusy, persistDeleteChoresFlow]);
 
-  const [helpers, setHelpers] = useState<HelperOption[]>([]);
-  const [helperLoadError, setHelperLoadError] = useState<string | null>(null);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const helperLoadError = useHelpersStore((s) => s.error);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const helpers = useMemo<HelperOption[]>(
+    () => storeHelpers.map((h) => ({ id: h.id, name: h.name, type: h.type, phone: h.phone })),
+    [storeHelpers],
+  );
+
+  // ui.* pseudo tool calls — dispatched client-side, never sent to the edge
+  // function. Currently supports ui.open_elicitation (→ ElicitationFlow).
+  const [elicitationUiScope, setElicitationUiScope] = useState<ElicitationTemplateId | null | "__unscoped__">(null);
+  const [uiToolCallOpenCounter, setUiToolCallOpenCounter] = useState(0);
+  const [processedUiToolCallIds, setProcessedUiToolCallIds] = useState<Record<string, boolean>>({});
 
   const [choreDrafts, setChoreDrafts] = useState<ChoreDraft[]>([]);
   const [selectedChoreDraftIds, setSelectedChoreDraftIds] = useState<Record<string, boolean>>({});
@@ -1959,6 +1973,9 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
   const proposedWriteToolCalls = proposedToolCalls
     .filter((tc) => tc.tool !== "db.select")
     .filter((tc) => !isReadOnlyRpc(tc))
+    // ui.* pseudo tools are dispatched client-side; never go through the
+    // plan-confirm / executeToolCall path.
+    .filter((tc) => !tc.tool.startsWith("ui."))
     // If the model emits BOTH actions (for chore drafts) and tool_calls (db.insert chores),
     // hide the insert tool calls to avoid duplicate approvals.
     .filter((tc) => {
@@ -1978,6 +1995,35 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
     }
     return out;
   }, [proposedWriteToolCalls]);
+
+  // Dispatch ui.* pseudo tool calls as they arrive. The Python intent
+  // `start_elicitation` emits `ui.open_elicitation` — we map that to the
+  // ElicitationFlow dialog, scoped to args.scope if present.
+  useEffect(() => {
+    const uiCalls = proposedToolCalls.filter((tc) => tc.tool.startsWith("ui."));
+    if (uiCalls.length === 0) return;
+    let next: typeof processedUiToolCallIds = processedUiToolCallIds;
+    let touched = false;
+    for (const tc of uiCalls) {
+      const key = typeof tc.id === "string" ? tc.id : JSON.stringify({ tool: tc.tool, args: tc.args });
+      if (processedUiToolCallIds[key]) continue;
+      if (tc.tool === "ui.open_elicitation") {
+        const rawScope = (tc.args as { scope?: unknown })?.scope;
+        const scope =
+          rawScope === "specialty_kitchen" ||
+          rawScope === "specialty_cleaning" ||
+          rawScope === "specialty_outdoor" ||
+          rawScope === "specialty_laundry"
+            ? (rawScope as ElicitationTemplateId)
+            : null;
+        setElicitationUiScope(scope ?? "__unscoped__");
+        setUiToolCallOpenCounter((n) => n + 1);
+      }
+      next = { ...next, [key]: true };
+      touched = true;
+    }
+    if (touched) setProcessedUiToolCallIds(next);
+  }, [proposedToolCalls, processedUiToolCallIds]);
 
   const [toolCallOverridesByKey, setToolCallOverridesByKey] = useState<Record<string, ToolCall>>({});
   const pendingSpaceToolCallKeyRef = useRef<string | null>(null);
@@ -2361,28 +2407,11 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
     setHomeProfileWizardOpen(true);
   }, [latestAssistantText, isStreaming, homeProfileExists, reviewHomeProfile]);
 
-  // Load helpers list for household
   useEffect(() => {
-    const token = agentAccessToken.trim();
     const householdId = agentHouseholdId.trim();
-    if (!token || !householdId) return;
-
-    let cancelled = false;
-    (async () => {
-      setHelperLoadError(null);
-      const res = await agentListHelpers({ accessToken: token, householdId });
-      if (cancelled) return;
-      if (!res.ok) {
-        setHelperLoadError("error" in res ? res.error : "Failed to load helpers");
-        setHelpers([]);
-        return;
-      }
-      setHelpers(res.helpers);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [agentAccessToken, agentHouseholdId]);
+    if (!householdId) return;
+    void loadHelpersFromStore(householdId);
+  }, [agentHouseholdId, loadHelpersFromStore]);
 
   const applyAction = useCallback(async (action: AgentCreateAction) => {
     setAgentError(null);
@@ -4760,6 +4789,18 @@ export function ChatInterface(props: { embedded?: boolean; onboarding?: boolean;
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* ── ui.open_elicitation dispatcher ──────────────────────────────── */}
+      {elicitationUiScope !== null && (
+        <ElicitationFlow
+          key={`chat-elicit-${uiToolCallOpenCounter}`}
+          autoOpen
+          hideBanner
+          scopedTemplateId={elicitationUiScope === "__unscoped__" ? null : elicitationUiScope}
+          onAllAnswered={() => setElicitationUiScope(null)}
+          onClose={() => setElicitationUiScope(null)}
+        />
+      )}
     </Stack>
   );
 }

@@ -122,6 +122,16 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
   const chatSyncChannelRef = useRef<BroadcastChannel | null>(null);
   const chatSyncStorageKey = "homeops.chat.last_sync";
 
+  // Monotonic high-water mark for sync broadcasts. Survives effect re-runs so
+  // a clearHistory() can advance it and permanently drop any older in-flight
+  // broadcasts (prevents old messages from flashing back after clear).
+  const lastSyncTsRef = useRef(0);
+
+  // Timestamp of the most recent clearHistory(). loadMemory() skips within the
+  // guard window so in-flight server clears don't race with scheduled reloads.
+  const clearedAtRef = useRef(0);
+  const CLEAR_GUARD_MS = 3000;
+
   const broadcastChatSync = useCallback(() => {
     try {
       window.dispatchEvent(new CustomEvent("homeops:chat-sync", { detail: { ts: Date.now() } }));
@@ -330,8 +340,9 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
   };
 
   const loadMemory = useCallback(async (scope: ChatScope) => {
-    // Don't reload while a clear is being processed — it would restore the old messages
-    if (clearPendingRef.current) {
+    // Don't reload within the clear guard window — it would restore old messages
+    // before the server finishes processing the clear.
+    if (clearedAtRef.current > 0 && Date.now() - clearedAtRef.current < CLEAR_GUARD_MS) {
       setMemoryReady(true);
       return;
     }
@@ -475,7 +486,6 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
   }, [authedHouseholdId, authedAccessToken]);
 
   useEffect(() => {
-    let last = 0;
     let timer: any = null;
 
     const scheduleReload = () => {
@@ -491,8 +501,8 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
       const source = typeof detail?.source === "string" ? detail.source : "";
       const ts = typeof detail?.ts === "number" ? detail.ts : Date.now();
       if (source && source === instanceIdRef.current) return;
-      if (ts <= last) return;
-      last = ts;
+      if (ts <= lastSyncTsRef.current) return;
+      lastSyncTsRef.current = ts;
       scheduleReload();
     };
 
@@ -737,10 +747,6 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
     void maybeSummarizeAndTrim();
   }, [isStreaming, broadcastChatSync]);
 
-  // After a clear, suppress the next sync-triggered reload so old messages
-  // don't flash back before the server processes the deletion.
-  const clearPendingRef = useRef(false);
-
   const clearHistory = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -751,23 +757,25 @@ export function useSarvamChat(opts?: { systemPrompt?: string }) {
     setConversationId("");
     setError(null);
     setIsStreaming(false);
-    clearPendingRef.current = true;
+
+    // Advance both refs synchronously so any in-flight broadcast with an
+    // earlier timestamp is dropped, and loadMemory() skips within the guard
+    // window.
+    const now = Date.now();
+    clearedAtRef.current = now;
+    lastSyncTsRef.current = now;
 
     const { accessToken, householdId } = getAgentSetup();
     if (accessToken && householdId) {
-      (async () => {
+      void (async () => {
         const res = await clearChatState({ accessToken, householdId, scope: memoryScopeRef.current });
         if (res.ok) {
           conversationIdRef.current = res.conversationId;
           setConversationId(res.conversationId);
         }
-        // Allow reloads again after the server has processed the clear
-        clearPendingRef.current = false;
       })();
-    } else {
-      clearPendingRef.current = false;
     }
-  }, []);
+  }, [systemPrompt]);
 
   return { messages, sendMessage, appendUserMessage, isStreaming, error, clearHistory, memoryReady, memoryScope, setMemoryScope, appendAssistantMessage, conversationId };
 }

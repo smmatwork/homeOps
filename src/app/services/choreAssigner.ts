@@ -39,6 +39,9 @@ export interface Assignment {
   /** "helper" or "person" */
   assigneeKind?: "helper" | "person";
   reason: string;
+  /** Rule ids (from assignment_rules) that contributed to this assignment.
+   *  Threaded through so apply_assignment_decision can record them. */
+  ruleIds?: string[];
 }
 
 export interface AssignmentPlan {
@@ -50,6 +53,63 @@ export interface AssignmentPlan {
     capacityUsedPct: number;
   }>;
   unassigned: Assignment[];
+  /** Template IDs (e.g. "specialty_kitchen") for which chores exist but no
+   *  active assignment_rule covers them. Used for the JIT elicitation hint. */
+  unresolvedTemplates?: string[];
+}
+
+/**
+ * Subset of the assignment_rules row shape the engine needs. The full row has
+ * more columns (source, created_at, conditions) that the engine doesn't
+ * consume directly.
+ */
+export interface AssignmentRule {
+  id: string;
+  template_id: string;
+  template_params: { area_key?: string; area_tags?: string[] } & Record<string, unknown>;
+  helper_id: string | null;
+  weight: number;
+  active: boolean;
+}
+
+/**
+ * Convert a stored helper row (from helpersStore or DB) into the
+ * AssignableHelper shape the engine consumes. Derives workDays, startTime,
+ * endTime, and capacityMinutes from metadata.schedule when present — same
+ * logic AssignmentPanel and WorkloadOptimizer use, consolidated so
+ * auto-assign + manual flows pick identical values.
+ */
+export function helperRowToAssignable(h: {
+  id: string;
+  name: string;
+  type: string | null;
+  daily_capacity_minutes: number;
+  metadata: Record<string, unknown> | null;
+}): AssignableHelper {
+  const meta = (h.metadata ?? {}) as Record<string, unknown>;
+  const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
+  const days = (schedule.days ?? {}) as Record<string, unknown>;
+  const workDays = Object.entries(days)
+    .filter(([, v]) => v === true)
+    .map(([k]) => k);
+  const startTime = typeof schedule.start === "string" ? schedule.start : "";
+  const endTime = typeof schedule.end === "string" ? schedule.end : "";
+  let capacityMinutes = Number(h.daily_capacity_minutes ?? 120);
+  if (startTime && endTime) {
+    const [sh, sm] = startTime.split(":").map(Number);
+    const [eh, em] = endTime.split(":").map(Number);
+    const mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins > 0) capacityMinutes = mins;
+  }
+  return {
+    id: h.id,
+    name: h.name,
+    type: h.type,
+    dailyCapacityMinutes: capacityMinutes,
+    roleTags: inferRoleTags(h.type),
+    kind: "helper",
+    workDays: workDays.length > 0 ? workDays : undefined,
+  };
 }
 
 /**
@@ -239,13 +299,69 @@ function assignDay(
 }
 
 /**
+ * For a given chore's inferred tags, return which elicitation template_id
+ * (if any) covers it. Used to detect coverage gaps for JIT elicitation.
+ */
+export function templateIdForChoreTags(tags: string[]): string | null {
+  const set = new Set(tags);
+  if (set.has("kitchen") || set.has("cooking") || set.has("dining")) return "specialty_kitchen";
+  if (set.has("garden") || set.has("outdoor") || set.has("balcony") || set.has("garage")) return "specialty_outdoor";
+  if (set.has("laundry") || set.has("washing") || set.has("ironing")) return "specialty_laundry";
+  if (set.has("cleaning") || set.has("bathroom") || set.has("bedroom") || set.has("living")) return "specialty_cleaning";
+  return null;
+}
+
+/**
+ * Find rules that match this (chore, helper) pair. A rule matches when:
+ *   • rule.active is true
+ *   • rule.helper_id === helper.id (rule is scoped to this helper)
+ *   • chore tags overlap with rule.template_params.area_tags (if provided),
+ *     OR the rule's template_id matches the chore's inferred template_id.
+ */
+function matchingRulesFor(
+  choreTags: string[],
+  helperId: string,
+  rules: AssignmentRule[],
+): AssignmentRule[] {
+  if (rules.length === 0) return [];
+  const choreTagSet = new Set(choreTags);
+  const choreTemplate = templateIdForChoreTags(choreTags);
+  const out: AssignmentRule[] = [];
+  for (const r of rules) {
+    if (!r.active) continue;
+    if (r.helper_id !== helperId) continue;
+    const areaTags = Array.isArray(r.template_params?.area_tags)
+      ? (r.template_params.area_tags as unknown[]).filter((t): t is string => typeof t === "string")
+      : [];
+    const tagOverlap = areaTags.some((t) => choreTagSet.has(t));
+    const templateMatch = choreTemplate !== null && r.template_id === choreTemplate;
+    if (tagOverlap || templateMatch) {
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/** Per-rule bonus applied on top of the tag-match score. Weight=1.0 means
+ *  a standard elicited rule; nudge-learned rules ship with weight=1.5 so
+ *  they outrank. Scale roughly matches the existing matchScore ceiling of
+ *  ~8 so one rule is decisive. */
+const RULE_SCORE_BASE = 8;
+
+/**
  * Build an assignment plan: match chores to helpers based on role,
  * capacity, schedule, and estimated duration. Distributes weekly/monthly
  * chores across different days to avoid overloading any single day.
+ *
+ * When `rules` is provided, matching rules give a large score boost so the
+ * owner's declared preferences dominate over inferred role tags. Each
+ * assignment records which rule_ids contributed, and the plan exposes
+ * `unresolvedTemplates` for the JIT elicitation hint.
  */
 export function buildAssignmentPlan(
   chores: AssignableChore[],
   helpers: AssignableHelper[],
+  rules: AssignmentRule[] = [],
 ): AssignmentPlan {
   // Pre-compute helper tags
   const helperTags = new Map<string, string[]>();
@@ -287,6 +403,7 @@ export function buildAssignmentPlan(
     // Find best matching helper with capacity
     let bestHelper: AssignableHelper | null = null;
     let bestScore = -1;
+    let bestRules: AssignmentRule[] = [];
 
     for (const h of helpers) {
       const currentLoad = effectiveDailyLoad.get(h.id) ?? 0;
@@ -301,10 +418,22 @@ export function buildAssignmentPlan(
         if (chore.cadence === "daily" && h.workDays.length === 0) continue;
       }
 
-      const score = matchScore(helperTags.get(h.id) ?? [], choreTags, h.type);
+      let score = matchScore(helperTags.get(h.id) ?? [], choreTags, h.type);
+
+      // Apply rule bonuses on top of tag-match scoring. Owner-declared rules
+      // are the highest-signal input; one matching rule should typically
+      // dominate inferred tag overlap.
+      const applicable = matchingRulesFor(choreTags, h.id, rules);
+      let ruleBonus = 0;
+      for (const r of applicable) {
+        ruleBonus += RULE_SCORE_BASE * (typeof r.weight === "number" ? r.weight : 1);
+      }
+      score += ruleBonus;
+
       if (score > bestScore) {
         bestScore = score;
         bestHelper = h;
+        bestRules = applicable;
       }
     }
 
@@ -317,6 +446,11 @@ export function buildAssignmentPlan(
     if (bestHelper) {
       const isPerson = bestHelper.kind === "member";
       effectiveDailyLoad.set(bestHelper.id, (effectiveDailyLoad.get(bestHelper.id) ?? 0) + effectiveMins);
+      const reason = bestRules.length > 0
+        ? `Matched your preference (${bestRules[0].template_id.replace(/^specialty_/, "")})`
+        : bestScore > 0
+          ? `Matched by role (${choreTags.slice(0, 2).join(", ")})`
+          : "Best available capacity";
       assignments.push({
         choreId: chore.id,
         choreTitle: chore.title,
@@ -327,7 +461,8 @@ export function buildAssignmentPlan(
         helperName: bestHelper.name,
         assigneePersonId: isPerson ? bestHelper.id : null,
         assigneeKind: isPerson ? "person" : "helper",
-        reason: bestScore > 0 ? `Matched by role (${choreTags.slice(0, 2).join(", ")})` : "Best available capacity",
+        reason,
+        ruleIds: bestRules.length > 0 ? bestRules.map((r) => r.id) : undefined,
       });
     } else {
       assignments.push({
@@ -370,7 +505,20 @@ export function buildAssignmentPlan(
     };
   });
 
-  return { assignments, byHelper, unassigned };
+  // Detect template coverage gaps — template_ids that have chores but no
+  // active rule. Drives the JIT elicitation hint in AssignmentPanel.
+  const coveredTemplates = new Set<string>();
+  for (const r of rules) {
+    if (r.active && typeof r.template_id === "string") coveredTemplates.add(r.template_id);
+  }
+  const neededTemplates = new Set<string>();
+  for (const chore of chores) {
+    const tid = templateIdForChoreTags(inferChoreCategory(chore.title, chore.space));
+    if (tid) neededTemplates.add(tid);
+  }
+  const unresolvedTemplates = [...neededTemplates].filter((t) => !coveredTemplates.has(t));
+
+  return { assignments, byHelper, unassigned, unresolvedTemplates };
 }
 
 /**

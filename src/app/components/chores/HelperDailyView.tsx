@@ -25,16 +25,13 @@ import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
 import { cadenceLabel, type Cadence } from "../../services/choreRecommendationEngine";
 import { templateOccursOnDate } from "../../services/choreScheduler";
+import { useHelpersStore } from "../../stores/helpersStore";
+import { reopenChore } from "../../services/choreLifecycleApi";
 import { ChoreCard, type ChoreRow } from "./ChoreCard";
 import { EditChoreDialog } from "./EditChoreDialog";
 
 interface HelperDailyViewProps {
   date: string;
-}
-
-interface HelperRow {
-  id: string;
-  name: string;
 }
 
 interface HelperGroup {
@@ -49,12 +46,17 @@ interface HelperGroup {
 const CADENCE_ORDER = ["daily", "every_2_days", "every_3_days", "every_4_days", "every_5_days", "weekly", "biweekly", "monthly"];
 
 export function HelperDailyView({ date }: HelperDailyViewProps) {
-  const { householdId, accessToken } = useAuth();
+  const { householdId, accessToken, user } = useAuth();
   const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [chores, setChores] = useState<ChoreRow[]>([]);
-  const [helpers, setHelpers] = useState<HelperRow[]>([]);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const helpers = useMemo(
+    () => storeHelpers.map((h) => ({ id: h.id, name: h.name })),
+    [storeHelpers],
+  );
   const [busyChoreId, setBusyChoreId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -62,18 +64,14 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     setLoading(true);
     setError(null);
 
-    const [choresRes, helpersRes] = await Promise.all([
-      supabase
-        .from("chores")
-        .select("id,title,description,priority,status,helper_id,due_at,completed_at,metadata,deleted_at,created_at")
-        .eq("household_id", householdId)
-        .is("deleted_at", null)
-        .order("due_at", { ascending: true }),
-      supabase
-        .from("helpers")
-        .select("id,name")
-        .eq("household_id", householdId),
-    ]);
+    void loadHelpersFromStore(householdId);
+
+    const choresRes = await supabase
+      .from("chores")
+      .select("id,title,description,priority,status,helper_id,due_at,completed_at,metadata,deleted_at,created_at")
+      .eq("household_id", householdId)
+      .is("deleted_at", null)
+      .order("due_at", { ascending: true });
 
     setLoading(false);
 
@@ -105,8 +103,7 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     });
 
     setChores(todaysChores);
-    setHelpers((helpersRes.data ?? []) as HelperRow[]);
-  }, [householdId, date]);
+  }, [householdId, date, loadHelpersFromStore]);
 
   useEffect(() => {
     void load();
@@ -270,6 +267,20 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
     void load();
   }, [householdId, accessToken, load]);
 
+  const handleFlagAsNotDone = useCallback(async (chore: ChoreRow) => {
+    const uid = user?.id;
+    if (!householdId || !uid) return;
+    const r = await reopenChore({
+      householdId,
+      actorUserId: uid,
+      choreId: chore.id,
+      reason: "feedback",
+    });
+    if (r.ok === true) {
+      void load();
+    }
+  }, [householdId, user?.id, load]);
+
   // All hooks must be before early returns
   const [collapsedHelpers, setCollapsedHelpers] = useState<Set<string>>(new Set());
 
@@ -364,6 +375,7 @@ export function HelperDailyView({ date }: HelperDailyViewProps) {
                       completeBusy={busyChoreId === chore.id}
                       onEdit={() => setEditChore(chore)}
                       onDelete={() => void handleDelete(chore)}
+                      onFlagAsNotDone={() => void handleFlagAsNotDone(chore)}
                       showEstimate
                       showTimeOnly
                     />

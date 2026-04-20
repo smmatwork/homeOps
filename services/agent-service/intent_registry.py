@@ -86,6 +86,61 @@ def _extract_add_space(text: str) -> ExtractedIntent | None:
     )
 
 
+# ── Elicitation scope detection ──────────────────────────────────────
+#
+# Maps free-text hints ("kitchen", "cooking", "outdoor", "laundry", etc.)
+# to a canonical elicitation template_id. Returned as update_value on the
+# ExtractedIntent so the tool-call builder can pass it to the UI.
+_SCOPE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("specialty_kitchen",  re.compile(r"\b(kitchen|cook|dish|dining)\b", re.IGNORECASE)),
+    ("specialty_outdoor",  re.compile(r"\b(garden|outdoor|balcony|terrace|garage|lawn)\b", re.IGNORECASE)),
+    ("specialty_laundry",  re.compile(r"\b(laundry|wash\s*cloth|iron|dhobi)\b", re.IGNORECASE)),
+    ("specialty_cleaning", re.compile(r"\b(clean|sweep|mop|dust|bathroom|bedroom|room)\b", re.IGNORECASE)),
+]
+
+def _extract_elicitation(text: str) -> ExtractedIntent | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    scope: str | None = None
+    for template_id, pat in _SCOPE_PATTERNS:
+        if pat.search(t):
+            scope = template_id
+            break
+    return ExtractedIntent(
+        action="elicit",
+        entity="preferences",
+        match_text="elicitation",
+        match_field=None,
+        update_field="scope",
+        update_value=scope,
+        bulk=False,
+        confidence=0.9 if scope else 0.6,
+    )
+
+
+async def _start_elicitation_tool_calls(
+    extracted: ExtractedIntent,
+    facts: str = "",
+    *,
+    household_id: str = "",
+    user_id: str = "",
+) -> list[dict[str, Any]] | None:
+    """Emit a ui.* pseudo tool call. The client recognizes the `ui.` prefix
+    and dispatches to a React action (opening the elicitation dialog)
+    instead of routing through the edge function."""
+    scope = extracted.update_value  # e.g. "specialty_kitchen" or None
+    return [{
+        "id": f"tc_elicit_{uuid.uuid4().hex[:8]}",
+        "tool": "ui.open_elicitation",
+        "args": {"scope": scope},
+        "reason": (
+            f"Open the assignment-preference setup dialog for {scope}"
+            if scope else "Open the assignment-preference setup dialog"
+        ),
+    }]
+
+
 _REASSIGN_RE = re.compile(
     r"\b(assign|reassign|move)\b\s+(?:the\s+)?(?P<chore>.+?)\s+to\s+(?:the\s+)?(?P<helper>.+?)\s*$",
     re.IGNORECASE,
@@ -196,6 +251,28 @@ INTENT_REGISTRY: list[IntentDef] = [
             "Use query.rpc with name='add_space_to_profile' and p_display_name.\n"
         ),
         requires_plan=True,
+    ),
+
+    # ── Start pattern elicitation (assignment preferences) ────────
+    # Priority 95/90 beats the generic `create` intent's `set\s*up` match (85)
+    # so utterances like "set up kitchen preference" route here.
+    IntentDef(
+        name="start_elicitation",
+        detect=[
+            _p(95, r"\b(set\s*up|configure)\s+[\w\s]{0,25}\b(preference|assignment\s+pattern|patterns)\b"),
+            _p(90, r"\bwho\s+(should|does|handles?)\s+[\w\s]{0,20}\b(cook|kitchen|clean|laundry|iron|garden|outdoor|bathroom)\b"),
+            _p(88, r"\belicit(ation)?\b"),
+        ],
+        extract=_extract_elicitation,
+        to_tool_calls=_start_elicitation_tool_calls,
+        llm_hint=(
+            "\nThe user wants to set assignment preferences. Emit a single "
+            "tool call `ui.open_elicitation` with args.scope set to the "
+            "matching template_id (specialty_kitchen / specialty_cleaning / "
+            "specialty_outdoor / specialty_laundry) or null. The client will "
+            "open a dialog; do NOT use db.insert or query.rpc for this intent.\n"
+        ),
+        requires_plan=False,
     ),
 
     # ── Complete / mark done ─────────────────────────────────────

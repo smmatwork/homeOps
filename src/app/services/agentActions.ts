@@ -1,6 +1,15 @@
 export type AgentTable = "chores" | "helpers" | "home_profiles";
 
-export type ToolName = "db.select" | "db.insert" | "db.update" | "db.delete" | "query.rpc";
+export type ToolName =
+  | "db.select"
+  | "db.insert"
+  | "db.update"
+  | "db.delete"
+  | "query.rpc"
+  // ui.* pseudo tools are dispatched client-side (never hit the edge
+  // function). Used by intents that should open a UI surface rather than
+  // run a DB operation (e.g., ui.open_elicitation from start_elicitation).
+  | `ui.${string}`;
 
 export type ToolTable =
   | "chores"
@@ -56,7 +65,8 @@ function isToolCallsPayload(obj: unknown): obj is ToolCallsPayload {
       tool !== "db.insert" &&
       tool !== "db.update" &&
       tool !== "db.delete" &&
-      tool !== "query.rpc"
+      tool !== "query.rpc" &&
+      !(typeof tool === "string" && tool.startsWith("ui."))
     ) {
       return false;
     }

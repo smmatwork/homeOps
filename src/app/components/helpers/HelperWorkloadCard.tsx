@@ -14,10 +14,12 @@ import { Star, Warning, Schedule } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { useI18n } from "../../i18n";
 import { fetchHelperWorkloads, type HelperWorkload } from "../../services/helperWorkloadApi";
+import { useHelpersStore } from "../../stores/helpersStore";
 
 export function HelperWorkloadCard() {
   const { householdId } = useAuth();
   const { t } = useI18n();
+  const helpersVersion = useHelpersStore((s) => s.version);
   const [workloads, setWorkloads] = useState<HelperWorkload[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export function HelperWorkloadCard() {
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, helpersVersion]);
 
   if (loading) {
     return (

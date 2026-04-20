@@ -38,6 +38,7 @@ interface ChoreListViewProps {
   onDelete: (chore: ChoreRow) => void;
   onRestore: (chore: ChoreRow) => void;
   onReportNotDone: (chore: ChoreRow) => void;
+  onFlagAsNotDone: (chore: ChoreRow) => void;
   onBulkDelete: (ids: string[]) => void;
   helperOnLeave: (helperId: string | null, dueAt: string | null) => boolean;
 }
@@ -63,7 +64,7 @@ function matchesTab(status: string, tab: StatusTab) {
 export function ChoreListView(props: ChoreListViewProps) {
   const {
     chores, helpers, busy, spaceFilter, cadenceFilter,
-    onClearFilters, onEdit, onDelete, onRestore, onReportNotDone, onBulkDelete, helperOnLeave,
+    onClearFilters, onEdit, onDelete, onRestore, onReportNotDone, onFlagAsNotDone, onBulkDelete, helperOnLeave,
   } = props;
   const { t } = useI18n();
 
@@ -214,6 +215,7 @@ export function ChoreListView(props: ChoreListViewProps) {
                   onDelete={() => onDelete(chore)}
                   onRestore={() => onRestore(chore)}
                   onReportNotDone={() => onReportNotDone(chore)}
+                  onFlagAsNotDone={() => onFlagAsNotDone(chore)}
                 />
               );
             })}

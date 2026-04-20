@@ -29,6 +29,8 @@ import {
   ExpandLess,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
+import { autoAssignIfSilent } from "../../services/assignmentApi";
+import { useProposalsStore } from "../../stores/proposalsStore";
 import { supabase } from "../../services/supabaseClient";
 import {
   scheduleChores,
@@ -63,7 +65,7 @@ function formatDay(dateStr: string): string {
 }
 
 export function WeeklyPlanCard({ onApproved }: WeeklyPlanCardProps) {
-  const { householdId, accessToken } = useAuth();
+  const { householdId, accessToken, user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [mutations, setMutations] = useState<ChoreMutation[]>([]);
   const [helperNames, setHelperNames] = useState<Map<string, string>>(new Map());
@@ -162,22 +164,47 @@ export function WeeklyPlanCard({ onApproved }: WeeklyPlanCardProps) {
     try {
       for (let i = 0; i < mutations.length; i++) {
         const m = mutations[i];
-        const { error: insertError } = await supabase.from("chores").insert({
-          household_id: householdId,
-          title: m.title,
-          status: m.status,
-          priority: m.priority,
-          due_at: m.dueAt,
-          helper_id: m.helperId,
-          assignee_person_id: m.assigneePersonId ?? null,
-          template_id: m.templateId,
-          metadata: m.metadata,
-        });
+        const { data: inserted, error: insertError } = await supabase
+          .from("chores")
+          .insert({
+            household_id: householdId,
+            title: m.title,
+            status: m.status,
+            priority: m.priority,
+            due_at: m.dueAt,
+            helper_id: m.helperId,
+            assignee_person_id: m.assigneePersonId ?? null,
+            template_id: m.templateId,
+            metadata: m.metadata,
+          })
+          .select("id")
+          .maybeSingle();
         if (insertError) {
           setError(`Failed at chore ${i + 1}: ${insertError.message}`);
           setApplying(false);
           return;
         }
+
+        // Runtime auto-assign: only for chores the template left unassigned.
+        // Graduated pairs get assigned silently; one_tap pairs surface a
+        // proposal the user can confirm from the Chores page.
+        if (!m.helperId && !m.assigneePersonId && inserted?.id && user?.id) {
+          const r = await autoAssignIfSilent({
+            householdId,
+            actorUserId: user.id,
+            choreId: String(inserted.id),
+          });
+          if (r.ok === true && r.action === "one_tap_proposed") {
+            useProposalsStore.getState().setProposal({
+              choreId: String(inserted.id),
+              helperId: r.helperId,
+              helperName: r.helperName,
+              ruleIds: r.ruleIds,
+              proposedAt: Date.now(),
+            });
+          }
+        }
+
         setProgress(i + 1);
       }
       setDone(true);

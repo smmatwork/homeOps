@@ -20,22 +20,13 @@ import { executeToolCall } from "../../services/agentApi";
 import { useI18n } from "../../i18n";
 import { HelperWorkloadCard } from "./HelperWorkloadCard";
 import { HelperOnboardingFlow } from "./HelperOnboardingFlow";
+import { ElicitationFlow } from "./ElicitationFlow";
 import { HelperCard } from "./HelperCard";
 import { HelperCheckinCard } from "./HelperCheckinCard";
 import { HelperDailyView } from "./HelperDailyView";
 import { CompensationLedger } from "./CompensationLedger";
-
-type HelperRow = {
-  id: string;
-  household_id: string;
-  name: string;
-  type: string | null;
-  phone: string | null;
-  notes: string | null;
-  daily_capacity_minutes: number;
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-};
+import { useHelpersStore, type HelperRow } from "../../stores/helpersStore";
+import { reopenChore } from "../../services/choreLifecycleApi";
 
 type HelperPreferredLanguage = "en" | "hi" | "kn";
 
@@ -137,10 +128,15 @@ export function Helpers() {
   const [createHelperError, setCreateHelperError] = useState<string>("");
   const [createHelperBusy, setCreateHelperBusy] = useState(false);
 
-  const { accessToken, householdId } = useAuth();
-  const [busy, setBusy] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [helpers, setHelpers] = useState<HelperRow[]>([]);
+  const { accessToken, householdId, user } = useAuth();
+  const helpers = useHelpersStore((s) => s.helpers);
+  const helpersStatus = useHelpersStore((s) => s.status);
+  const loadError = useHelpersStore((s) => s.error);
+  const loadHelpers = useHelpersStore((s) => s.load);
+  const invalidateHelpers = useHelpersStore((s) => s.invalidate);
+  const patchHelperInStore = useHelpersStore((s) => s.patchHelper);
+  const deleteHelperInStore = useHelpersStore((s) => s.deleteHelper);
+  const busy = helpersStatus === "loading";
   const [todayBusy, setTodayBusy] = useState(false);
   const [todayChores, setTodayChores] = useState<ChoreRow[]>([]);
 
@@ -194,8 +190,14 @@ export function Helpers() {
   const [feedbackHelper, setFeedbackHelper] = useState<HelperRow | null>(null);
   const [feedbackRating, setFeedbackRating] = useState("5");
   const [feedbackComment, setFeedbackComment] = useState("");
+  const [feedbackChoreId, setFeedbackChoreId] = useState<string>("");
+  const [feedbackChoreOptions, setFeedbackChoreOptions] = useState<Array<{ id: string; title: string; due_at: string | null }>>([]);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [feedbackRows, setFeedbackRows] = useState<HelperFeedbackRow[]>([]);
+
+  // Increments after each HelperOnboardingFlow success so the ElicitationFlow
+  // remounts and its autoOpen effect fires.
+  const [elicitationOpenTrigger, setElicitationOpenTrigger] = useState(0);
 
   const [rewardsOpen, setRewardsOpen] = useState(false);
   const [rewardsHelper, setRewardsHelper] = useState<HelperRow | null>(null);
@@ -230,22 +232,46 @@ export function Helpers() {
     setFeedbackHelper(helper);
     setFeedbackRating("5");
     setFeedbackComment("");
+    setFeedbackChoreId("");
+    setFeedbackChoreOptions([]);
     setFeedbackRows([]);
     setFeedbackOpen(true);
     setFeedbackBusy(true);
-    const { data, error } = await supabase
-      .from("helper_feedback")
-      .select("id, household_id, helper_id, author_id, rating, comment, occurred_at, created_at")
-      .eq("household_id", householdId)
-      .eq("helper_id", helper.id)
-      .order("occurred_at", { ascending: false })
-      .limit(10);
+
+    // Load feedback history and the helper's recent chores in parallel.
+    const [feedbackRes, choresRes] = await Promise.all([
+      supabase
+        .from("helper_feedback")
+        .select("id, household_id, helper_id, author_id, rating, comment, occurred_at, created_at")
+        .eq("household_id", householdId)
+        .eq("helper_id", helper.id)
+        .order("occurred_at", { ascending: false })
+        .limit(10),
+      supabase
+        .from("chores")
+        .select("id, title, due_at")
+        .eq("household_id", householdId)
+        .eq("helper_id", helper.id)
+        .is("deleted_at", null)
+        .order("due_at", { ascending: false, nullsFirst: false })
+        .limit(25),
+    ]);
+
     setFeedbackBusy(false);
-    if (error) {
-      showSnack("error", error.message);
+    if (feedbackRes.error) {
+      showSnack("error", feedbackRes.error.message);
       return;
     }
-    setFeedbackRows((data ?? []) as HelperFeedbackRow[]);
+    setFeedbackRows((feedbackRes.data ?? []) as HelperFeedbackRow[]);
+    if (!choresRes.error) {
+      setFeedbackChoreOptions(
+        (choresRes.data ?? []).map((r) => ({
+          id: String(r.id),
+          title: String(r.title ?? ""),
+          due_at: r.due_at ? String(r.due_at) : null,
+        })),
+      );
+    }
   };
 
   const submitFeedback = async () => {
@@ -262,6 +288,7 @@ export function Helpers() {
     }
 
     setFeedbackBusy(true);
+    const choreId = feedbackChoreId.trim() || null;
     const res = await executeToolCall({
       accessToken: token,
       householdId: hid,
@@ -276,18 +303,41 @@ export function Helpers() {
             helper_id: helper.id,
             rating,
             comment: feedbackComment.trim() || null,
+            chore_id: choreId,
           },
         },
         reason: "Submit helper feedback",
       },
     });
-    setFeedbackBusy(false);
     if (res.ok === false) {
+      setFeedbackBusy(false);
       showSnack("error", res.error);
       return;
     }
 
-    showSnack("success", t("helpers.feedback_submitted"));
+    // Auto-reopen: if the owner rated this chore poorly (<=2), the chore
+    // is flagged as not-done so it surfaces in Day Focus → Needs attention.
+    let autoReopened = false;
+    const uid = user?.id;
+    if (choreId && uid && rating <= 2) {
+      const r = await reopenChore({
+        householdId: hid,
+        actorUserId: uid,
+        choreId,
+        reason: "feedback",
+      });
+      if (r.ok === true) {
+        autoReopened = true;
+      }
+    }
+
+    setFeedbackBusy(false);
+    showSnack(
+      "success",
+      autoReopened
+        ? `${t("helpers.feedback_submitted")} — chore reopened for your attention.`
+        : t("helpers.feedback_submitted"),
+    );
     await openFeedback(helper);
   };
 
@@ -408,7 +458,7 @@ export function Helpers() {
       return;
     }
 
-    setHelpers((prev) => prev.map((h) => (h.id === helper.id ? { ...h, metadata: nextMeta } : h)));
+    patchHelperInStore(helper.id, { metadata: nextMeta });
     setLanguageOpen(false);
     setLanguageHelper(null);
     showSnack("success", t("helpers.language_updated"));
@@ -518,7 +568,7 @@ export function Helpers() {
       return;
     }
 
-    setHelpers((prev) => prev.map((h) => (h.id === helper.id ? { ...h, metadata: nextMeta } : h)));
+    patchHelperInStore(helper.id, { metadata: nextMeta });
     setScheduleOpen(false);
     setScheduleHelper(null);
     showSnack("success", t("helpers.helper_schedule_updated"));
@@ -559,36 +609,17 @@ export function Helpers() {
       return;
     }
 
-    setHelpers((prev) => prev.map((h) => (h.id === helper.id ? { ...h, daily_capacity_minutes: minutes } : h)));
+    patchHelperInStore(helper.id, { daily_capacity_minutes: minutes });
     setCapacityOpen(false);
     setCapacityHelper(null);
     showSnack("success", t("helpers.helper_capacity_updated"));
   };
 
   useEffect(() => {
-    if (!householdId.trim()) return;
-    let cancelled = false;
-    (async () => {
-      setBusy(true);
-      setLoadError(null);
-      const { data, error } = await supabase
-        .from("helpers")
-        .select("id,household_id,name,type,phone,notes,daily_capacity_minutes,metadata,created_at")
-        .eq("household_id", householdId.trim())
-        .order("created_at", { ascending: false });
-      if (cancelled) return;
-      setBusy(false);
-      if (error) {
-        setLoadError(error.message);
-        setHelpers([]);
-        return;
-      }
-      setHelpers((data ?? []) as HelperRow[]);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [householdId]);
+    const hid = householdId.trim();
+    if (!hid) return;
+    void loadHelpers(hid);
+  }, [householdId, loadHelpers]);
 
   useEffect(() => {
     const hid = householdId.trim();
@@ -681,16 +712,7 @@ export function Helpers() {
     setNewNotes("");
     setNewPreferredLanguage("en");
 
-    const { data, error } = await supabase
-      .from("helpers")
-      .select("id,household_id,name,type,phone,notes,daily_capacity_minutes,metadata,created_at")
-      .eq("household_id", hid)
-      .order("created_at", { ascending: false });
-    if (error) {
-      showSnack("error", error.message);
-      return;
-    }
-    setHelpers((data ?? []) as HelperRow[]);
+    await invalidateHelpers(hid);
     showSnack("success", t("helpers.helper_created"));
   };
 
@@ -807,60 +829,23 @@ export function Helpers() {
     if (!token || !hid || !helper) return;
 
     setDeleteBusy(true);
-
-    // 1. Count chores assigned to this helper
-    const { count: assignedCount } = await supabase
-      .from("chores")
-      .select("id", { count: "exact", head: true })
-      .eq("household_id", hid)
-      .eq("helper_id", helper.id)
-      .is("deleted_at", null);
-
-    // 2. Unassign all chores from this helper
-    if (assignedCount && assignedCount > 0) {
-      await supabase
-        .from("chores")
-        .update({ helper_id: null })
-        .eq("household_id", hid)
-        .eq("helper_id", helper.id)
-        .is("deleted_at", null);
-    }
-
-    // 3. Cascade cleanup — remove all related records
-    await Promise.all([
-      supabase.from("assignment_rules").delete().eq("household_id", hid).eq("helper_id", helper.id),
-      supabase.from("member_time_off").delete().eq("household_id", hid).eq("helper_id", helper.id),
-      supabase.from("helper_checkins").delete().eq("helper_id", helper.id),
-      supabase.from("helper_feedback").delete().eq("helper_id", helper.id),
-      supabase.from("helper_outreach_attempts").delete().eq("helper_id", helper.id),
-      supabase.from("assignment_decisions").delete().eq("helper_id", helper.id),
-      supabase.from("chore_templates").update({ default_helper_id: null }).eq("household_id", hid).eq("default_helper_id", helper.id),
-    ]);
-
-    // 4. Delete the helper
-    const res = await executeToolCall({
+    const result = await deleteHelperInStore({
+      helperId: helper.id,
       accessToken: token,
       householdId: hid,
-      scope: "household",
-      toolCall: {
-        id: `helpers_delete_${helper.id}_${Date.now()}`,
-        tool: "db.delete",
-        args: { table: "helpers", id: helper.id },
-        reason: "Delete helper",
-      },
     });
     setDeleteBusy(false);
-    if (!res.ok) {
-      showSnack("error", "error" in res ? res.error : t("common.delete_failed"));
+
+    if (result.ok === false) {
+      showSnack("error", result.error || t("common.delete_failed"));
       return;
     }
 
-    setHelpers((prev) => prev.filter((h) => h.id !== helper.id));
     setDeleteOpen(false);
     setDeleteHelperRow(null);
 
-    if (assignedCount && assignedCount > 0) {
-      showSnack("info", `${helper.name} deleted. ${assignedCount} chore${assignedCount === 1 ? "" : "s"} are now unassigned — reassign them from the Chores page.`);
+    if (result.assignedCount > 0) {
+      showSnack("info", `${helper.name} deleted. ${result.assignedCount} chore${result.assignedCount === 1 ? "" : "s"} are now unassigned — reassign them from the Chores page.`);
     } else {
       showSnack("success", t("helpers.helper_deleted"));
     }
@@ -884,6 +869,12 @@ export function Helpers() {
           </Button>
         </Stack>
       </Stack>
+
+      {/* ── Pattern elicitation banner + dialog ─────────────────────── */}
+      <ElicitationFlow
+        key={`elicit-${elicitationOpenTrigger}`}
+        autoOpen={elicitationOpenTrigger > 0}
+      />
 
       {/* ── Workload summary ────────────────────────────────────────── */}
       <Box mb={3}>
@@ -1037,6 +1028,32 @@ export function Helpers() {
               />
             </Stack>
 
+            {feedbackChoreOptions.length > 0 && (
+              <FormControl fullWidth size="small">
+                <InputLabel>About a specific chore? (optional)</InputLabel>
+                <Select
+                  label="About a specific chore? (optional)"
+                  value={feedbackChoreId}
+                  onChange={(e) => setFeedbackChoreId(String(e.target.value))}
+                  displayEmpty
+                >
+                  <MenuItem value="">— Helper overall (no specific chore) —</MenuItem>
+                  {feedbackChoreOptions.map((c) => (
+                    <MenuItem key={c.id} value={c.id}>
+                      {c.title}
+                      {c.due_at ? ` · ${new Date(c.due_at).toLocaleDateString()}` : ""}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+
+            {Number(feedbackRating) <= 2 && feedbackChoreId && (
+              <Alert severity="info" sx={{ py: 0.5 }}>
+                This chore will be flagged as not done and moved to <b>Needs attention</b>.
+              </Alert>
+            )}
+
             <Button variant="contained" disabled={feedbackBusy} onClick={() => void submitFeedback()} sx={{ alignSelf: "flex-start" }}>
               {t("helpers.submit_feedback")}
             </Button>
@@ -1163,23 +1180,14 @@ export function Helpers() {
         open={onboardingOpen}
         onClose={() => setOnboardingOpen(false)}
         onSuccess={() => {
-          // Refresh the helpers list so the new helper appears.
-          // Mirrors the inline refresh pattern used by the legacy
-          // createHelper() path above.
           void (async () => {
             const hid = householdId.trim();
             if (!hid) return;
-            const { data, error } = await supabase
-              .from("helpers")
-              .select("id,household_id,name,type,phone,notes,daily_capacity_minutes,metadata,created_at")
-              .eq("household_id", hid)
-              .order("created_at", { ascending: false });
-            if (error) {
-              showSnack("error", error.message);
-              return;
-            }
-            setHelpers((data ?? []) as HelperRow[]);
+            await invalidateHelpers(hid);
             showSnack("success", t("helpers.helper_created"));
+            // Trigger the pattern-elicitation flow so the owner can set
+            // assignment preferences right after adding a helper.
+            setElicitationOpenTrigger((n) => n + 1);
           })();
         }}
       />

@@ -30,6 +30,11 @@ import { CheckCircle, Edit, Person, Layers, EditNote } from "@mui/icons-material
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { agentCreate, executeToolCall } from "../../services/agentApi";
+import { reassignChore, broadcastNudgeAvailable, fetchAssignmentRules, type OperatingMode, type AssignmentRuleRow } from "../../services/assignmentApi";
+import { ASSIGNMENT_MODE_CHANGED_EVENT } from "../chores/AssignmentModeChip";
+import { ElicitationFlow } from "../helpers/ElicitationFlow";
+import type { ElicitationTemplateId } from "../../services/elicitationApi";
+import { useHelpersStore } from "../../stores/helpersStore";
 import {
   buildAssignmentPlan,
   inferRoleTags,
@@ -101,14 +106,45 @@ const SPECIALTY_AREAS = [
 ];
 
 export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps) {
-  const { householdId, accessToken } = useAuth();
+  const { householdId, accessToken, user } = useAuth();
   const { lang } = useI18n();
   const [step, setStep] = useState<Step>("pick_pattern");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [helpers, setHelpers] = useState<HelperInfo[]>([]);
+  const storeHelpers = useHelpersStore((s) => s.helpers);
+  const loadHelpersFromStore = useHelpersStore((s) => s.load);
+  const [members, setMembers] = useState<HelperInfo[]>([]);
+  const helperInfos = useMemo<HelperInfo[]>(() => storeHelpers.map((r) => {
+    const meta = (r.metadata ?? {}) as Record<string, unknown>;
+    const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
+    const days = (schedule.days ?? {}) as Record<string, boolean>;
+    const workDays = Object.entries(days).filter(([, v]) => v).map(([k]) => k);
+    const startTime = typeof schedule.start === "string" ? schedule.start : "";
+    const endTime = typeof schedule.end === "string" ? schedule.end : "";
+    let capacityMinutes = Number(r.daily_capacity_minutes ?? 120);
+    if (startTime && endTime) {
+      const [sh, sm] = startTime.split(":").map(Number);
+      const [eh, em] = endTime.split(":").map(Number);
+      const scheduleMins = (eh * 60 + em) - (sh * 60 + sm);
+      if (scheduleMins > 0) capacityMinutes = scheduleMins;
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      type: String(r.type ?? "General"),
+      capacityMinutes,
+      kind: "helper" as const,
+      workDays,
+      startTime,
+      endTime,
+    };
+  }), [storeHelpers]);
+  const helpers = useMemo<HelperInfo[]>(() => [...helperInfos, ...members], [helperInfos, members]);
   const [rawChores, setRawChores] = useState<AssignableChore[]>([]);
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [assignmentRules, setAssignmentRules] = useState<AssignmentRuleRow[]>([]);
+  const [unresolvedTemplates, setUnresolvedTemplates] = useState<string[]>([]);
+  const [elicitationScopedTemplate, setElicitationScopedTemplate] = useState<ElicitationTemplateId | null>(null);
 
   // Specialty preferences: helperId → selected area keys
   const [specialtyPrefs, setSpecialtyPrefs] = useState<Record<string, string[]>>({});
@@ -117,7 +153,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
   const [floorPrefs, setFloorPrefs] = useState<Record<string, string>>({});
 
   // Editable assignments: choreId → { helperId, cadence }
-  const [assignments, setAssignments] = useState<Record<string, { helperId: string | null; cadence: string }>>({});
+  const [assignments, setAssignments] = useState<Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }>>({});
 
   const [applyProgress, setApplyProgress] = useState(0);
   const [applyTotal, setApplyTotal] = useState(0);
@@ -135,8 +171,9 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     if (!householdId) { setLoading(false); return; }
     setLoading(true);
 
-    const [helpersRes, choresRes, profileRes, membersRes] = await Promise.all([
-      supabase.from("helpers").select("id,name,type,daily_capacity_minutes,metadata").eq("household_id", householdId),
+    await loadHelpersFromStore(householdId);
+
+    const [choresRes, profileRes, membersRes] = await Promise.all([
       supabase.from("chores").select("id,title,metadata,helper_id,status")
         .eq("household_id", householdId).is("helper_id", null).is("deleted_at", null).neq("status", "completed"),
       supabase.from("home_profiles").select("spaces").eq("household_id", householdId).maybeSingle(),
@@ -144,41 +181,14 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     ]);
 
     setLoading(false);
-    if (helpersRes.error || choresRes.error) {
-      setError(helpersRes.error?.message ?? choresRes.error?.message ?? "Error");
+    if (choresRes.error) {
+      setError(choresRes.error.message);
       return;
     }
 
-    const h: HelperInfo[] = (helpersRes.data ?? []).map((r: Record<string, unknown>) => {
-      const meta = (r.metadata ?? {}) as Record<string, unknown>;
-      const schedule = (meta.schedule ?? {}) as Record<string, unknown>;
-      const days = (schedule.days ?? {}) as Record<string, boolean>;
-      const workDays = Object.entries(days).filter(([, v]) => v).map(([k]) => k);
-      const startTime = typeof schedule.start === "string" ? schedule.start : "";
-      const endTime = typeof schedule.end === "string" ? schedule.end : "";
-
-      // Compute actual capacity from schedule if available
-      let capacityMinutes = Number(r.daily_capacity_minutes ?? 120);
-      if (startTime && endTime) {
-        const [sh, sm] = startTime.split(":").map(Number);
-        const [eh, em] = endTime.split(":").map(Number);
-        const scheduleMins = (eh * 60 + em) - (sh * 60 + sm);
-        if (scheduleMins > 0) capacityMinutes = scheduleMins;
-      }
-
-      return {
-        id: String(r.id), name: String(r.name),
-        type: String(r.type ?? "General"),
-        capacityMinutes,
-        kind: "helper" as const,
-        workDays,
-        startTime,
-        endTime,
-      };
-    });
-
-    // Add household members (adults only) as potential assignees
-    const members: HelperInfo[] = ((membersRes.data ?? []) as Array<Record<string, unknown>>)
+    // Household members (adults only) as potential assignees — merged with
+    // helpers (sourced from helpersStore) via the `helpers` useMemo above.
+    const memberList: HelperInfo[] = ((membersRes.data ?? []) as Array<Record<string, unknown>>)
       .filter((m) => String(m.person_type) === "adult")
       .map((m) => ({
         id: `member_${m.id}`,
@@ -190,8 +200,6 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         startTime: "",
         endTime: "",
       }));
-
-    const allHelpers = [...h, ...members];
 
     const c: AssignableChore[] = (choresRes.data ?? []).map((r: Record<string, unknown>) => {
       const meta = (r.metadata ?? {}) as Record<string, unknown>;
@@ -219,23 +227,21 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
       return { displayName: "", floor: null };
     }).filter((r: RoomInfo) => r.displayName) : [];
 
-    setHelpers(allHelpers);
+    setMembers(memberList);
     setRawChores(c);
     setRooms(roomList);
 
-    // Load persisted rules if they exist, otherwise infer from helper type
-    const { data: rulesData } = await supabase
-      .from("assignment_rules")
-      .select("template_id, template_params, helper_id")
-      .eq("household_id", householdId);
-
-    const savedRules = (rulesData ?? []) as Array<{ template_id: string; template_params: Record<string, unknown>; helper_id: string }>;
+    // Load full rules via the shared fetcher so the engine can consume them.
+    const rulesResult = await fetchAssignmentRules(householdId);
+    const savedRules = rulesResult.ok === true ? rulesResult.rules : [];
+    setAssignmentRules(savedRules);
 
     if (savedRules.length > 0) {
       // Restore specialty prefs from persisted rules
       const sp: Record<string, string[]> = {};
       const fp: Record<string, string> = {};
       for (const rule of savedRules) {
+        if (!rule.helper_id) continue;
         if (rule.template_id.startsWith("specialty_")) {
           const areaKey = String((rule.template_params as Record<string, unknown>).area_key ?? "");
           if (!sp[rule.helper_id]) sp[rule.helper_id] = [];
@@ -250,7 +256,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     } else {
       // Default: infer from helper type
       const sp: Record<string, string[]> = {};
-      for (const helper of h) {
+      for (const helper of useHelpersStore.getState().helpers) {
         const tags = inferRoleTags(helper.type || null);
         let bestKey = "all_cleaning";
         let bestScore = 0;
@@ -262,7 +268,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
       }
       setSpecialtyPrefs(sp);
     }
-  }, [householdId]);
+  }, [householdId, loadHelpersFromStore]);
 
   useEffect(() => { void loadData(); }, [loadData]);
 
@@ -303,7 +309,8 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         workDays: h.workDays,
       };
     });
-    const result = buildAssignmentPlan(rawChores, assignableHelpers);
+    const result = buildAssignmentPlan(rawChores, assignableHelpers, assignmentRules);
+    setUnresolvedTemplates(result.unresolvedTemplates ?? []);
     applyPlanToState(result);
     setStep("assignments");
   };
@@ -319,18 +326,18 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
     }
 
     // Assign chores based on their space matching a room's floor
-    const map: Record<string, { helperId: string | null; cadence: string }> = {};
+    const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
     for (const chore of rawChores) {
       const spaceLower = chore.space.toLowerCase();
       const helperId = roomToHelper[spaceLower] ?? null;
-      map[chore.id] = { helperId, cadence: normalizeCadence(chore.cadence) };
+      map[chore.id] = { helperId, cadence: normalizeCadence(chore.cadence), proposedHelperId: helperId };
     }
     setAssignments(map);
     setStep("assignments");
   };
 
   const applyPlanToState = (result: AssignmentPlan) => {
-    const map: Record<string, { helperId: string | null; cadence: string }> = {};
+    const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
     for (const a of result.assignments) {
       const chore = rawChores.find((c) => c.id === a.choreId);
       // For person assignments, use the member_ prefix so we can distinguish
@@ -338,7 +345,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
       const assigneeId = a.assigneePersonId
         ? `member_${a.assigneePersonId}`
         : a.helperId;
-      map[a.choreId] = { helperId: assigneeId, cadence: normalizeCadence(chore?.cadence ?? "weekly") };
+      map[a.choreId] = { helperId: assigneeId, cadence: normalizeCadence(chore?.cadence ?? "weekly"), proposedHelperId: assigneeId };
     }
     setAssignments(map);
   };
@@ -347,38 +354,43 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
 
   const applyAssignments = async () => {
     if (!householdId || !accessToken) return;
+    const actorId = user?.id;
+    if (!actorId) {
+      setError("Not signed in");
+      return;
+    }
     const toApply = Object.entries(assignments).filter(([, v]) => v.helperId);
     setStep("applying");
     setApplyTotal(toApply.length);
     setApplyProgress(0);
     setError(null);
 
+    let lastNudgeOverrideId: number | null = null;
+    const modeChanges: Array<{ choreId: string; helperId: string; mode: OperatingMode }> = [];
+
     for (let i = 0; i < toApply.length; i++) {
-      const [choreId, { helperId, cadence }] = toApply[i];
+      const [choreId, { helperId, cadence, proposedHelperId }] = toApply[i];
       const chore = rawChores.find((c) => c.id === choreId);
 
       // Determine if assignee is a household person (member_xxx) or a helper
       const isPerson = helperId?.startsWith("member_") ?? false;
       const realId = isPerson ? helperId!.replace("member_", "") : helperId;
 
-      const patch: Record<string, unknown> = {
+      // Metadata update goes through the standard db.update path.
+      const metaPatch: Record<string, unknown> = {
         metadata: { ...(chore ? { space: chore.space } : {}), cadence, source: "assignment_panel" },
       };
       if (isPerson) {
-        patch.assignee_person_id = realId;
-        patch.helper_id = null;
-      } else {
-        patch.helper_id = realId;
-        patch.assignee_person_id = null;
+        metaPatch.assignee_person_id = realId;
+        metaPatch.helper_id = null;
       }
-
       const res = await executeToolCall({
         accessToken, householdId, scope: "household",
         toolCall: {
           id: `assign_${choreId}_${Date.now()}`,
           tool: "db.update",
-          args: { table: "chores", id: choreId, patch },
-          reason: isPerson ? "Assign chore to household member" : "Assign chore to helper",
+          args: { table: "chores", id: choreId, patch: metaPatch },
+          reason: isPerson ? "Assign chore to household member" : "Update chore assignment metadata",
         },
       });
       if (!res.ok) {
@@ -386,7 +398,49 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         setStep("assignments");
         return;
       }
+
+      // Helper assignments go through reassignChore so overrides are tracked
+      // and the learning-nudge flow fires. Person (member) assignments stay
+      // on the db.update path above since they aren't helpers.
+      if (!isPerson && realId) {
+        const proposedPersonPrefix = proposedHelperId?.startsWith("member_") ?? false;
+        const proposedRealId = proposedPersonPrefix
+          ? null
+          : proposedHelperId ?? null;
+        const r = await reassignChore({
+          householdId,
+          actorUserId: actorId,
+          choreId,
+          newHelperId: realId,
+          mode: "one_tap",
+          proposedHelperId: proposedRealId,
+        });
+        if (r.ok === false) {
+          setError(`Failed: ${r.error}`);
+          setStep("assignments");
+          return;
+        }
+        if (r.shouldNudge && r.overrideId != null) {
+          lastNudgeOverrideId = r.overrideId;
+        }
+        if (r.modeChangedTo) {
+          modeChanges.push({ choreId, helperId: realId, mode: r.modeChangedTo });
+        }
+      }
       setApplyProgress(i + 1);
+    }
+
+    if (lastNudgeOverrideId != null) {
+      broadcastNudgeAvailable(lastNudgeOverrideId);
+    }
+    for (const c of modeChanges) {
+      try {
+        window.dispatchEvent(new CustomEvent(ASSIGNMENT_MODE_CHANGED_EVENT, {
+          detail: { choreId: c.choreId, helperId: c.helperId, mode: c.mode },
+        }));
+      } catch {
+        // non-browser
+      }
     }
     // Persist assignment preferences as rules for future auto-assignment
     if (householdId) {
@@ -599,7 +653,7 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
         const next = { ...prev };
         delete next[editChoreId];
         for (const nc of newChores) {
-          next[nc.id] = { helperId: null, cadence: normalizeCadence(nc.cadence) };
+          next[nc.id] = { helperId: null, cadence: normalizeCadence(nc.cadence), proposedHelperId: null };
         }
         return next;
       });
@@ -713,9 +767,9 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
               sx={{ cursor: "pointer", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}
               onClick={() => {
                 // Go straight to assignments with no pre-assignment — all chores unassigned
-                const map: Record<string, { helperId: string | null; cadence: string }> = {};
+                const map: Record<string, { helperId: string | null; cadence: string; proposedHelperId: string | null }> = {};
                 for (const c of rawChores) {
-                  map[c.id] = { helperId: null, cadence: normalizeCadence(c.cadence) };
+                  map[c.id] = { helperId: null, cadence: normalizeCadence(c.cadence), proposedHelperId: null };
                 }
                 setAssignments(map);
                 setStep("assignments");
@@ -880,6 +934,25 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
           Change the helper or frequency for any chore. Unassigned chores are highlighted.
         </Typography>
 
+        {unresolvedTemplates.length > 0 && (
+          <Alert
+            severity="info"
+            action={
+              <Button
+                size="small"
+                color="inherit"
+                onClick={() => setElicitationScopedTemplate(unresolvedTemplates[0] as ElicitationTemplateId)}
+              >
+                Set preference
+              </Button>
+            }
+          >
+            {unresolvedTemplates.length === 1
+              ? `No preference set for ${unresolvedTemplates[0].replace(/^specialty_/, "")} chores. Set one and I'll remember it for future assignments.`
+              : `${unresolvedTemplates.length} chore categories have no preference set yet. Setting them helps the agent auto-assign later.`}
+          </Alert>
+        )}
+
         <Box sx={{ maxHeight: 400, overflowY: "auto" }}>
           <Stack spacing={0.5}>
             {Object.entries(assignments).map(([choreId, { helperId, cadence }]) => {
@@ -920,6 +993,30 @@ export function AssignmentPanel({ onDismiss, onComplete }: AssignmentPanelProps)
           <Button variant="text" size="small" onClick={onDismiss} sx={{ color: "text.secondary" }}>Not now</Button>
         </Stack>
       </Stack>
+
+      {/* ── JIT elicitation (single-question mode) ─────────────────── */}
+      {elicitationScopedTemplate && (
+        <ElicitationFlow
+          key={`jit-${elicitationScopedTemplate}`}
+          scopedTemplateId={elicitationScopedTemplate}
+          autoOpen
+          hideBanner
+          onAllAnswered={() => {
+            setElicitationScopedTemplate(null);
+            // Refresh rules so the unresolvedTemplates hint re-evaluates.
+            if (householdId) {
+              void (async () => {
+                const r = await fetchAssignmentRules(householdId);
+                if (r.ok === true) {
+                  setAssignmentRules(r.rules);
+                  const covered = new Set(r.rules.filter((x) => x.active).map((x) => x.template_id));
+                  setUnresolvedTemplates((prev) => prev.filter((t) => !covered.has(t)));
+                }
+              })();
+            }
+          }}
+        />
+      )}
 
       {/* ── Inline chore edit dialog ──────────────────────────────── */}
       <Dialog open={!!editChoreId} onClose={() => setEditChoreId(null)} maxWidth="xs" fullWidth>

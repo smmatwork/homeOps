@@ -14,9 +14,12 @@ import {
   Delete,
   RestoreFromTrash,
   ReportProblem,
+  OutlinedFlag,
 } from "@mui/icons-material";
 import { useI18n } from "../../i18n";
 import { cadenceLabel } from "../../services/choreRecommendationEngine";
+import { AssignmentModeChip } from "./AssignmentModeChip";
+import { ProposedAssignmentChip } from "./ProposedAssignmentChip";
 
 /* ── shared types & helpers ── */
 
@@ -31,6 +34,8 @@ export type ChoreRow = {
   helper_id: string | null;
   metadata: Record<string, unknown> | null;
   deleted_at?: string | null;
+  reopened_at?: string | null;
+  reopened_reason?: string | null;
   created_at: string;
 };
 
@@ -100,6 +105,9 @@ interface ChoreCardProps {
   onDelete?: () => void;
   onRestore?: () => void;
   onReportNotDone?: () => void;
+  /** Flag a chore as not actually done → reopens it (stamps reopened_at).
+   *  Distinct from onReportNotDone (which creates a makeup chore). */
+  onFlagAsNotDone?: () => void;
   /** If true, show estimated minutes from metadata. */
   showEstimate?: boolean;
   /** If true, show the due time only (not full date). Used in daily view. */
@@ -119,6 +127,7 @@ export function ChoreCard({
   onDelete,
   onRestore,
   onReportNotDone,
+  onFlagAsNotDone,
   showEstimate,
   showTimeOnly,
 }: ChoreCardProps) {
@@ -185,9 +194,14 @@ export function ChoreCard({
                 </Typography>
               )}
               {helperName && (
-                <Typography variant="caption" sx={{ color: isOnLeave ? "warning.main" : undefined }}>
-                  {t("chores.helper")}: {helperName}
-                </Typography>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  <Typography variant="caption" sx={{ color: isOnLeave ? "warning.main" : undefined }}>
+                    {t("chores.helper")}: {helperName}
+                  </Typography>
+                  {chore.helper_id && (
+                    <AssignmentModeChip choreId={chore.id} helperId={chore.helper_id} />
+                  )}
+                </Stack>
               )}
               {due && (
                 <Typography variant="caption">
@@ -222,6 +236,13 @@ export function ChoreCard({
                     </IconButton>
                   </Tooltip>
                 )}
+                {onFlagAsNotDone && !chore.reopened_at && (
+                  <Tooltip title="Flag as not done (reopen)">
+                    <IconButton size="small" color="warning" onClick={onFlagAsNotDone}>
+                      <OutlinedFlag fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </>
             )}
             {isSoftDeleted && onRestore && (
@@ -231,6 +252,12 @@ export function ChoreCard({
             )}
           </Stack>
         </Stack>
+
+        {/* One_tap proposal — renders only when a proposal exists for this
+            chore AND no helper is currently assigned. */}
+        {!isSoftDeleted && !chore.helper_id && (
+          <ProposedAssignmentChip choreId={chore.id} />
+        )}
       </CardContent>
     </Card>
   );

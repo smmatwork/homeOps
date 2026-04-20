@@ -41,11 +41,15 @@ import {
   AccessTime,
   ErrorOutline,
   ReportProblem,
+  OutlinedFlag,
 } from "@mui/icons-material";
 import { useAuth } from "../../auth/AuthProvider";
 import { supabase } from "../../services/supabaseClient";
 import { agentCreate } from "../../services/agentApi";
 import { executeToolCall } from "../../services/agentApi";
+import { reassignChore, broadcastNudgeAvailable, autoAssignIfSilent } from "../../services/assignmentApi";
+import { useProposalsStore } from "../../stores/proposalsStore";
+import { ASSIGNMENT_MODE_CHANGED_EVENT } from "./AssignmentModeChip";
 import { useI18n } from "../../i18n";
 import { normalizeSpacesToRooms } from "../../config/homeProfileTemplates";
 import { Link as RouterLink, useNavigate } from "react-router";
@@ -57,7 +61,9 @@ import { CreateChoreDialog } from "./CreateChoreDialog";
 import { EditChoreDialog } from "./EditChoreDialog";
 import { HelperCapacityCard } from "../coverage/HelperCapacityCard";
 import { ChoreListView } from "./ChoreListView";
+import { DayFocusView } from "./DayFocusView";
 import { CoverageDashboard } from "../coverage/CoverageDashboard";
+import { rolloverOverdueChores, reopenChore } from "../../services/choreLifecycleApi";
 
 type ChoreRow = {
   id: string;
@@ -70,6 +76,8 @@ type ChoreRow = {
   helper_id: string | null;
   metadata: Record<string, unknown> | null;
   deleted_at?: string | null;
+  reopened_at?: string | null;
+  reopened_reason?: string | null;
   created_at: string;
 };
 
@@ -197,7 +205,7 @@ export function Chores() {
   const scheduleSync = useSyncSchedule();
   const [syncDrawerOpen, setSyncDrawerOpen] = useState(false);
   const [view, setView] = useState<"all" | "pending" | "in-progress" | "completed">("all");
-  const [mode, setMode] = useState<"coverage" | "list" | "daily">("daily");
+  const [mode, setMode] = useState<"coverage" | "list" | "daily" | "focus">("daily");
   const [coverageSubMode, setCoverageSubMode] = useState<"audit" | "matrix" | "utilization">("audit");
   const [coverageRefreshKey, setCoverageRefreshKey] = useState(0);
   const [spaceFilter, setSpaceFilter] = useState<string | null>(null);
@@ -351,7 +359,7 @@ export function Chores() {
     }
   };
 
-  const CHORE_SELECT = "id,title,description,status,priority,due_at,completed_at,helper_id,metadata,deleted_at,created_at";
+  const CHORE_SELECT = "id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,deleted_at,created_at";
 
   const applyDeletedFilter = <T,>(q: any): any => (includeDeleted ? q : q.is("deleted_at", null));
 
@@ -458,6 +466,9 @@ export function Chores() {
           showSnack("error", "error" in res ? res.error : t("common.create_failed"));
           return;
         }
+        const created = (res.created ?? null) as { id?: unknown } | null;
+        const createdId = created && typeof created.id === "string" ? created.id : null;
+        if (createdId) await runAutoAssign(createdId);
       }
 
       // Soft-delete the original
@@ -595,9 +606,17 @@ export function Chores() {
         return;
       }
 
+      // Runtime auto-assign: only when the user didn't already pick a helper.
+      // Graduated pairs get assigned silently; one_tap pairs surface a proposal.
+      if (!helperId) {
+        const created = (res.created ?? null) as { id?: unknown } | null;
+        const createdId = created && typeof created.id === "string" ? created.id : null;
+        if (createdId) await runAutoAssign(createdId);
+      }
+
       const { data: refreshed, error: refreshError } = await supabase
         .from("chores")
-        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
         .eq("household_id", hid)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -687,7 +706,7 @@ export function Chores() {
 
       const { data: refreshed, error: refreshError } = await supabase
         .from("chores")
-        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
         .eq("household_id", hid)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -813,7 +832,7 @@ export function Chores() {
 
       const { data: refreshed, error: refreshError } = await supabase
         .from("chores")
-        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
         .eq("household_id", hid)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -841,10 +860,20 @@ export function Chores() {
     (async () => {
       setBusy(true);
       setLoadError(null);
+
+      // Rollover first so pending chores past their due_at either transition
+      // to auto_completed or stamp reopened_at (helper-on-leave branch) before
+      // the Day Focus view computes its buckets.
+      const hid = householdId.trim();
+      const uid = user?.id;
+      if (uid) {
+        await rolloverOverdueChores({ householdId: hid, actorUserId: uid });
+      }
+
       const base = supabase
         .from("chores")
         .select(CHORE_SELECT)
-        .eq("household_id", householdId.trim());
+        .eq("household_id", hid);
       const { data, error } = await applyDeletedFilter(base).order("created_at", { ascending: false });
 
       if (cancelled) return;
@@ -860,51 +889,6 @@ export function Chores() {
       cancelled = true;
     };
   }, [householdId, includeDeleted]);
-
-  useEffect(() => {
-    const token = accessToken.trim();
-    const hid = householdId.trim();
-    if (!token || !hid) return;
-    if (helpers.length === 0) return;
-    const hasCook = helpers.some((h) => h.name.trim().toLowerCase() === "cook");
-    if (hasCook) return;
-
-    let cancelled = false;
-    (async () => {
-      const res = await executeToolCall({
-        accessToken: token,
-        householdId: hid,
-        scope: "household",
-        toolCall: {
-          id: `helpers_create_cook_${Date.now()}`,
-          tool: "db.insert",
-          args: {
-            table: "helpers",
-            record: {
-              name: "Cook",
-              type: "cook",
-              notes: "Cooking",
-              phone: null,
-            },
-          },
-          reason: "Ensure cook helper exists",
-        },
-      });
-      if (cancelled) return;
-      if (!res.ok) return;
-      const { data, error } = await supabase
-        .from("helpers")
-        .select("id,household_id,name,type,phone,notes,daily_capacity_minutes,created_at")
-        .eq("household_id", hid)
-        .order("created_at", { ascending: false });
-      if (cancelled) return;
-      if (!error) setHelpers((data ?? []) as HelperRow[]);
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, householdId, helpers]);
 
   const helpersById = useMemo(() => new Map(helpers.map((h) => [h.id, h] as const)), [helpers]);
   const helperName = (id: string | null): string => {
@@ -928,31 +912,44 @@ export function Chores() {
       showSnack("info", t("helpers.helper_on_leave"));
       return;
     }
+    const actorId = user?.id;
+    if (!actorId) {
+      showSnack("error", "Not signed in");
+      return;
+    }
     setBusy(true);
-    const upd = await executeToolCall({
-      accessToken: token,
+    const upd = await reassignChore({
       householdId: hid,
-      scope: "household",
-      toolCall: {
-        id: `chores_assign_${chore.id}_${Date.now()}`,
-        tool: "db.update",
-        args: {
-          table: "chores",
-          id: chore.id,
-          patch: {
-            helper_id: nextHelperId,
-          },
-        },
-        reason: "Assign chore",
-      },
+      actorUserId: actorId,
+      choreId: chore.id,
+      newHelperId: nextHelperId,
+      mode: "manual",
     });
     setBusy(false);
-    if (!upd.ok) {
-      showSnack("error", "error" in upd ? upd.error : t("common.update_failed"));
+    if (upd.ok === false) {
+      showSnack("error", upd.error || t("common.update_failed"));
       return;
     }
     setChores((prev) => prev.map((c) => (c.id === chore.id ? { ...c, helper_id: nextHelperId } : c)));
     showSnack("success", `${t("chores.assigned_to")} ${helperName(nextHelperId)}`);
+    if (upd.shouldNudge && upd.overrideId != null) {
+      broadcastNudgeAvailable(upd.overrideId);
+    }
+    if (upd.modeChangedTo) {
+      const msg = upd.modeChangedTo === "silent_auto"
+        ? `${helperName(nextHelperId)} will now auto-handle this kind of task`
+        : upd.modeChangedTo === "one_tap"
+          ? `Back to 1-tap for this kind of task — I'll propose, you confirm`
+          : `Mode updated to ${upd.modeChangedTo}`;
+      showSnack("info", msg);
+      try {
+        window.dispatchEvent(new CustomEvent(ASSIGNMENT_MODE_CHANGED_EVENT, {
+          detail: { choreId: chore.id, helperId: nextHelperId, mode: upd.modeChangedTo },
+        }));
+      } catch {
+        // non-browser
+      }
+    }
   };
 
   const openBaselineEditor = () => {
@@ -1129,7 +1126,17 @@ export function Chores() {
     if (editCategory.trim()) nextMeta.category = editCategory.trim();
     else delete (nextMeta as any).category;
 
+    const actorId = user?.id;
+    if (!actorId) {
+      showSnack("error", "Not signed in");
+      return;
+    }
+
     setEditBusy(true);
+
+    // Non-helper fields go through the standard update path.
+    const nextHelperId = editHelperId.trim() || null;
+    const helperChanged = (editChore.helper_id ?? null) !== nextHelperId;
     const upd = await executeToolCall({
       accessToken: token,
       householdId: hid,
@@ -1146,23 +1153,47 @@ export function Chores() {
             status: editStatus,
             priority: nextPriority,
             due_at: nextDueAt,
-            helper_id: editHelperId.trim() || null,
             metadata: nextMeta,
           },
         },
         reason: "Edit chore from chore card",
       },
     });
-    setEditBusy(false);
 
     if (!upd.ok) {
+      setEditBusy(false);
       showSnack("error", "error" in upd ? upd.error : t("common.update_failed"));
       return;
     }
 
+    // Helper reassignments go through reassignChore so overrides are tracked
+    // and the learning-nudge flow fires when the threshold is crossed.
+    let nudgeOverrideId: number | null = null;
+    let shouldNudge = false;
+    let modeChangedTo: string | null = null;
+    if (helperChanged) {
+      const r = await reassignChore({
+        householdId: hid,
+        actorUserId: actorId,
+        choreId: editChore.id,
+        newHelperId: nextHelperId,
+        mode: "manual",
+      });
+      if (r.ok === false) {
+        setEditBusy(false);
+        showSnack("error", r.error || t("common.update_failed"));
+        return;
+      }
+      shouldNudge = r.shouldNudge;
+      nudgeOverrideId = r.overrideId;
+      modeChangedTo = r.modeChangedTo;
+    }
+
+    setEditBusy(false);
+
     const { data: refreshed, error: refreshError } = await supabase
       .from("chores")
-      .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+      .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
       .eq("household_id", hid)
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
@@ -1175,6 +1206,27 @@ export function Chores() {
     setEditOpen(false);
     setEditChore(null);
     showSnack("success", t("chores.chore_updated"));
+
+    if (shouldNudge && nudgeOverrideId != null) {
+      broadcastNudgeAvailable(nudgeOverrideId);
+    }
+    if (modeChangedTo) {
+      const helperIdForEvent = editHelperId.trim() || null;
+      const helperLabel = helperIdForEvent ? helperName(helperIdForEvent) : "This helper";
+      const msg = modeChangedTo === "silent_auto"
+        ? `${helperLabel} will now auto-handle this kind of task`
+        : modeChangedTo === "one_tap"
+          ? `Back to 1-tap for this kind of task — I'll propose, you confirm`
+          : `Mode updated to ${modeChangedTo}`;
+      showSnack("info", msg);
+      try {
+        window.dispatchEvent(new CustomEvent(ASSIGNMENT_MODE_CHANGED_EVENT, {
+          detail: { choreId: editChore.id, helperId: helperIdForEvent, mode: modeChangedTo },
+        }));
+      } catch {
+        // non-browser
+      }
+    }
   };
 
   useEffect(() => {
@@ -1383,6 +1435,11 @@ export function Chores() {
               <IconButton onClick={() => void reportNotDone(chore)} disabled={busy} aria-label={t("chores.aria_report_not_done")}>
                 <ReportProblem />
               </IconButton>
+              {!chore.reopened_at && (
+                <IconButton onClick={() => void flagAsNotDone(chore)} disabled={busy} aria-label="Flag as not done (reopen)" color="warning">
+                  <OutlinedFlag />
+                </IconButton>
+              )}
               <IconButton onClick={() => openEdit(chore)} disabled={busy} aria-label={t("chores.aria_edit_chore")}>
                 <Edit />
               </IconButton>
@@ -1547,6 +1604,11 @@ export function Chores() {
             <IconButton onClick={() => void reportNotDone(chore)} disabled={busy} aria-label={t("chores.aria_report_not_done")} size="small">
               <ReportProblem fontSize="small" />
             </IconButton>
+            {!chore.reopened_at && (
+              <IconButton onClick={() => void flagAsNotDone(chore)} disabled={busy} aria-label="Flag as not done (reopen)" size="small" color="warning">
+                <OutlinedFlag fontSize="small" />
+              </IconButton>
+            )}
             <IconButton onClick={() => openEdit(chore)} disabled={busy} aria-label={t("chores.aria_edit_chore")} size="small">
               <Edit fontSize="small" />
             </IconButton>
@@ -2152,7 +2214,7 @@ export function Chores() {
 
       const { data: refreshed, error: refreshError } = await supabase
         .from("chores")
-        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
         .eq("household_id", hid)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -2185,6 +2247,59 @@ export function Chores() {
     setCadenceFilter(null);
     setView("all");
     setDailyDate((prev) => (prev && prev.trim() ? prev : todayDateString()));
+  };
+
+  /**
+   * After a chore is created, consult the engine + mode state. If a
+   * graduated (silent_auto) pair is already configured, assign silently
+   * and show a confirmation. If a one_tap pair is configured, stash a
+   * proposal so the chore card can render Confirm/Change. Otherwise no-op.
+   */
+  const runAutoAssign = async (choreId: string) => {
+    const hid = householdId.trim();
+    const uid = user?.id;
+    if (!hid || !uid) return;
+    const r = await autoAssignIfSilent({ householdId: hid, actorUserId: uid, choreId });
+    if (r.ok === false) return;
+    if (r.action === "silent_auto") {
+      const name = helperName(r.helperId);
+      showSnack("info", `Auto-assigned to ${name}`);
+    } else if (r.action === "one_tap_proposed") {
+      useProposalsStore.getState().setProposal({
+        choreId,
+        helperId: r.helperId,
+        helperName: r.helperName,
+        ruleIds: r.ruleIds,
+        proposedAt: Date.now(),
+      });
+    }
+  };
+
+  const flagAsNotDone = async (chore: ChoreRow) => {
+    const hid = householdId.trim();
+    const uid = user?.id;
+    if (!hid || !uid) {
+      showSnack("error", "Not signed in");
+      return;
+    }
+    const r = await reopenChore({
+      householdId: hid,
+      actorUserId: uid,
+      choreId: chore.id,
+      reason: "feedback",
+    });
+    if (r.ok === false) {
+      showSnack("error", r.error);
+      return;
+    }
+    setChores((prev) =>
+      prev.map((c) =>
+        c.id === chore.id
+          ? { ...c, status: "pending", reopened_at: r.reopenedAt, reopened_reason: r.reason, completed_at: null }
+          : c,
+      ),
+    );
+    showSnack("info", `${chore.title} reopened — it'll show up as needing attention.`);
   };
 
   const reportNotDone = async (chore: ChoreRow) => {
@@ -2299,7 +2414,7 @@ export function Chores() {
 
       const { data: refreshed, error: refreshError } = await supabase
         .from("chores")
-        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,created_at")
+        .select("id,title,description,status,priority,due_at,completed_at,helper_id,metadata,reopened_at,reopened_reason,created_at")
         .eq("household_id", hid)
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
@@ -2354,8 +2469,14 @@ export function Chores() {
             onChange={(_, next) => {
               if (next === "daily") enterDailyMode();
               else if (next === "list") enterListMode({ space: null, cadence: null });
+              else if (next === "focus") {
+                setMode("focus");
+                setSpaceFilter(null);
+                setCadenceFilter(null);
+              }
             }}
           >
+            <ToggleButton value="focus">Day focus</ToggleButton>
             <ToggleButton value="daily">{t("chores.helper_view")}</ToggleButton>
             <ToggleButton value="list">{t("chores.task_view")}</ToggleButton>
           </ToggleButtonGroup>
@@ -2400,6 +2521,20 @@ export function Chores() {
         </Box>
       ) : (
         <>
+          {/* ── Day focus view (Today/Tomorrow/This week + overdue nudge) ─ */}
+          {mode === "focus" && (
+            <DayFocusView
+              chores={chores}
+              helpers={helpers}
+              busy={busy}
+              onEdit={openEdit}
+              onDelete={confirmDeleteChore}
+              onRestore={(c) => void restoreChore(c)}
+              onFlagNotDone={(c) => void flagAsNotDone(c)}
+              helperOnLeave={helperOnLeaveAt}
+            />
+          )}
+
           {/* ── Daily (helper) view ───────────────────────────────────── */}
           {mode === "daily" && (
             <Stack spacing={2}>
@@ -2433,6 +2568,7 @@ export function Chores() {
               onDelete={confirmDeleteChore}
               onRestore={(c) => void restoreChore(c)}
               onReportNotDone={(c) => void reportNotDone(c)}
+              onFlagAsNotDone={(c) => void flagAsNotDone(c)}
               onBulkDelete={(ids) => {
                 setSelectedChoreIds(Object.fromEntries(ids.map((id) => [id, true])));
                 setBulkDeleteDialogOpen(true);

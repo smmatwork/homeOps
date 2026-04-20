@@ -377,7 +377,19 @@ type RpcName =
   | "find_chores_needing_reassignment"
   | "compensation_ledger_summary"
   | "bulk_reassign_chores_by_query"
-  | "add_space_to_profile";
+  | "add_space_to_profile"
+  | "reassign_chore"
+  | "get_pending_nudges"
+  | "accept_nudge"
+  | "decline_nudge"
+  | "get_assignment_mode"
+  | "set_assignment_mode"
+  | "compute_chore_predicate_hash"
+  | "rollover_overdue_chores"
+  | "reopen_chore"
+  | "start_pattern_elicitation"
+  | "get_next_elicitation_question"
+  | "answer_elicitation_question";
 
 function isRpcName(v: unknown): v is RpcName {
   return (
@@ -398,7 +410,19 @@ function isRpcName(v: unknown): v is RpcName {
     v === "find_chores_needing_reassignment" ||
     v === "compensation_ledger_summary" ||
     v === "bulk_reassign_chores_by_query" ||
-    v === "add_space_to_profile"
+    v === "add_space_to_profile" ||
+    v === "reassign_chore" ||
+    v === "get_pending_nudges" ||
+    v === "accept_nudge" ||
+    v === "decline_nudge" ||
+    v === "get_assignment_mode" ||
+    v === "set_assignment_mode" ||
+    v === "compute_chore_predicate_hash" ||
+    v === "rollover_overdue_chores" ||
+    v === "reopen_chore" ||
+    v === "start_pattern_elicitation" ||
+    v === "get_next_elicitation_question" ||
+    v === "answer_elicitation_question"
   );
 }
 
