@@ -6,6 +6,12 @@ domain-scoped public API. Agents do not import the orchestrator; the
 orchestrator imports and dispatches to them.
 """
 
+from agents.base import AgentContext, AgentResult, AgentResultKind
 from agents.helper_agent import HelperAgent
 
-__all__ = ["HelperAgent"]
+__all__ = [
+    "AgentContext",
+    "AgentResult",
+    "AgentResultKind",
+    "HelperAgent",
+]
