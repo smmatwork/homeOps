@@ -15,6 +15,8 @@ COPY main.py ./main.py
 COPY intent_registry.py ./intent_registry.py
 COPY channel_dispatcher.py ./channel_dispatcher.py
 COPY channel_adapters/ ./channel_adapters/
+COPY orchestrator/ ./orchestrator/
+COPY agents/ ./agents/
 
 EXPOSE 8011
 
