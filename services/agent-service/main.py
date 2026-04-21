@@ -133,24 +133,6 @@ class _CorrelationFilter(logging.Filter):
         return True
 
 
-def _wants_unassigned_count(messages: list[dict[str, Any]]) -> bool:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return False
-    lower = last_user.lower()
-    if "unassigned" not in lower:
-        return False
-    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
-        return False
-    if not ("how many" in lower or "count" in lower or "number" in lower or "total" in lower):
-        return False
-    return True
-
-
 _logger = logging.getLogger("homeops.agent_service")
 if not _logger.handlers:
     handler = logging.StreamHandler()
@@ -270,148 +252,6 @@ def _init_langfuse() -> Any:
         except Exception:
             pass
     return _langfuse_client
-
-
-def _extract_count_assigned_to_name(messages: list[dict[str, Any]]) -> str:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return ""
-
-    s = last_user.strip()
-    lower = s.lower()
-    if "chore" not in lower and "chores" not in lower:
-        return ""
-    if "assigned to" not in lower:
-        return ""
-    if not ("how many" in lower or "count" in lower or "number of" in lower or "total" in lower):
-        return ""
-
-    # Extract the substring after "assigned to" (strip punctuation).
-    try:
-        after = re.split(r"assigned\s+to\s+", s, flags=re.IGNORECASE, maxsplit=1)[1]
-    except Exception:
-        return ""
-    after = after.strip().strip(".?!)\"]} ")
-    if after.lower().startswith("the "):
-        after = after[4:].strip()
-    # Keep only the first clause if the user continues with more text.
-    after = re.split(r"[\n,;]|\s+and\s+|\s+with\s+|\s+in\s+|\s+for\s+", after, maxsplit=1)[0].strip()
-    # Avoid returning something obviously not a name.
-    if not after or len(after) > 80:
-        return ""
-    return after
-
-
-def _wants_total_pending_count(messages: list[dict[str, Any]]) -> bool:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return False
-    lower = last_user.lower()
-    if not ("pending" in lower and ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower)):
-        return False
-    if not ("total" in lower or "how many" in lower or "count" in lower or "number" in lower):
-        return False
-    return True
-
-
-def _wants_status_breakdown(messages: list[dict[str, Any]]) -> bool:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return False
-    lower = last_user.lower()
-    wants = False
-    if "by status" in lower or "status breakdown" in lower:
-        wants = True
-    if ("group" in lower and "status" in lower) or ("breakdown" in lower and "status" in lower):
-        wants = True
-    if ("other status" in lower or "other statuses" in lower or "all status" in lower or "all statuses" in lower) and "status" in lower:
-        wants = True
-    if not wants:
-        return False
-    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
-        return False
-    return True
-
-
-def _wants_assignee_breakdown(messages: list[dict[str, Any]]) -> bool:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return False
-    lower = last_user.lower()
-    if not ("by assignee" in lower or "by helper" in lower or "assignee breakdown" in lower):
-        return False
-    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
-        return False
-    return True
-
-
-def _extract_space_list_query(messages: list[dict[str, Any]]) -> str:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return ""
-    s = last_user.strip()
-    lower = s.lower()
-    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
-        return ""
-    m = re.search(r"\b(in|for)\s+([A-Za-z][A-Za-z0-9\s\-]{1,40})\b", s, flags=re.IGNORECASE)
-    if not m:
-        return ""
-    cand = (m.group(2) or "").strip().strip(".?!)\"]} ")
-    if not cand or len(cand) > 40:
-        return ""
-    return cand
-
-
-def _extract_list_assigned_to_name(messages: list[dict[str, Any]]) -> str:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    if not last_user:
-        return ""
-
-    s = last_user.strip()
-    lower = s.lower()
-    if "assigned to" not in lower:
-        return ""
-    if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
-        return ""
-    # If the user is explicitly asking for a count, let the count shortcut handle it.
-    if "how many" in lower or "count" in lower or "number of" in lower or "total" in lower:
-        return ""
-
-    try:
-        after = re.split(r"assigned\s+to\s+", s, flags=re.IGNORECASE, maxsplit=1)[1]
-    except Exception:
-        return ""
-    after = after.strip().strip(".?!)\"]} ")
-    if after.lower().startswith("the "):
-        after = after[4:].strip()
-    after = re.split(r"[\n,;]|\s+and\s+|\s+with\s+|\s+in\s+|\s+for\s+", after, maxsplit=1)[0].strip()
-    if not after or len(after) > 80:
-        return ""
-    return after
 
 
 def _extract_assign_or_create_chore(latest_user_text: str) -> dict[str, str] | None:
@@ -763,6 +603,15 @@ from orchestrator.intent import (
     intent_specific_instruction,
 )
 from agents import HelperAgent
+from agents.chore_agent import (
+    _wants_unassigned_count,
+    _extract_count_assigned_to_name,
+    _wants_total_pending_count,
+    _wants_status_breakdown,
+    _wants_assignee_breakdown,
+    _extract_space_list_query,
+    _extract_list_assigned_to_name,
+)
 
 
 # Structured intent extraction has moved to orchestrator/intent.py.
