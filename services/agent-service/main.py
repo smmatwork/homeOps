@@ -1038,218 +1038,23 @@ def _helpers_select_tool_call_json(tool_call_id: str = "tc_helpers_1") -> str:
     return "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"
 
 
-def _is_helper_intent(messages: list[dict[str, Any]]) -> bool:
-    last_user = ""
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-            last_user = str(m.get("content") or "").strip()
-            break
-    s = last_user.lower()
-    if not s:
-        return False
+# Helper Agent has moved to agents/helper_agent.py. It's instantiated lazily
+# via _get_helper_agent() below so dependencies defined later in this file
+# (_sarvam_chat, _safe_json_loads, etc.) are resolvable at call time.
 
-    # Analytics-style questions about chores (e.g., counts) should not route to the helper agent
-    # just because they contain the substring "assign" (e.g., "assigned").
-    if ("chore" in s or "chores" in s) and ("assign" in s):
-        if ("how many" in s) or ("count" in s) or ("number of" in s) or ("total" in s):
-            return False
-
-    # Assignment prompts should go to the chore orchestrator, not the helper agent
-    assign_phrases = ("assign chores", "assign them", "assign my", "unassigned chores", "help me assign",
-                      "assign tasks", "distribute chores", "assignment pattern", "assignment preference")
-    if any(p in s for p in assign_phrases):
-        return False
-
-    helper_terms = ("helper", "helpers", "cleaner", "cleaners", "maid", "househelp", "house help")
-    helper_ops = ("time off", "leave", "vacation", "availability", "feedback", "rating", "reward", "bonus", "assign", "reassign", "unassign")
-    if any(t in s for t in helper_terms):
-        return True
-    # Only treat chore assignment verbs as helper-management intent when the user explicitly
-    # refers to helpers/cleaners. Otherwise, route to the chore orchestrator (e.g., "Assign a chore to Cook").
-    if any(op in s for op in helper_ops) and ("chore" in s or "chores" in s) and any(t in s for t in helper_terms):
-        return True
-    return False
+_helper_agent_instance: HelperAgent | None = None
 
 
-def _validate_edge_tool_call_args(item: dict[str, Any]) -> bool:
-    tool = item.get("tool")
-    args = item.get("args")
-    if tool not in ("db.select", "db.insert", "db.update", "db.delete", "query.rpc"):
-        return False
-    if not isinstance(args, dict):
-        return False
-
-    if tool == "query.rpc":
-        name = args.get("name")
-        params = args.get("params")
-        if not isinstance(name, str) or not name.strip():
-            return False
-        if params is not None and not isinstance(params, dict):
-            return False
-        return True
-
-    table = args.get("table")
-    if not isinstance(table, str) or not table.strip():
-        return False
-
-    if tool == "db.select":
-        if "where" in args and not isinstance(args.get("where"), dict):
-            return False
-        if "limit" in args and not isinstance(args.get("limit"), int):
-            return False
-        return True
-    if tool == "db.insert":
-        return isinstance(args.get("record"), dict)
-    if tool == "db.update":
-        return isinstance(args.get("id"), str) and str(args.get("id") or "").strip() and isinstance(args.get("patch"), dict)
-    if tool == "db.delete":
-        return isinstance(args.get("id"), str) and str(args.get("id") or "").strip()
-    return False
-
-
-def _parse_helper_agent_payload(text: str) -> dict[str, Any] | None:
-    cand = _extract_json_candidate(text)
-    if not cand:
-        return None
-    try:
-        obj = _safe_json_loads(cand)
-    except Exception:
-        return None
-    if not isinstance(obj, dict):
-        return None
-
-    clarifications = obj.get("clarifications")
-    tool_calls_raw = obj.get("tool_calls")
-    user_summary = obj.get("user_summary")
-
-    if clarifications is None:
-        clarifications = []
-    if not isinstance(clarifications, list):
-        return None
-    clarifications_clean: list[dict[str, Any]] = []
-    for c in clarifications:
-        if not isinstance(c, dict):
-            return None
-        key = c.get("key")
-        question = c.get("question")
-        allow_multiple = c.get("allowMultiple")
-        options = c.get("options")
-        if not isinstance(key, str) or not key.strip():
-            return None
-        if not isinstance(question, str) or not question.strip():
-            return None
-        if not isinstance(allow_multiple, bool):
-            return None
-        if options is not None:
-            if not isinstance(options, list):
-                return None
-            if not all(isinstance(o, str) and o.strip() for o in options):
-                return None
-        clarifications_clean.append(
-            {
-                "key": key.strip(),
-                "question": question.strip(),
-                **({"options": [str(o).strip() for o in options if isinstance(o, str) and o.strip()]} if isinstance(options, list) else {}),
-                "allowMultiple": allow_multiple,
-            }
+def _get_helper_agent() -> HelperAgent:
+    global _helper_agent_instance
+    if _helper_agent_instance is None:
+        _helper_agent_instance = HelperAgent(
+            chat_fn=_sarvam_chat,
+            extract_json_candidate=_extract_json_candidate,
+            safe_json_loads=_safe_json_loads,
+            validate_tool_calls_list=_validate_tool_calls_list,
         )
-
-    tool_calls: list[dict[str, Any]] = []
-    if tool_calls_raw is not None:
-        tc_validated = _validate_tool_calls_list(tool_calls_raw)
-        if tc_validated is None:
-            return None
-        for item in tc_validated:
-            if not _validate_edge_tool_call_args(item):
-                return None
-        tool_calls = tc_validated
-
-    # Invariant: if clarifications exist, tool_calls must be empty.
-    if clarifications_clean and tool_calls:
-        return None
-
-    if not isinstance(user_summary, str):
-        user_summary = ""
-
-    return {
-        "clarifications": clarifications_clean,
-        "tool_calls": tool_calls,
-        "user_summary": user_summary.strip(),
-    }
-
-
-async def _run_helper_agent(
-    *,
-    messages: list[dict[str, Any]],
-    model: str,
-    temperature: float | None,
-    max_tokens: int | None,
-) -> dict[str, Any] | None:
-    helper_clause = (
-        "You are the Helper Agent for a home management app.\n"
-        "Manage helpers (cleaners/maids), their time off, feedback, and rewards; and assign/unassign/reassign chores via chores.helper_id changes.\n\n"
-        "CRITICAL INVARIANTS:\n"
-        "- Never write to chore_helper_assignments directly. Assignment history is logged ONLY when chores.helper_id changes.\n"
-        "- Rewards creation is admin-only (server enforces).\n"
-        "- Never invent IDs or names. Fetch helpers/chores via db.select if needed.\n\n"
-        "OUTPUT CONTRACT: Return ONLY JSON with EXACT keys: clarifications, tool_calls, user_summary.\n"
-        "- clarifications: array of objects with keys {key, question, options, allowMultiple}. (may be empty).\n"
-        "- tool_calls: array of tool calls (may be empty).\n"
-        "- user_summary: short string.\n"
-        "Rules: If clarifications is non-empty, tool_calls must be empty.\n\n"
-        "Allowed tools: db.select, db.insert, db.update, db.delete.\n"
-        "Tool call args shapes:\n"
-        "- db.select: { table: string, columns?: string|array, where?: object, limit?: number }\n"
-        "- db.insert: { table: string, record: object }\n"
-        "- db.update: { table: string, id: string, patch: object }\n"
-        "- db.delete: { table: string, id: string }\n"
-        "Allowed tables: helpers, member_time_off, helper_feedback, helper_rewards, helper_reward_snapshots, chores.\n"
-    )
-
-    sarvam_messages: list[dict[str, str]] = []
-    if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
-        sarvam_messages.append({"role": "system", "content": str(messages[0]["content"]).rstrip() + "\n\n" + helper_clause})
-        rest = messages[1:]
-    else:
-        sarvam_messages.append({"role": "system", "content": helper_clause.strip()})
-        rest = messages
-
-    for m in rest:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        content = m.get("content")
-        if isinstance(role, str) and isinstance(content, str):
-            sarvam_messages.append({"role": role, "content": content})
-
-    raw = await _sarvam_chat(
-        messages=sarvam_messages,
-        model=model,
-        temperature=float(temperature) if isinstance(temperature, (int, float)) else 0.0,
-        max_tokens=min(int(max_tokens or 768), 768),
-    )
-    parsed = _parse_helper_agent_payload(raw)
-    if parsed is not None:
-        return parsed
-
-    # One repair attempt.
-    repair = await _sarvam_chat(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Rewrite the INPUT into ONLY a single JSON object with EXACT keys: clarifications, tool_calls, user_summary. "
-                    "Tool calls must use db.select/db.insert/db.update/db.delete with args shapes: "
-                    "db.select={table,columns?,where?,limit?}; db.insert={table,record}; db.update={table,id,patch}; db.delete={table,id}."
-                ),
-            },
-            {"role": "user", "content": str(raw)},
-        ],
-        model=model,
-        temperature=0.0,
-        max_tokens=min(int(max_tokens or 768), 768),
-    )
-    return _parse_helper_agent_payload(repair)
+    return _helper_agent_instance
 
 
 def _looks_like_chain_of_thought(text: str) -> bool:
@@ -1303,297 +1108,25 @@ def _looks_like_chain_of_thought(text: str) -> bool:
 # ── #2: Deterministic intent classifier ─────────────────────────────────────
 
 from intent_registry import (
-    classify_intent,
     get_intent_def,
-    get_llm_hint as intent_specific_instruction,
     extract_intent as registry_extract_intent,
     intent_to_tool_calls as registry_intent_to_tool_calls,
     requires_plan as registry_requires_plan,
     list_intents,
-    ExtractedIntent as _RegistryExtractedIntent,
 )
-
-
-# ── Structured intent extraction ────────────────────────────────────────────
-# For update/edit/rename/reassign intents, extract the structured fields
-# BEFORE the main LLM call so we can convert directly to tool calls.
-
-EXTRACTION_SYSTEM_PROMPT = (
-    "You are a structured data extractor for a home management app. "
-    "Given the user's message, extract the intent into JSON.\n"
-    "Return ONLY the JSON. No reasoning, no thinking, no explanation.\n\n"
-    "If the message contains a SINGLE intent, return ONE JSON object.\n"
-    "If the message contains MULTIPLE distinct instructions (e.g., 'assign X to Y and change Z to weekly'), "
-    "return a JSON array of objects — one per instruction.\n\n"
-    "Each object has these fields:\n"
-    "{\n"
-    "  \"action\": \"update\" | \"rename\" | \"reassign\" | \"change_cadence\" | \"change_priority\" | \"change_due\" | \"add_note\" | \"remove_field\" | \"none\",\n"
-    "  \"entity\": \"chore\" | \"helper\" | \"space\",\n"
-    "  \"match_text\": \"<text to find the target record, e.g. chore title, helper name, or space/room name>\",\n"
-    "  \"match_field\": \"title\" | \"name\" | \"space\" | null,\n"
-    "  \"update_field\": \"description\" | \"title\" | \"cadence\" | \"priority\" | \"due_at\" | \"helper_id\" | \"phone\" | \"schedule\" | null,\n"
-    "  \"update_value\": \"<the new value to set>\",\n"
-    "  \"bulk\": false,\n"
-    "  \"confidence\": 0.0 to 1.0\n"
-    "}\n\n"
-    "Rules:\n"
-    "- If the user says 'remove the description' or 'clear the description', set update_value to null.\n"
-    "- If the user says 'instead mention X' or 'change to X' or 'replace with X', extract X as update_value.\n"
-    "- match_text should be the existing chore title/helper name/space the user is referring to.\n"
-    "- match_text is matched as a single ILIKE substring against title AND description, so pick ONE\n"
-    "  distinctive keyword the user mentioned. Do NOT join multiple keywords with 'and'/'or' —\n"
-    "  if the user references two unrelated keywords, pick the most distinctive one.\n"
-    "- If the user's reference (e.g. 'toy') sounds like a description word rather than a chore title,\n"
-    "  set match_field='title' anyway (the search covers both fields).\n"
-    "- When the user says 'assign bathroom chores to Roopa', that's a reassign with match_text='bathroom',\n"
-    "  match_field='space', update_field='helper_id', update_value='Roopa'.\n"
-    "- When the user combines assignment + cadence in one message (e.g., 'Roopa should clean bathrooms daily,\n"
-    "  but guest bathroom weekly'), split into separate intents: one reassign + one or more change_cadence.\n"
-    "- If you can't determine the intent, set action='none' and confidence=0.\n"
-    "- Do NOT invent data. Only extract what the user explicitly stated.\n\n"
-    "Examples:\n"
-    "User: 'Change the description of toy and clutter sweep to arrange cloths or books'\n"
-    "{\"action\":\"update\",\"entity\":\"chore\",\"match_text\":\"toy\",\"match_field\":\"title\","
-    "\"update_field\":\"description\",\"update_value\":\"Arrange cloths or books\",\"bulk\":true,\"confidence\":0.9}\n\n"
-    "User: 'Rename kitchen cleaning to kitchen jhadu pocha'\n"
-    "{\"action\":\"rename\",\"entity\":\"chore\",\"match_text\":\"kitchen cleaning\",\"match_field\":\"title\","
-    "\"update_field\":\"title\",\"update_value\":\"Kitchen jhadu pocha\",\"bulk\":false,\"confidence\":0.9}\n\n"
-    "User: 'Make all bathroom chores weekly'\n"
-    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"bathroom\",\"match_field\":\"space\","
-    "\"update_field\":\"cadence\",\"update_value\":\"weekly\",\"bulk\":true,\"confidence\":0.85}\n\n"
-    "User: 'Give Alice\\'s kitchen tasks to Bob'\n"
-    "{\"action\":\"reassign\",\"entity\":\"chore\",\"match_text\":\"kitchen\",\"match_field\":\"space\","
-    "\"update_field\":\"helper_id\",\"update_value\":\"Bob\",\"bulk\":true,\"confidence\":0.85}\n\n"
-    "User: 'Roopa should clean all bathrooms daily, but guest bathroom and home office bathroom at lower frequency'\n"
-    "[{\"action\":\"reassign\",\"entity\":\"chore\",\"match_text\":\"bathroom\",\"match_field\":\"space\","
-    "\"update_field\":\"helper_id\",\"update_value\":\"Roopa\",\"bulk\":true,\"confidence\":0.9},"
-    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"bathroom\",\"match_field\":\"space\","
-    "\"update_field\":\"cadence\",\"update_value\":\"daily\",\"bulk\":true,\"confidence\":0.85},"
-    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"guest bathroom\",\"match_field\":\"space\","
-    "\"update_field\":\"cadence\",\"update_value\":\"weekly\",\"bulk\":true,\"confidence\":0.85},"
-    "{\"action\":\"change_cadence\",\"entity\":\"chore\",\"match_text\":\"home office bathroom\",\"match_field\":\"space\","
-    "\"update_field\":\"cadence\",\"update_value\":\"weekly\",\"bulk\":true,\"confidence\":0.85}]\n\n"
-    "User: 'What chores are due today?'\n"
-    "{\"action\":\"none\",\"entity\":\"chore\",\"match_text\":\"\",\"match_field\":null,"
-    "\"update_field\":null,\"update_value\":null,\"bulk\":false,\"confidence\":0.0}\n"
+from orchestrator.intent import (
+    ExtractedIntent,
+    classify_intent,
+    extract_structured_intent,
+    intent_specific_instruction,
 )
+from agents import HelperAgent
 
 
-@dataclass
-class ExtractedIntent:
-    action: str
-    entity: str
-    match_text: str
-    match_field: str | None
-    update_field: str | None
-    update_value: str | None
-    bulk: bool
-    confidence: float
-
-
-# Deterministic regex extractor for the most common update/edit patterns.
-# Runs *before* the LLM extractor so we don't depend on the model returning
-# clean JSON for phrasings we can parse ourselves.
-_UPDATE_FIELD_RE = re.compile(
-    r"""
-    (?:
-        (?:remove|clear|delete)\s+(?:the\s+)?(?P<field_remove>description|title|name|cadence|priority|due\s*date)
-        \s+(?:of|for|from)\s+
-        (?P<match_remove>.+?)
-        \s*(?:,\s*(?:and\s+)?(?:instead\s+)?(?:mention|add|put|say|use|make\s+it)\s+(?P<value_remove>.+?))?
-        \s*$
-    )
-    |
-    (?:
-        (?:change|update|edit|modify|rename|replace|set|adjust)
-        \s+(?:the\s+)?(?P<field_change>description|title|name|cadence|priority|due\s*date)
-        \s+(?:of|for)\s+
-        (?P<match_change>.+?)
-        \s+(?:to|with|as|into)\s+
-        (?P<value_change>.+?)
-        \s*$
-    )
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
-def _extract_intent_regex(user_text: str) -> ExtractedIntent | None:
-    """Deterministic regex extractor for common update-chore patterns.
-
-    Handles:
-      - "remove the description of <X>, instead mention <Y>"
-      - "change the description of <X> to <Y>"
-      - "update the cadence of <X> to weekly"
-      - "rename <X> to <Y>" is handled by the LLM extractor (no 'of' keyword).
-
-    Returns an ExtractedIntent with confidence 1.0 on match, None otherwise.
-    Downstream _resolve_chore_match_ids handles multi-keyword match_text via
-    keyword splitting + semantic search, so bulk=True is set by default.
-    """
-    if not user_text or not user_text.strip():
-        return None
-    s = user_text.strip().rstrip(".!?")
-    m = _UPDATE_FIELD_RE.search(s)
-    if not m:
-        return None
-
-    field = (m.group("field_remove") or m.group("field_change") or "").strip().lower()
-    match_text = (m.group("match_remove") or m.group("match_change") or "").strip()
-    new_value = m.group("value_remove") or m.group("value_change")
-
-    # Normalize "due date" -> "due_at".
-    if field == "description":
-        update_field = "description"
-    elif field == "title":
-        update_field = "title"
-    elif field == "name":
-        update_field = "title"
-    elif field == "cadence":
-        update_field = "cadence"
-    elif field == "priority":
-        update_field = "priority"
-    elif "due" in field:
-        update_field = "due_at"
-    else:
-        return None
-
-    # Strip trailing "from the chores/chore/list" noise from match_text.
-    match_text = re.sub(
-        r"\s+(?:from\s+(?:the\s+)?(?:chores?|list|records?)|chores?)\s*$",
-        "",
-        match_text,
-        flags=re.IGNORECASE,
-    ).strip()
-
-    if not match_text:
-        return None
-
-    # If the phrasing was "remove the description" with no replacement, the
-    # user wants to clear the field → update_value=None.
-    update_value: Optional[str] = new_value.strip() if new_value else None
-
-    return ExtractedIntent(
-        action="update",
-        entity="chore",
-        match_text=match_text,
-        match_field="title",
-        update_field=update_field,
-        update_value=update_value,
-        bulk=True,
-        confidence=1.0,
-    )
-
-
-async def _extract_structured_intent(
-    user_text: str,
-    model: str,
-    facts_summary: str = "",  # accepted for compat; intentionally unused
-) -> ExtractedIntent | list[ExtractedIntent] | None:
-    """Extract structured intent(s) from the user's message.
-
-    Fast path: deterministic regex handles the common update-field patterns
-    without an LLM call. Falls back to a focused LLM extraction for anything
-    the regex can't parse.
-
-    Returns a single ExtractedIntent, a list of ExtractedIntents (for compound
-    instructions), or None if no actionable intent is found.
-    """
-    if not user_text.strip():
-        return None
-
-    # Try registry-based extraction first (covers add_space, reassign, complete, etc.)
-    for intent_def_item in __import__("intent_registry").INTENT_REGISTRY:
-        if intent_def_item.extract:
-            hit = intent_def_item.extract(user_text)
-            if hit:
-                print(f"intent_registry_hit", {"intent": intent_def_item.name, "match_text": hit.match_text}, flush=True)
-                return hit
-
-    regex_hit = _extract_intent_regex(user_text)
-    if regex_hit:
-        print(
-            "intent_regex_hit",
-            {
-                "match_text": regex_hit.match_text,
-                "update_field": regex_hit.update_field,
-                "update_value": regex_hit.update_value,
-            },
-            flush=True,
-        )
-        return regex_hit
-
-    extraction_input = f"User message: {user_text}"
-
-    try:
-        raw = await _sarvam_chat(
-            messages=[
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": extraction_input},
-            ],
-            model=model,
-            temperature=0.0,
-            max_tokens=1200,
-        )
-        if not isinstance(raw, str):
-            return None
-
-        # Strip <think>...</think> blocks the model may produce before the JSON
-        cleaned = _strip_think_blocks(raw).strip()
-        cleaned = re.sub(r"```json?\s*|\s*```", "", cleaned).strip()
-
-        # Try parsing as array first (compound intents)
-        if cleaned.startswith("["):
-            try:
-                arr = json.loads(cleaned)
-                if isinstance(arr, list) and len(arr) > 0:
-                    intents: list[ExtractedIntent] = []
-                    for obj in arr:
-                        if not isinstance(obj, dict) or obj.get("action") == "none":
-                            continue
-                        confidence = float(obj.get("confidence", 0))
-                        if confidence < 0.5:
-                            continue
-                        intents.append(ExtractedIntent(
-                            action=str(obj.get("action", "")),
-                            entity=str(obj.get("entity", "")),
-                            match_text=str(obj.get("match_text", "")),
-                            match_field=obj.get("match_field"),
-                            update_field=obj.get("update_field"),
-                            update_value=obj.get("update_value"),
-                            bulk=bool(obj.get("bulk", False)),
-                            confidence=confidence,
-                        ))
-                    if len(intents) == 0:
-                        return None
-                    if len(intents) == 1:
-                        return intents[0]
-                    return intents
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # Single intent
-        obj = _try_parse_json_obj(cleaned)
-        if not obj or obj.get("action") == "none":
-            return None
-
-        confidence = float(obj.get("confidence", 0))
-        if confidence < 0.5:
-            return None
-
-        return ExtractedIntent(
-            action=str(obj.get("action", "")),
-            entity=str(obj.get("entity", "")),
-            match_text=str(obj.get("match_text", "")),
-            match_field=obj.get("match_field"),
-            update_field=obj.get("update_field"),
-            update_value=obj.get("update_value"),
-            bulk=bool(obj.get("bulk", False)),
-            confidence=confidence,
-        )
-    except Exception:
-        return None
-
+# Structured intent extraction has moved to orchestrator/intent.py.
+# The legacy EXTRACTION_SYSTEM_PROMPT, _UPDATE_FIELD_RE, and helper functions
+# (_extract_intent_regex, _extract_structured_intent) now live there and are
+# imported above as extract_intent_regex / extract_structured_intent.
 
 # ── Keyword splitting + semantic chore matching ────────────────────────────
 #
@@ -3534,7 +3067,7 @@ async def chat_respond(
             _sys0 = str(messages[0].get("content") or "")
             _early_onboarding = "ONBOARDING FLOW" in _sys0
 
-        helper_intent = False if _early_onboarding else _is_helper_intent(messages)
+        helper_intent = False if _early_onboarding else _get_helper_agent().is_intent(messages)
         _lf_span(
             "orchestrator.intent_route",
             input={"last_user": last_user[:600], "onboarding": _early_onboarding},
@@ -3914,7 +3447,7 @@ async def chat_respond(
                 "orchestrator.route.helper_agent",
                 output={"routed": True},
             )
-            helper = await _run_helper_agent(
+            helper = await _get_helper_agent().run(
                 messages=messages,
                 model=model,
                 temperature=req.temperature,
@@ -4365,7 +3898,9 @@ async def chat_respond(
         extracted_intent: ExtractedIntent | None = None
         if not is_onboarding:
             try:
-                raw_intent = await _extract_structured_intent(last_user_text, model, facts_section)
+                raw_intent = await extract_structured_intent(
+                    last_user_text, model, _sarvam_chat, facts_section
+                )
 
                 # Handle compound intents (list of intents from a single message)
                 intent_list: list[ExtractedIntent] = []
