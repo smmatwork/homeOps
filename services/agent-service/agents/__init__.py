@@ -7,11 +7,13 @@ orchestrator imports and dispatches to them.
 """
 
 from agents.base import AgentContext, AgentResult, AgentResultKind
+from agents.chore_agent import ChoreAgent
 from agents.helper_agent import HelperAgent
 
 __all__ = [
     "AgentContext",
     "AgentResult",
     "AgentResultKind",
+    "ChoreAgent",
     "HelperAgent",
 ]

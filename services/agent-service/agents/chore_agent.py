@@ -1,0 +1,72 @@
+"""Chore Agent — handles chore assignment, scheduling, completion, reassignment,
+update, deletion, and the related pattern-elicitation + coverage flows.
+
+Scaffolding stage. `is_intent()` returns True (chore is the default route
+today; there's no dedicated "chore detector" because any message that isn't
+a helper-management request falls here) and `run()` returns an AgentResult
+with kind="defer" — the orchestrator treats that as "this agent does not
+take ownership of the turn; fall through to the legacy handler."
+
+The actual chore logic still lives inside main.py's chat_respond handler
+(phases 6-16: deterministic analytics shortcuts, assign/complete/reassign
+regex parsers, clarification + schedule + space prompting flows, structured
+extraction -> plan-confirm-execute, main LLM turn, tool execution loop,
+hallucination-override guards, LLM-as-Judge). That code will migrate into
+this class in follow-up commits:
+
+  6a. Analytics shortcuts   (7 deterministic RPC paths)
+  6b. Deterministic actions (assign/complete/reassign regex -> tool_calls)
+  6c. Formatters            (plan preview, confirmation preview, no-match)
+  6d. Structured extraction (pending-clarification substitution + preview)
+  6e. Chore helpers         (intent_to_tool_calls, resolve_match_ids,
+                             validate_tool_calls, enforce_assignment_policy,
+                             judge, graduation_status)
+  6f. Hallucination guards  (needs_fetch_override detectors, schedule
+                             guardrails)
+
+Each sub-commit is bounded and reviewable. This file exists today so those
+migrations have a target and the `ChoreAgent` class can be instantiated
+alongside `HelperAgent` in the orchestrator router (Commit 5).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from agents.base import AgentContext, AgentResult, ChatFn, EdgeExecuteFn
+
+
+@dataclass
+class ChoreAgent:
+    """Domain agent for chore management. Instantiate once at orchestrator
+    startup; its dependencies (LLM client, edge client) match the pattern
+    used by HelperAgent."""
+
+    chat_fn: ChatFn
+    edge_execute_tools: EdgeExecuteFn
+
+    def is_intent(self, ctx: AgentContext) -> bool:
+        """Chore is the default route — every turn that isn't an explicit
+        helper-management request falls here. There's no dedicated chore
+        intent detector because chore coverage is the broadest.
+
+        A future `start_elicitation` domain agent or `service_and_maintenance`
+        domain agent would reduce this class's scope — at that point,
+        `is_intent` would become an actual check. For now: True.
+        """
+        return True
+
+    async def run(self, ctx: AgentContext) -> AgentResult:
+        """Placeholder: returns AgentResult(kind="defer") so the orchestrator
+        falls through to the legacy chat_respond body in main.py.
+
+        Follow-up commits 6a-6f progressively migrate phases 6-16 of
+        chat_respond into this method. During that migration the method
+        will start returning real results (text / tool_calls_preview /
+        tool_calls_execute / clarification) for the phases it has absorbed,
+        and "defer" only for phases that haven't moved yet.
+        """
+        return AgentResult(kind="defer")
+
+
+__all__ = ["ChoreAgent"]
