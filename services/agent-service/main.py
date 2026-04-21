@@ -4584,126 +4584,27 @@ _summary_cache: dict[str, _ConversationSummary] = {}
 # stashed. Any non-confirmation message clears the pending state so stale
 # "yes" answers can't trigger old updates.
 
-PENDING_CONFIRMATION_TTL_SECONDS = int(
-    _env("AGENT_PENDING_CONFIRMATION_TTL_SECONDS", "300") or "300"
+# Orchestrator conversation state (pending clarifications, plan-confirm cache,
+# "yes"/"no" phrase detectors) lives in orchestrator/state.py. Imported here
+# under the legacy underscore-prefixed names so the 15+ call sites in
+# chat_respond and the existing test suite keep working without churn.
+from orchestrator.state import (
+    MAX_CLARIFICATION_TURNS,
+    PENDING_CLARIFICATION_TTL_SECONDS,
+    PENDING_CONFIRMATION_TTL_SECONDS,
+    PendingClarification as _PendingClarification,
+    PendingConfirmation as _PendingConfirmation,
+    clarification_counts as _clarification_counts,
+    clear_pending_confirmation as _clear_pending_confirmation,
+    is_cancellation as _is_cancellation,
+    is_confirmation as _is_confirmation,
+    pending_clarifications as _pending_clarifications,
+    pending_confirmations as _pending_confirmations,
+    stash_clarification as _stash_clarification,
+    stash_pending_confirmation as _stash_pending_confirmation,
+    take_clarification as _take_clarification,
+    take_pending_confirmation as _take_pending_confirmation,
 )
-
-
-@dataclass
-class _PendingConfirmation:
-    intent: ExtractedIntent
-    match_ids: list[tuple[str, str]]  # (id, title)
-    tool_calls: list[dict[str, Any]]
-    expires_at: float  # monotonic deadline; see time.monotonic()
-    # Sync-followup state (None when this is a regular confirmation).
-    # When set, the user is being asked whether to also update the OTHER
-    # field after a successful description/title update. yes → run
-    # tool_calls (precomputed mirror updates). no → cancel. freeform →
-    # treat the reply as the new value for sync_field and execute fresh
-    # tool calls against sync_chore_ids.
-    sync_field: str | None = None
-    sync_chore_ids: list[str] | None = None
-    sync_default_value: str | None = None
-
-
-_pending_confirmations: dict[str, _PendingConfirmation] = {}
-
-# Track clarification turns per conversation. When a user cancels a plan,
-# we ask clarifying questions up to MAX_CLARIFICATION_TURNS, then guide to UI.
-_clarification_counts: dict[str, int] = {}
-MAX_CLARIFICATION_TURNS = 3
-
-# ── Pending clarification context ────────────────────────────────────
-# When the agent asks a clarifying question (e.g., "which bathroom?"),
-# stash the original intent so the user's reply can be interpreted
-# in context without re-extracting from scratch.
-
-@dataclass
-class _PendingClarification:
-    """Stashed context when the agent asked for clarification."""
-    original_intents: list[ExtractedIntent]
-    failed_match_text: str  # the term that didn't match
-    question_type: str  # "space_not_found", "helper_not_found", "ambiguous"
-    expires_at: float
-
-_pending_clarifications: dict[str, _PendingClarification] = {}
-PENDING_CLARIFICATION_TTL_SECONDS = 300
-
-def _stash_clarification(
-    conversation_id: str,
-    original_intents: list[ExtractedIntent],
-    failed_match_text: str,
-    question_type: str,
-) -> None:
-    import time as _time
-    _pending_clarifications[conversation_id] = _PendingClarification(
-        original_intents=list(original_intents),
-        failed_match_text=failed_match_text,
-        question_type=question_type,
-        expires_at=_time.monotonic() + PENDING_CLARIFICATION_TTL_SECONDS,
-    )
-
-def _take_clarification(conversation_id: str) -> _PendingClarification | None:
-    if not conversation_id:
-        return None
-    import time as _time
-    pending = _pending_clarifications.pop(conversation_id, None)
-    if pending is None:
-        return None
-    if _time.monotonic() > pending.expires_at:
-        return None
-    return pending
-
-
-_CONFIRM_RE = re.compile(
-    r"^\s*(?:yes|y|yeah|yep|yup|sure|ok|okay|confirm|proceed|go\s*ahead|do\s*it|please\s+do)\b",
-    re.IGNORECASE,
-)
-_CANCEL_RE = re.compile(
-    r"^\s*(?:no|n|nope|cancel|stop|abort|nevermind|never\s*mind|don'?t|do\s*not)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_confirmation(text: str) -> bool:
-    return bool(_CONFIRM_RE.match(text or ""))
-
-
-def _is_cancellation(text: str) -> bool:
-    return bool(_CANCEL_RE.match(text or ""))
-
-
-def _take_pending_confirmation(conversation_id: str) -> _PendingConfirmation | None:
-    """Pop a non-expired pending confirmation for this conversation."""
-    if not conversation_id:
-        return None
-    import time as _time
-    pending = _pending_confirmations.pop(conversation_id, None)
-    if pending is None:
-        return None
-    if pending.expires_at < _time.monotonic():
-        return None
-    return pending
-
-
-def _stash_pending_confirmation(
-    conversation_id: str,
-    intent: ExtractedIntent,
-    match_ids: list[tuple[str, str]],
-    tool_calls: list[dict[str, Any]],
-) -> None:
-    import time as _time
-    _pending_confirmations[conversation_id] = _PendingConfirmation(
-        intent=intent,
-        match_ids=list(match_ids),
-        tool_calls=list(tool_calls),
-        expires_at=_time.monotonic() + PENDING_CONFIRMATION_TTL_SECONDS,
-    )
-
-
-def _clear_pending_confirmation(conversation_id: str) -> None:
-    if conversation_id:
-        _pending_confirmations.pop(conversation_id, None)
 
 
 def _match_ids_from_tool_calls(tcs: list[dict[str, Any]]) -> list[tuple[str, str]]:
