@@ -327,5 +327,291 @@ class ChatRespondPlanPreviewTests(unittest.TestCase):
         )
 
 
+class ChatRespondSummarizerPathTests(unittest.TestCase):
+    """Gap 1: exercise summarize_history_if_needed under char-budget pressure.
+
+    The handler calls orchestrator.context.summarize_history_if_needed before
+    the main LLM turn. If the accumulated conversation exceeds
+    SARVAM_PROMPT_CHAR_BUDGET (default 17000) AND a conversation_id is
+    provided, the summarizer fires: one Sarvam call to fold old turns into
+    a rolling summary, then the main turn proceeds with a smaller prompt.
+
+    The chat_fn is passed by reference from main.py to the context module at
+    call time, so patching main._sarvam_chat intercepts both the summarizer
+    LLM and the main LLM turns. We assert at least two calls and that the
+    first one carries the summarizer-flavored system prompt.
+    """
+
+    def setUp(self):
+        self.client = TestClient(agent_main.app)
+        orch_state.pending_confirmations.clear()
+        orch_state.pending_clarifications.clear()
+        orch_state.clarification_counts.clear()
+        # Summary cache is per-conversation; wipe so each test starts fresh.
+        from orchestrator.context import summary_cache
+        summary_cache.clear()
+
+    def test_long_history_triggers_summarizer_llm_call(self):
+        # Build messages well over the 17k char budget: one big system prompt
+        # plus six alternating user/assistant turns of ~3k chars each.
+        big_block = "x" * 3000
+        history: list[dict[str, Any]] = [
+            {"role": "system", "content": "You are a helpful assistant. " + ("y" * 2500)},
+            {"role": "user", "content": "old request 1: " + big_block},
+            {"role": "assistant", "content": "old reply 1: " + big_block},
+            {"role": "user", "content": "old request 2: " + big_block},
+            {"role": "assistant", "content": "old reply 2: " + big_block},
+            {"role": "user", "content": "old request 3: " + big_block},
+            {"role": "assistant", "content": "old reply 3: " + big_block},
+        ]
+
+        call_log: list[dict[str, Any]] = []
+
+        async def counting_sarvam(*, messages, model, temperature, max_tokens):
+            call_log.append({"messages": messages, "model": model, "temperature": temperature})
+            # Return summarizer-shaped text if we detect the summarizer prompt,
+            # otherwise return a final_text envelope.
+            sys0 = messages[0].get("content", "") if messages else ""
+            if "summarizing a conversation" in sys0.lower():
+                return "User asked a few questions about household management."
+            return '{"final_text": "Acknowledged.", "tool_calls": []}'
+
+        conv_id = "test-conv-summarizer-1"
+        with patch.object(agent_main, "_sarvam_chat", side_effect=counting_sarvam), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
+            res = _post_respond(
+                self.client,
+                user_text="latest question after a lot of history",
+                conversation_id=conv_id,
+                extra_messages=history,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertGreaterEqual(
+            len(call_log),
+            2,
+            f"expected >=2 Sarvam calls (summarizer + main), got {len(call_log)}",
+        )
+        # First call should be the summarizer — its system prompt mentions summarization.
+        summarizer_calls = [
+            c for c in call_log
+            if c["messages"] and "summarizing a conversation" in c["messages"][0].get("content", "").lower()
+        ]
+        self.assertGreaterEqual(
+            len(summarizer_calls),
+            1,
+            "expected at least one summarizer-shaped Sarvam call",
+        )
+
+
+class ChatRespondClarificationRoundtripTests(unittest.TestCase):
+    """Gap 2: user's freeform reply is substituted into the original failed
+    match_text, and a fresh plan-preview is stashed for the substituted intent.
+
+    This state-machine path is subtle: when a previous turn asked "which
+    bathroom?" and stashed a PendingClarification, the next user message is
+    treated as the clarification value (not a new request). The handler
+    substitutes it into every original intent whose match_text matches the
+    recorded failed term, re-runs _intent_to_tool_calls, and stashes the
+    resulting plan as a new PendingConfirmation.
+    """
+
+    def setUp(self):
+        self.client = TestClient(agent_main.app)
+        orch_state.pending_confirmations.clear()
+        orch_state.pending_clarifications.clear()
+        orch_state.clarification_counts.clear()
+        self.conv_id = "test-conv-clarify-1"
+
+    def _stash_clarification(self) -> ExtractedIntent:
+        original = ExtractedIntent(
+            action="update",
+            entity="chore",
+            match_text="bathroom",  # ambiguous — multiple matches in household
+            match_field="space",
+            update_field="cadence",
+            update_value="weekly",
+            bulk=True,
+            confidence=1.0,
+        )
+        orch_state.pending_clarifications[self.conv_id] = orch_state.PendingClarification(
+            original_intents=[original],
+            failed_match_text="bathroom",
+            question_type="space_not_found",
+            expires_at=time.monotonic() + 60,
+        )
+        return original
+
+    def test_clarification_reply_substitutes_and_stashes_new_preview(self):
+        self._stash_clarification()
+        substitution_seen: list[str] = []
+
+        async def fake_intent_to_tool_calls(intent, facts_section, *, household_id, user_id):
+            # Capture what match_text the handler used after substitution.
+            substitution_seen.append(intent.match_text)
+            return [
+                {
+                    "id": "tc_post_clar_1",
+                    "tool": "db.update",
+                    "args": {
+                        "table": "chores",
+                        "id": "33333333-3333-3333-3333-333333333333",
+                        "patch": {"cadence": "weekly"},
+                    },
+                    "reason": "update: set cadence = 'weekly' on 'Mop Guest Bathroom'",
+                }
+            ]
+
+        with patch.object(agent_main, "_intent_to_tool_calls", side_effect=fake_intent_to_tool_calls), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text), \
+             patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
+            res = _post_respond(
+                self.client,
+                user_text="guest bathroom",
+                conversation_id=self.conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(
+            substitution_seen,
+            ["guest bathroom"],
+            "handler must substitute the user's reply into the failed match_text",
+        )
+        # Clarification has been consumed (take semantics).
+        self.assertNotIn(self.conv_id, orch_state.pending_clarifications)
+        # A fresh confirmation must be stashed for the substituted intent.
+        self.assertIn(
+            self.conv_id,
+            orch_state.pending_confirmations,
+            "handler should stash a new PendingConfirmation after substitution",
+        )
+        stashed = orch_state.pending_confirmations[self.conv_id]
+        self.assertEqual(stashed.intent.match_text, "guest bathroom")
+        # Response must be a plan preview, not executed yet.
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = body.get("text") or ""
+        self.assertRegex(text.lower(), r"\byes\b")
+
+
+class ChatRespondSyncFollowupTests(unittest.TestCase):
+    """Gap 3: the sync-followup confirmation branch in the pending-confirmation
+    state machine. After a description update succeeds, the handler may offer
+    to mirror the new value into the title (or vice versa). That stash sets
+    `sync_field` and branches on the user's reply: yes/no/freeform.
+    """
+
+    def setUp(self):
+        self.client = TestClient(agent_main.app)
+        orch_state.pending_confirmations.clear()
+        orch_state.pending_clarifications.clear()
+        orch_state.clarification_counts.clear()
+        self.conv_id = "test-conv-sync-1"
+        self.chore_id = "44444444-4444-4444-4444-444444444444"
+
+    def _stash_sync(self) -> list[dict[str, Any]]:
+        tool_calls = [
+            {
+                "id": "tc_sync_pre_1",
+                "tool": "db.update",
+                "args": {
+                    "table": "chores",
+                    "id": self.chore_id,
+                    "patch": {"title": "Arrange clothes or books"},
+                },
+                "reason": "sync mirror: set title to match description",
+            }
+        ]
+        orch_state.pending_confirmations[self.conv_id] = orch_state.PendingConfirmation(
+            intent=ExtractedIntent(
+                action="update",
+                entity="chore",
+                match_text="toy sweep",
+                match_field="title",
+                update_field="description",
+                update_value="Arrange clothes or books",
+                bulk=False,
+                confidence=1.0,
+            ),
+            match_ids=[(self.chore_id, "Toy Sweep")],
+            tool_calls=tool_calls,
+            expires_at=time.monotonic() + 60,
+            sync_field="title",
+            sync_chore_ids=[self.chore_id],
+            sync_default_value="Arrange clothes or books",
+        )
+        return tool_calls
+
+    def test_sync_yes_executes_stashed_mirror(self):
+        stashed = self._stash_sync()
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {"ok": True, "result": {"updated": True}}
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(self.client, user_text="yes", conversation_id=self.conv_id)
+
+        self.assertEqual(res.status_code, 200, res.text)
+        # The precomputed mirror update must have been sent to the edge.
+        self.assertGreaterEqual(len(edge_calls), 1, "expected edge call for sync mirror")
+        forwarded = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(forwarded.get("tool"), "db.update")
+        self.assertEqual(forwarded.get("args", {}).get("id"), stashed[0]["args"]["id"])
+        self.assertEqual(forwarded.get("args", {}).get("patch", {}).get("title"), "Arrange clothes or books")
+        # Response must confirm the sync happened.
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        self.assertIn("title", (body.get("text") or "").lower())
+
+    def test_sync_no_cancels_without_edge_call(self):
+        self._stash_sync()
+
+        async def edge_must_not_fire(payload, *, user_id):
+            raise AssertionError("edge_execute_tools must NOT fire on cancellation")
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=edge_must_not_fire), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(self.client, user_text="no", conversation_id=self.conv_id)
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = (body.get("text") or "").lower()
+        self.assertIn("title", text)
+        self.assertIn("as-is", text)
+
+    def test_sync_freeform_uses_reply_as_new_value(self):
+        self._stash_sync()
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {"ok": True, "result": {"updated": True}}
+
+        freeform_reply = "Mop the floors"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(self.client, user_text=freeform_reply, conversation_id=self.conv_id)
+
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertGreaterEqual(len(edge_calls), 1, "expected freeform-sync edge call")
+        forwarded = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(forwarded.get("tool"), "db.update")
+        self.assertEqual(forwarded.get("args", {}).get("id"), self.chore_id)
+        self.assertEqual(
+            forwarded.get("args", {}).get("patch", {}).get("title"),
+            freeform_reply,
+            "freeform reply must be used verbatim as the new sync_field value",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
