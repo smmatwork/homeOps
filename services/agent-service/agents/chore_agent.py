@@ -32,18 +32,37 @@ alongside `HelperAgent` in the orchestrator router (Commit 5).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from agents.base import AgentContext, AgentResult, ChatFn, EdgeExecuteFn
+
+
+ExtractJsonCandidateFn = Callable[[str], "str | None"]
+SafeJsonLoadsFn = Callable[[str], Any]
+ValidateToolCallsFn = Callable[[Any], "list[dict[str, Any]] | None"]
 
 
 @dataclass
 class ChoreAgent:
     """Domain agent for chore management. Instantiate once at orchestrator
-    startup; its dependencies (LLM client, edge client) match the pattern
-    used by HelperAgent."""
+    startup. Dependency shape matches HelperAgent's (chat_fn + the three
+    JSON/tool-call utilities) plus edge_execute_tools — every chore-domain
+    migration in phases 6a-6f needs at least one of these:
+
+      - chat_fn: main LLM turn, summarizer, judge
+      - edge_execute_tools: every tool_call execution (RPC, db.update, etc.)
+      - extract_json_candidate / safe_json_loads: parse LLM envelope output
+      - validate_tool_calls_list: shape-check before dispatch to edge
+
+    They're accepted here even though run() is currently a placeholder so
+    that adding them later isn't a breaking API change for callers (main.py
+    orchestrator and future orchestrator/router.py)."""
 
     chat_fn: ChatFn
     edge_execute_tools: EdgeExecuteFn
+    extract_json_candidate: ExtractJsonCandidateFn
+    safe_json_loads: SafeJsonLoadsFn
+    validate_tool_calls_list: ValidateToolCallsFn
 
     def is_intent(self, ctx: AgentContext) -> bool:
         """Chore is the default route — every turn that isn't an explicit

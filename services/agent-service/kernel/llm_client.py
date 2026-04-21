@@ -183,6 +183,9 @@ async def sarvam_chat(
                         "code": err_code,
                         "url": url,
                         "model": model,
+                        # api_key_len + first 6 chars help debug which key
+                        # variant is being rejected (prod vs staging vs dev)
+                        # without exposing the full secret. Safe for logs.
                         "api_key_len": len(api_key),
                         "api_key_prefix": api_key[:6],
                         "response_prefix": (res.text or "")[:500],
