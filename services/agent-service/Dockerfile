@@ -17,6 +17,7 @@ COPY channel_dispatcher.py ./channel_dispatcher.py
 COPY channel_adapters/ ./channel_adapters/
 COPY orchestrator/ ./orchestrator/
 COPY agents/ ./agents/
+COPY kernel/ ./kernel/
 
 EXPOSE 8011
 

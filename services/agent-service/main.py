@@ -1517,22 +1517,37 @@ async def _judge_response(
     return {"pass": False, "reason": "Judge could not parse response", "correction": "Review response manually"}
 
 
-SARVAM_BASE_URL = _env("SARVAM_BASE_URL", "https://api.sarvam.ai")
-SARVAM_API_KEY = _env("SARVAM_API_KEY")
-SARVAM_MODEL_DEFAULT = _env("SARVAM_MODEL_DEFAULT", "sarvam-m")
-SARVAM_TIMEOUT_MS = int(_env("SARVAM_TIMEOUT_MS", "20000") or "20000")
-SARVAM_MAX_RETRIES = int(_env("SARVAM_MAX_RETRIES", "2") or "2")
-# Prefer "final answer only" contract over model-provided reasoning modes.
-# Some providers will surface meta-reasoning more often when a reasoning level is requested.
-SARVAM_REASONING_LEVEL = _env("SARVAM_REASONING_LEVEL", "")
+# Sarvam LLM client + edge-function client live in kernel/. Re-imported here
+# under the legacy names so the chat_respond handler, _summarize_history_if_needed
+# wrapper, and test patches (patch.object(agent_main, "_sarvam_chat", ...))
+# keep working unchanged.
+from kernel.llm_client import (
+    SARVAM_BASE_URL,
+    SARVAM_API_KEY,
+    SARVAM_MODEL_DEFAULT,
+    SARVAM_TIMEOUT_MS,
+    SARVAM_MAX_RETRIES,
+    SARVAM_REASONING_LEVEL,
+    sarvam_adapt_messages as _sarvam_adapt_messages,
+    sarvam_chat as _sarvam_chat,
+)
+from kernel.edge_client import (
+    EDGE_BASE_URL,
+    EDGE_BEARER_TOKEN,
+    resolve_edge_base_url as _resolve_edge_base_url,
+    edge_post as _edge_post,
+    edge_get as _edge_get,
+    edge_execute_tools as _edge_execute_tools,
+)
 
+# Gemini + sanitizer + global service auth remain here — they aren't
+# kernel-scope (Gemini is a fallback path, AGENT_SERVICE_KEY is also used by
+# the chat_respond handler's own auth check).
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-1.5-flash")
 SANITIZER_ALWAYS = (_env("SANITIZER_ALWAYS", "false") or "false").strip().lower() in ("1", "true", "yes", "y", "on")
 
-EDGE_BASE_URL = _env("EDGE_BASE_URL")
 AGENT_SERVICE_KEY = _env("AGENT_SERVICE_KEY")
-EDGE_BEARER_TOKEN = _env("EDGE_BEARER_TOKEN")
 
 
 class RunStartRequest(BaseModel):
@@ -4303,266 +4318,12 @@ async def _summarize_history_if_needed(
     )
 
 
-async def _sarvam_chat(
-    *,
-    messages: list[dict[str, str]],
-    model: str,
-    temperature: float = 0.3,
-    max_tokens: int = 512,
-) -> str:
-    # Read from env at call time to avoid stale module-level values if the process was started
-    # before the .env changed.
-    api_key = (os.getenv("SARVAM_API_KEY") or SARVAM_API_KEY or "").strip()
-    if not api_key:
-        raise RuntimeError("Missing SARVAM_API_KEY")
-
-    url = f"{SARVAM_BASE_URL.rstrip('/')}/v1/chat/completions"
-    timeout = httpx.Timeout(SARVAM_TIMEOUT_MS / 1000.0)
-
-    messages = _sarvam_adapt_messages(messages)  # type: ignore[arg-type]
-    messages = _truncate_messages_to_budget(messages)
-
-    last_err: Optional[Exception] = None
-    for attempt in range(SARVAM_MAX_RETRIES + 1):
-        try:
-            tracer = trace.get_tracer("homeops.agent_service")
-            with tracer.start_as_current_span("llm.sarvam.chat") as span:
-                try:
-                    span.set_attribute("llm.provider", "sarvam")
-                    span.set_attribute("llm.model", model)
-                    span.set_attribute("llm.attempt", attempt)
-                except Exception:
-                    pass
-
-                payload: dict[str, Any] = {
-                    "messages": messages,
-                    "model": model,
-                    "stream": False,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-
-                # NOTE: Sarvam payload validation has varied across versions.
-                # Avoid sending experimental fields (e.g. reasoning_level) that can trigger HTTP 400.
-
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    res = await client.post(
-                        url,
-                        headers={
-                            # Keep multiple common auth header variants for maximum compatibility.
-                            "API-Subscription-Key": api_key,
-                            "api-subscription-key": api_key,
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                    )
-            if res.status_code >= 400:
-                # Log minimal debugging info without leaking the key.
-                req_id = None
-                err_code = None
-                try:
-                    j = res.json()
-                    if isinstance(j, dict):
-                        err = j.get("error")
-                        if isinstance(err, dict):
-                            req_id = err.get("request_id")
-                            err_code = err.get("code")
-                except Exception:
-                    pass
-                print(
-                    "sarvam_chat_http_error",
-                    {
-                        "status": res.status_code,
-                        "request_id": req_id,
-                        "code": err_code,
-                        "url": url,
-                        "model": model,
-                        "api_key_len": len(api_key),
-                        "api_key_prefix": api_key[:6],
-                        "response_prefix": (res.text or "")[:500],
-                    },
-                )
-
-                raise RuntimeError(f"Sarvam call failed {res.status_code}: {res.text}")
-
-            data = res.json()
-
-            # Resilient extractor: prefer chat shape, fallback to completion shape
-            text = None
-            try:
-                text = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content")
-                )
-            except Exception:
-                text = None
-
-            if not text:
-                try:
-                    text = data.get("choices", [{}])[0].get("text")
-                except Exception:
-                    text = None
-
-            if not isinstance(text, str) or not text.strip():
-                raise RuntimeError("Sarvam response missing text (choices[0].message.content or choices[0].text)")
-
-            return _strip_think_blocks(str(text))
-
-        except Exception as e:  # network/parse errors
-            last_err = e
-            if attempt >= SARVAM_MAX_RETRIES:
-                break
-
-    raise RuntimeError(f"Sarvam call failed: {last_err}")
-
-
-async def _edge_post(path: str, payload: dict[str, Any]) -> None:
-    if not EDGE_BASE_URL:
-        raise RuntimeError("Missing EDGE_BASE_URL")
-    if not AGENT_SERVICE_KEY:
-        raise RuntimeError("Missing AGENT_SERVICE_KEY")
-
-    url = f"{EDGE_BASE_URL.rstrip('/')}{path}"
-    headers = {
-        "x-agent-service-key": AGENT_SERVICE_KEY,
-        "Content-Type": "application/json",
-    }
-    if EDGE_BEARER_TOKEN:
-        headers["Authorization"] = f"Bearer {EDGE_BEARER_TOKEN}"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        res = await client.post(
-            url,
-            headers=headers,
-            json=payload,
-        )
-    if res.status_code >= 400:
-        raise RuntimeError(f"Edge writeback failed {res.status_code}: {res.text}")
-
-
-def _resolve_edge_base_url() -> str:
-    """Rewrite host.docker.internal → 127.0.0.1 when the agent runs on the host.
-
-    EDGE_BASE_URL is usually set to host.docker.internal for containerized
-    deploys, but local dev runs uvicorn on the host where that hostname
-    doesn't resolve (getaddrinfo errno 8). Substituting at call time matches
-    the pattern already used by _build_facts_section.
-    """
-    base = (EDGE_BASE_URL or "").strip()
-    if "host.docker.internal" not in base:
-        return base
-    import urllib.parse
-    parsed = urllib.parse.urlparse(base)
-    new_host = "127.0.0.1"
-    port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme}://{new_host}{port}{parsed.path}"
-
-
-async def _edge_execute_tools(payload: dict[str, Any], *, user_id: str) -> Any:
-    if not EDGE_BASE_URL:
-        raise RuntimeError("Missing EDGE_BASE_URL")
-    if not AGENT_SERVICE_KEY:
-        raise RuntimeError("Missing AGENT_SERVICE_KEY")
-
-    url = f"{_resolve_edge_base_url().rstrip('/')}/tools/execute"
-    headers = {
-        "x-agent-service-key": AGENT_SERVICE_KEY,
-        "Content-Type": "application/json",
-    }
-    if user_id:
-        headers["x-user-id"] = user_id
-    if EDGE_BEARER_TOKEN:
-        headers["Authorization"] = f"Bearer {EDGE_BEARER_TOKEN}"
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-        res = await client.post(url, headers=headers, json=payload)
-    if res.status_code >= 400:
-        raise RuntimeError(f"Edge tools.execute failed {res.status_code}: {res.text}")
-    try:
-        return res.json()
-    except Exception:
-        raise RuntimeError("Edge tools.execute returned non-JSON")
-
-
-async def _edge_get(path: str, params: dict[str, str]) -> Any:
-    if not EDGE_BASE_URL:
-        raise RuntimeError("Missing EDGE_BASE_URL")
-    if not AGENT_SERVICE_KEY:
-        raise RuntimeError("Missing AGENT_SERVICE_KEY")
-
-    qs = urlencode(params)
-    url = f"{_resolve_edge_base_url().rstrip('/')}{path}{'?' if qs else ''}{qs}"
-    headers = {
-        "x-agent-service-key": AGENT_SERVICE_KEY,
-    }
-    if EDGE_BEARER_TOKEN:
-        headers["Authorization"] = f"Bearer {EDGE_BEARER_TOKEN}"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        res = await client.get(url, headers=headers)
-    if res.status_code >= 400:
-        raise RuntimeError(f"Edge read failed {res.status_code}: {res.text}")
-    try:
-        return res.json()
-    except Exception:
-        raise RuntimeError("Edge read returned non-JSON")
 
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _sarvam_adapt_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Normalize messages to satisfy Sarvam constraints.
-
-    Constraints enforced:
-    - At most one system message, and it must be the first message.
-    - User/assistant turns must alternate, starting with a user message.
-    """
-
-    sys_parts: list[str] = []
-    non_sys_raw: list[dict[str, str]] = []
-
-    for m in messages or []:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        content = m.get("content")
-
-        if role == "system":
-            if isinstance(content, str) and content.strip():
-                sys_parts.append(content.strip())
-            continue
-
-        if role not in {"user", "assistant"}:
-            continue
-        if not isinstance(content, str):
-            continue
-        c = content.strip("\n")
-        if not c.strip():
-            continue
-        non_sys_raw.append({"role": str(role), "content": c})
-
-    # Sarvam constraint: turns must alternate user/assistant starting with user.
-    # Normalize by dropping any leading assistant turns and merging consecutive same-role turns.
-    non_sys: list[dict[str, str]] = []
-    for item in non_sys_raw:
-        if not non_sys and item["role"] == "assistant":
-            continue
-        if non_sys and non_sys[-1]["role"] == item["role"]:
-            non_sys[-1]["content"] = (non_sys[-1]["content"].rstrip() + "\n\n" + item["content"].lstrip()).strip()
-            continue
-        non_sys.append(item)
-
-    # Safety: if no user messages survived, inject a minimal one.
-    if not non_sys or non_sys[0]["role"] != "user":
-        non_sys.insert(0, {"role": "user", "content": "Hello"})
-
-    out: list[dict[str, str]] = []
-    if sys_parts:
-        out.append({"role": "system", "content": "\n\n".join(sys_parts)})
-    out.extend(non_sys)
-    return out
 
 
 def _pick_helper_for_cleaning(
