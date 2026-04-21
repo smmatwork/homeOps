@@ -1040,12 +1040,14 @@ def _helpers_select_tool_call_json(tool_call_id: str = "tc_helpers_1") -> str:
 
 # Helper Agent has moved to agents/helper_agent.py. It's instantiated lazily
 # via _get_helper_agent() below so dependencies defined later in this file
-# (_sarvam_chat, _safe_json_loads, etc.) are resolvable at call time.
+# (_sarvam_chat, _safe_json_loads, etc.) are resolvable at call time. The
+# HelperAgent import happens lower in this module after other imports; the
+# annotation is deliberately omitted here to avoid forward-reference issues.
 
-_helper_agent_instance: HelperAgent | None = None
+_helper_agent_instance = None
 
 
-def _get_helper_agent() -> HelperAgent:
+def _get_helper_agent():
     global _helper_agent_instance
     if _helper_agent_instance is None:
         _helper_agent_instance = HelperAgent(

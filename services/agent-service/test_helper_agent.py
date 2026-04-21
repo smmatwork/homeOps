@@ -12,16 +12,13 @@ from main import (
     _extract_assignment_suggestions,
     _extract_assign_or_create_chore,
     _extract_complete_chore_by_query,
-    _extract_intent_regex,
     _extract_reassign_or_unassign_chore,
     _format_confirmation_preview,
     _is_cancellation,
     _is_confirmation,
-    _is_helper_intent,
     _looks_like_chain_of_thought,
     _match_ids_from_tool_calls,
     _parse_chores_from_facts,
-    _parse_helper_agent_payload,
     _resolve_chore_match_ids,
     _resolve_chore_match_ids_via_rpc,
     _split_match_keywords,
@@ -31,6 +28,16 @@ from main import (
     _truncate_messages_to_budget,
 )
 from main import ExtractedIntent
+
+# Post-refactor shims: the intent cascade and Helper Agent live in their own
+# modules now, but the tests were written against the legacy private names in
+# main.py. Re-expose the new entry points under the old names so existing
+# test bodies keep working without behavior changes.
+from orchestrator.intent import extract_intent_regex as _extract_intent_regex
+
+_helper_agent_for_tests = agent_main._get_helper_agent()
+_is_helper_intent = _helper_agent_for_tests.is_intent
+_parse_helper_agent_payload = _helper_agent_for_tests._parse_payload
 
 
 class HelperAgentContractTests(unittest.TestCase):
