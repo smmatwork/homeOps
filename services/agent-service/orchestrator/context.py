@@ -33,12 +33,25 @@ ChatFn = Callable[..., Awaitable[Any]]
 
 
 # ── Budget + summary tuning ──────────────────────────────────────────────────
+# Each int() wraps `(os.environ.get(...) or "").strip() or default` — the
+# stripping is load-bearing. Pre-refactor main.py used a helper (_env) that
+# stripped internally; os.environ.get returns "   " unchanged and "   " is
+# truthy, so a naive `get(...) or default` would let whitespace through to
+# int() and crash module load.
 
-SARVAM_PROMPT_CHAR_BUDGET = int(os.environ.get("SARVAM_PROMPT_CHAR_BUDGET", "17000") or "17000")
+SARVAM_PROMPT_CHAR_BUDGET = int(
+    (os.environ.get("SARVAM_PROMPT_CHAR_BUDGET") or "").strip() or "17000"
+)
 
-SUMMARY_KEEP_RECENT_TURNS = int(os.environ.get("AGENT_SUMMARY_KEEP_RECENT_TURNS", "2") or "2")
-SUMMARY_MAX_TOKENS = int(os.environ.get("AGENT_SUMMARY_MAX_TOKENS", "200") or "200")
-SUMMARY_FOLD_INPUT_CAP_CHARS = int(os.environ.get("AGENT_SUMMARY_FOLD_INPUT_CAP", "1500") or "1500")
+SUMMARY_KEEP_RECENT_TURNS = int(
+    (os.environ.get("AGENT_SUMMARY_KEEP_RECENT_TURNS") or "").strip() or "2"
+)
+SUMMARY_MAX_TOKENS = int(
+    (os.environ.get("AGENT_SUMMARY_MAX_TOKENS") or "").strip() or "200"
+)
+SUMMARY_FOLD_INPUT_CAP_CHARS = int(
+    (os.environ.get("AGENT_SUMMARY_FOLD_INPUT_CAP") or "").strip() or "1500"
+)
 
 SUMMARIZER_SYSTEM_PROMPT = (
     "You are summarizing a conversation between a user and a home management assistant. "

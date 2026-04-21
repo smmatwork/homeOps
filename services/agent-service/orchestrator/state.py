@@ -29,8 +29,12 @@ from orchestrator.intent import ExtractedIntent
 
 PENDING_CLARIFICATION_TTL_SECONDS = 300
 
+# Use .strip() before the `or` so whitespace-only env values fall back to the
+# default. Pre-refactor main.py used a helper (_env) that stripped internally;
+# os.environ.get returns "   " unchanged, and "   " is truthy, so a naive
+# `get(...) or default` skips the fallback and int() crashes.
 PENDING_CONFIRMATION_TTL_SECONDS = int(
-    os.environ.get("AGENT_PENDING_CONFIRMATION_TTL_SECONDS", "300") or "300"
+    (os.environ.get("AGENT_PENDING_CONFIRMATION_TTL_SECONDS") or "").strip() or "300"
 )
 
 # Max clarification back-and-forths before the orchestrator gives up and
