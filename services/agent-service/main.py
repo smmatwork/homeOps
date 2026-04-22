@@ -621,6 +621,15 @@ async def _resolve_chore_match_ids_via_rpc(
     )
 
 
+# _intent_to_tool_calls has moved to agents/chore_agent.py. The chore_agent
+# version takes edge_execute_tools as an injected parameter; this shim binds
+# _edge_execute_tools (looked up on main's namespace at call time) so both
+# of the following patches continue to work:
+#   patch.object(agent_main, "_intent_to_tool_calls", side_effect=...)
+#   patch.object(agent_main, "_edge_execute_tools", side_effect=...)
+from agents.chore_agent import _intent_to_tool_calls as _chore_intent_to_tool_calls
+
+
 async def _intent_to_tool_calls(
     extracted: ExtractedIntent,
     facts_section: str,
@@ -628,165 +637,13 @@ async def _intent_to_tool_calls(
     household_id: str = "",
     user_id: str = "",
 ) -> list[dict[str, Any]] | None:
-    """Convert extracted intent into deterministic tool calls.
-
-    Returns a list of tool calls, or None if we can't determine the calls
-    (in which case fall through to the LLM).
-    """
-    if not extracted.match_text:
-        return None
-
-    # Try registry-based tool call builder first
-    registry_result = await registry_intent_to_tool_calls(
-        extracted.action, extracted, facts_section,
-        household_id=household_id, user_id=user_id,
+    return await _chore_intent_to_tool_calls(
+        extracted,
+        facts_section,
+        edge_execute_tools=_edge_execute_tools,
+        household_id=household_id,
+        user_id=user_id,
     )
-    if registry_result is not None:
-        return registry_result
-
-    table = "chores" if extracted.entity == "chore" else (
-        "helpers" if extracted.entity == "helper" else None
-    )
-    if not table:
-        return None
-
-    if extracted.action in ("update", "rename", "change_cadence", "change_priority", "change_due", "add_note", "remove_field"):
-        # Resolve match_text → chore IDs. Preferred path: server-side RPC
-        # find_chores_matching_keywords scans the full corpus with no
-        # truncation. Fallback: FACTS substring scan, used only when the
-        # RPC isn't available (network error, unmigrated env, etc).
-        match_ids: list[tuple[str, str]] = []
-        chores_in_facts: list[dict[str, str]] = []
-        rpc_result: list[tuple[str, str]] | None = None
-        if table == "chores":
-            rpc_result = await _resolve_chore_match_ids_via_rpc(
-                household_id=household_id,
-                user_id=user_id,
-                match_text=extracted.match_text,
-                bulk=extracted.bulk,
-            )
-            if rpc_result is not None:
-                # RPC ran successfully; use its result (possibly empty).
-                match_ids = rpc_result
-                chores_in_facts = _parse_chores_from_facts(facts_section)
-            else:
-                # RPC unavailable → fall back to FACTS scan.
-                chores_in_facts = _parse_chores_from_facts(facts_section)
-                match_ids = await _resolve_chore_match_ids(
-                    extracted.match_text,
-                    chores_in_facts,
-                    bulk=extracted.bulk,
-                )
-
-        if table == "chores" and not match_ids and (chores_in_facts or rpc_result is not None):
-            # FACTS has the chore corpus but nothing matched → report cleanly
-            # instead of falling through to a db.select that would return
-            # zero rows and let the orchestrator falsely report "Done!".
-            keywords = _split_match_keywords(extracted.match_text) or [extracted.match_text]
-            return [
-                {
-                    "id": f"tc_extract_nomatch_{uuid.uuid4().hex[:8]}",
-                    "tool": "internal.no_match",
-                    "args": {
-                        "entity": "chore",
-                        "match_text": extracted.match_text,
-                        "keywords": keywords,
-                        "action": extracted.action,
-                        "update_field": extracted.update_field,
-                    },
-                    "reason": f"No chores matched '{extracted.match_text}' via substring or semantic search.",
-                }
-            ]
-
-        if match_ids and extracted.update_field:
-            # Direct update — we have the ID(s) from FACTS, skip the select step.
-            value = extracted.update_value
-            # Handle special values.
-            if extracted.update_field == "cadence" and isinstance(value, str):
-                value = value.lower().replace(" ", "_")
-            if extracted.update_field == "priority" and isinstance(value, str):
-                try:
-                    value = int(value)
-                except ValueError:
-                    value = {"high": 3, "medium": 2, "low": 1}.get(value.lower(), 2)
-
-            return [
-                {
-                    "id": f"tc_extract_{uuid.uuid4().hex[:8]}",
-                    "tool": "db.update",
-                    "args": {
-                        "table": table,
-                        "id": rec_id,
-                        "patch": {extracted.update_field: value},
-                    },
-                    "reason": f"{extracted.action}: set {extracted.update_field} = {json.dumps(value)} on '{rec_title}'",
-                }
-                for rec_id, rec_title in match_ids
-            ]
-
-        # Fallback: select first to find the record.
-        # Search across both title and description for chores so users can
-        # reference a chore by words that only appear in its description.
-        # The edge applyToolWhere ORs across all $regex fields, so passing
-        # both title and description gives a single ILIKE-OR query.
-        if table == "chores":
-            where_clause: dict[str, Any] = {
-                "title": {"$regex": extracted.match_text, "$options": "i"},
-                "description": {"$regex": extracted.match_text, "$options": "i"},
-            }
-            columns = "id,title,description,status,metadata"
-        else:
-            where_clause = {"name": {"$regex": extracted.match_text, "$options": "i"}}
-            columns = "id,name,type,phone"
-
-        return [
-            {
-                "id": f"tc_extract_select_{uuid.uuid4().hex[:8]}",
-                "tool": "db.select",
-                "args": {
-                    "table": table,
-                    "columns": columns,
-                    "where": where_clause,
-                    "limit": 10,
-                },
-                "reason": f"Find {extracted.entity} matching '{extracted.match_text}' for {extracted.action}.",
-            }
-        ]
-
-    if extracted.action == "reassign" and extracted.update_value:
-        if extracted.bulk:
-            # Bulk reassign — use the bulk RPC that handles multiple chores.
-            return [
-                {
-                    "id": f"tc_extract_bulk_reassign_{uuid.uuid4().hex[:8]}",
-                    "tool": "query.rpc",
-                    "args": {
-                        "name": "bulk_reassign_chores_by_query",
-                        "params": {
-                            "p_chore_query": extracted.match_text,
-                            "p_new_helper_query": extracted.update_value,
-                        },
-                    },
-                    "reason": f"Bulk reassign all '{extracted.match_text}' chores to '{extracted.update_value}'.",
-                }
-            ]
-        # Single chore reassign.
-        return [
-            {
-                "id": f"tc_extract_reassign_{uuid.uuid4().hex[:8]}",
-                "tool": "query.rpc",
-                "args": {
-                    "name": "reassign_chore_by_query",
-                    "params": {
-                        "p_chore_query": extracted.match_text,
-                        "p_new_helper_query": extracted.update_value,
-                    },
-                },
-                "reason": f"Reassign chore '{extracted.match_text}' to '{extracted.update_value}'.",
-            }
-        ]
-
-    return None
 
 
 # ── #1: FACTS injection ────────────────────────────────────────────────────
