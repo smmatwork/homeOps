@@ -255,102 +255,15 @@ def _init_langfuse() -> Any:
     return _langfuse_client
 
 
-def _extract_assignment_suggestions(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Extract a list of assignment suggestions from prior assistant messages.
-
-    Expected line shapes (examples):
-    - 1. Clean kitchen (2026-04-01T07:05:00+00:00) → Cook
-    - Clean kitchen (2026-04-01T07:05:00+00:00) -> Cook
-    """
-    last_text = ""
-    for m in reversed(messages or []):
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        if role not in ("assistant", "user"):
-            continue
-        if not isinstance(m.get("content"), str):
-            continue
-        txt = str(m.get("content") or "")
-        if "→" in txt or "->" in txt:
-            last_text = txt
-            break
-
-    if not last_text:
-        return []
-
-    out: list[dict[str, str]] = []
-    for raw_ln in last_text.splitlines():
-        ln = raw_ln.strip()
-        if not ln:
-            continue
-        ln = re.sub(r"^\s*[-*]\s+", "", ln)
-        ln = re.sub(r"^\s*\d+\s*[.)]\s+", "", ln)
-
-        # Prefer unicode arrow; fall back to ASCII.
-        if "→" in ln:
-            parts = ln.split("→", 1)
-        elif "->" in ln:
-            parts = ln.split("->", 1)
-        else:
-            continue
-        left = parts[0].strip()
-        helper_name = parts[1].strip()
-        # Drop any trailing helper metadata like "(helper_id: ...)".
-        helper_name = re.sub(r"\s*\(\s*helper_id\s*:\s*[^)]*\)\s*$", "", helper_name, flags=re.IGNORECASE).strip()
-        if not left or not helper_name:
-            continue
-
-        # Extract ISO-ish due_at from the first parenthesized timestamp.
-        m = re.search(r"\((\d{4}-\d{2}-\d{2}T[^)]+)\)", left)
-        if not m:
-            continue
-        due_at = (m.group(1) or "").strip()
-        title = left[: m.start()].strip()
-        if not title or not due_at:
-            continue
-
-        out.append({"title": title, "due_at": due_at, "helper_name": helper_name})
-
-    return out
-
-
-def _normalize_space_token(s: str) -> str:
-    return re.sub(r"[^a-z0-9\s]", " ", (s or "").lower()).strip()
-
-
-def _infer_spaces_from_user_text(options: list[str], user_text: str) -> list[str]:
-    text = _normalize_space_token(user_text)
-    if not text:
-        return []
-    opts = [(o, _normalize_space_token(o)) for o in (options or []) if isinstance(o, str) and o.strip()]
-    if not opts:
-        return []
-
-    # Exact/substring matches.
-    direct: list[str] = []
-    for raw, norm in opts:
-        if not norm:
-            continue
-        if norm in text or text in norm:
-            direct.append(raw)
-    if len(direct) == 1:
-        return direct
-
-    # Heuristic aliases for common bathrooms.
-    aliases = [
-        ("master", ["master", "primary", "main"]),
-        ("common", ["common", "hall", "shared"]),
-        ("guest", ["guest"]),
-        ("attached", ["attached", "ensuite", "en suite"]),
-    ]
-    for label, keys in aliases:
-        if any(k in text for k in keys):
-            matches = [raw for raw, norm in opts if label in norm]
-            if len(matches) == 1:
-                return matches
-
-    return []
+# _extract_assignment_suggestions / _normalize_space_token /
+# _infer_spaces_from_user_text moved to orchestrator/prompting.py (they're
+# only used by the prompting phase). Re-imported so the existing test
+# import `from main import _extract_assignment_suggestions` stays green.
+from orchestrator.prompting import (
+    _extract_assignment_suggestions,
+    _normalize_space_token,
+    _infer_spaces_from_user_text,
+)
 
 
 def _needs_helpers_fetch_override(text: str) -> bool:
@@ -759,108 +672,17 @@ class ChatRespondRequest(BaseModel):
     max_tokens: int = 900
 
 
-def _extract_clarification_block(messages: list[dict[str, str]]) -> dict[str, Any] | None:
-    # Edge injects this block when it detects ambiguous bathrooms/balconies.
-    # We parse it deterministically so the frontend can render a multi-select.
-    for m in messages:
-        if not isinstance(m, dict) or m.get("role") != "system":
-            continue
-        content = m.get("content")
-        if not isinstance(content, str) or "CLARIFICATION NEEDED (critical):" not in content:
-            continue
-
-        # Options are written as markdown-ish lines: "- Master Bathroom" etc.
-        lines = [ln.strip() for ln in content.splitlines()]
-        title = "Choose a space"
-        opts: list[str] = []
-        in_block = False
-        for ln in lines:
-            if ln.startswith("CLARIFICATION NEEDED"):
-                in_block = True
-                continue
-            if not in_block:
-                continue
-            if ln.startswith("Options:"):
-                continue
-            if ln.startswith("- "):
-                val = ln[2:].strip()
-                if val:
-                    opts.append(val)
-                continue
-            # The first non-empty line after the header is usually the question.
-            if title == "Choose a space" and ln:
-                title = ln
-
-        opts = [o for o in opts if isinstance(o, str) and o.strip()]
-        if not opts:
-            return None
-        return {
-            "kind": "space_selection",
-            "title": title,
-            "multi": True,
-            "options": opts,
-        }
-    return None
-
-
-def _infer_base_chore_title(messages: list[dict[str, str]]) -> str:
-    # Cheap heuristic: grab last meaningful user instruction.
-    for m in reversed(messages):
-        if not isinstance(m, dict) or m.get("role") != "user":
-            continue
-        c = m.get("content")
-        if not isinstance(c, str):
-            continue
-        t = c.strip()
-        if not t:
-            continue
-        lower = t.lower()
-        if "deep clean" in lower:
-            return "Deep clean"
-        if "clean" in lower:
-            return "Clean"
-        if "schedule" in lower or "book" in lower or "plan" in lower:
-            return "Scheduled chore"
-        return "Chore"
-    return "Chore"
-
-
-def _wants_schedule(messages: list[dict[str, str]]) -> bool:
-    # Look across recent user messages.
-    count = 0
-    for m in reversed(messages):
-        if count >= 6:
-            break
-        if not isinstance(m, dict) or m.get("role") != "user":
-            continue
-        count += 1
-        c = m.get("content")
-        if not isinstance(c, str):
-            continue
-        if re.search(r"\b(schedule|book|plan|set\s*(up)?|set\s+a\s+time)\b", c.lower()):
-            return True
-    return False
-
-
-def _has_explicit_datetime(messages: list[dict[str, str]]) -> bool:
-    count = 0
-    for m in reversed(messages):
-        if count >= 6:
-            break
-        if not isinstance(m, dict) or m.get("role") != "user":
-            continue
-        count += 1
-        c = m.get("content")
-        if not isinstance(c, str):
-            continue
-        t = c.lower()
-        if re.search(r"\b\d{1,2}:\d{2}\b", t):
-            return True
-        if re.search(r"\b\d{4}-\d{2}-\d{2}\b", t):
-            return True
-        if re.search(r"\b(today|tomorrow)\b", t):
-            return True
-    return False
+# _extract_clarification_block / _infer_base_chore_title / _wants_schedule /
+# _has_explicit_datetime all moved to orchestrator/prompting.py and are
+# invoked through handle_schedule_and_space / handle_apply_assignments.
+from orchestrator.prompting import (
+    _extract_clarification_block,
+    _infer_base_chore_title,
+    _wants_schedule,
+    _has_explicit_datetime,
+    handle_apply_assignments,
+    handle_schedule_and_space,
+)
 
 
 class ProposedAction(BaseModel):
@@ -1608,70 +1430,25 @@ async def chat_respond(
             return _lf_return({"ok": True, "text": safe_summary or "What would you like to do?"})
 
         # ── Orchestrator (manager loop) ─────────────────────────────────────────
-        # If Edge injected a CLARIFICATION NEEDED block, return a structured clarification
-        # payload that the frontend can render (multi-select list).
-        clarification_block = _extract_clarification_block(messages)
-
-        # Check if the latest user message is a structured clarification response.
+        # Extract the latest user message once for the downstream phases.
         latest_user_text = ""
         for m in reversed(messages):
             if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
                 latest_user_text = str(m.get("content") or "").strip()
                 break
 
-        # Deterministic shortcut: when the user confirms they want to apply a previously suggested
-        # set of chore assignments, parse the suggestion list and emit a single RPC tool call.
-        norm_user = re.sub(r"\s+", " ", (latest_user_text or "").strip().lower())
-        norm_user = re.sub(r"[^a-z\s]", "", norm_user).strip()
-        approval_phrases = (
-            "yes",
-            "y",
-            "yeah",
-            "yep",
-            "ok",
-            "okay",
-            "sure",
-            "go ahead",
-            "proceed",
-            "do it",
-        )
-        if norm_user in (
-            "create these assignments",
-            "crate these assignments",
-            "create these assignment",
-            "crate these assignment",
-            "create the assignments",
-            "crate the assignments",
-            "create assignments",
-            "apply these assignments",
-        ) or norm_user in approval_phrases:
-            assignments = _extract_assignment_suggestions(messages)
-            if not assignments:
-                if norm_user in approval_phrases:
-                    # Approval with no parseable assignment list; fall back to a safe clarification.
-                    return _lf_return({"ok": True, "text": "I can proceed, but I don't see an assignment list. Please paste the assignment list (Title (due_at) → Helper) and then say 'Create these assignments'."})
-                return _lf_return({"ok": True, "text": "Please paste the assignment list (Title (due_at) → Helper) and then say 'Create these assignments'."})
-            tool_calls = [
-                {
-                    "id": f"tc_{uuid.uuid4().hex}",
-                    "tool": "query.rpc",
-                    "args": {"name": "apply_chore_assignments", "params": {"p_assignments": assignments}},
-                    "reason": "Apply the suggested helper assignments to existing chores by matching title + due_at and resolving helper names.",
-                }
-            ]
-            payload = {"tool_calls": tool_calls}
-            _lf_span(
-                "orchestrator.deterministic.apply_assignments",
-                input={"assignment_count": len(assignments)},
-                output={"tool": "query.rpc", "name": "apply_chore_assignments"},
-            )
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
+        # ── apply_chore_assignments shortcut ──
+        # "yes" / "create these assignments" → parse the previously-suggested
+        # list and emit a single apply_chore_assignments RPC.
+        _apply_resp = handle_apply_assignments(messages, latest_user_text, lf_span=_lf_span)
+        if _apply_resp is not None:
+            return _lf_return({"ok": True, "text": _apply_resp})
 
         # Phase 6b deterministic actions (assign/complete/reassign) — all
-        # three regex-parsed shortcuts now live in ChoreAgent. Rebuild ctx
-        # here because last_user_text differs from `last_user` earlier in
-        # the handler (this is the `latest_user_text` variant computed
-        # after helper-agent dispatch).
+        # three regex-parsed shortcuts live in ChoreAgent. Rebuild ctx here
+        # because last_user_text differs from `last_user` earlier in the
+        # handler (this is the `latest_user_text` variant computed after
+        # helper-agent dispatch).
         _chore_ctx_b = AgentContext(
             messages=messages,
             model=model,
@@ -1698,97 +1475,10 @@ async def chat_respond(
             )
             return _lf_return({"ok": True, "text": _chore_action.text or ""})
 
-        clarification_response: dict[str, Any] | None = None
-        if latest_user_text and latest_user_text.strip().startswith("{"):
-            parsed_user_obj = _try_parse_json_obj(latest_user_text)
-            if parsed_user_obj and isinstance(parsed_user_obj.get("clarification_response"), dict):
-                clarification_response = parsed_user_obj.get("clarification_response")  # type: ignore
-
-        wants_schedule = _wants_schedule(messages)
-        has_datetime = _has_explicit_datetime(messages)
-
-        # If schedule was requested but no explicit datetime was given, ask for it as a structured clarification.
-        # We only do this for chore-ish intents so we don't interfere with unrelated chat.
-        if wants_schedule and not has_datetime:
-            # If the user already responded with a due_at, we can proceed.
-            due_at = None
-            if clarification_response and isinstance(clarification_response.get("due_at"), str):
-                due_at = str(clarification_response.get("due_at") or "").strip()
-            if not due_at:
-                payload = {
-                    "clarification": {
-                        "kind": "schedule",
-                        "title": "When should I schedule this?",
-                        "required": True,
-                    }
-                }
-                return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-        # If space selection is needed and we haven't received a response, request it via structured clarification.
-        selected_spaces: list[str] = []
-        if clarification_response:
-            raw_spaces = clarification_response.get("spaces")
-            if isinstance(raw_spaces, list):
-                selected_spaces = [str(s).strip() for s in raw_spaces if isinstance(s, (str, int, float)) and str(s).strip()]
-            elif isinstance(raw_spaces, str):
-                selected_spaces = [s.strip() for s in raw_spaces.split(",") if s.strip()]
-
-        if clarification_block and not selected_spaces:
-            # If the user already mentioned a specific space (e.g., "master bathroom"), auto-select it.
-            try:
-                options = clarification_block.get("options")
-                opts = options if isinstance(options, list) else []
-                inferred = _infer_spaces_from_user_text([str(o) for o in opts], latest_user_text)
-                if inferred:
-                    selected_spaces = inferred
-            except Exception:
-                selected_spaces = selected_spaces
-
-        if clarification_block and not selected_spaces:
-            payload = {
-                "clarification": {
-                    **clarification_block,
-                    "required": True,
-                }
-            }
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-        # If we have selected spaces (from clarification_response), emit deterministic chore tool calls.
-        if selected_spaces:
-            due_at = None
-            if clarification_response and isinstance(clarification_response.get("due_at"), str):
-                due_at = str(clarification_response.get("due_at") or "").strip()
-            if wants_schedule and not due_at:
-                payload = {
-                    "clarification": {
-                        "kind": "schedule",
-                        "title": "When should I schedule this?",
-                        "required": True,
-                    }
-                }
-                return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-            base_title = _infer_base_chore_title(messages)
-            tool_calls: list[dict[str, Any]] = []
-            for sp in selected_spaces:
-                tool_calls.append(
-                    {
-                        "id": f"tc_{uuid.uuid4().hex}",
-                        "tool": "db.insert",
-                        "args": {
-                            "table": "chores",
-                            "record": {
-                                "title": f"{base_title} {sp}" if sp else base_title,
-                                "status": "pending",
-                                "due_at": due_at,
-                                "metadata": {"space": sp},
-                            },
-                        },
-                        "reason": "Create a chore for the selected space.",
-                    }
-                )
-            payload = {"tool_calls": tool_calls}
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
+        # ── Schedule / space clarification + deterministic chore emission ──
+        _schedule_resp = handle_schedule_and_space(messages, latest_user_text)
+        if _schedule_resp is not None:
+            return _lf_return({"ok": True, "text": _schedule_resp})
 
         # Strict response contract (no heuristics): the model must output JSON ONLY.
         # This prevents chain-of-thought / meta drafting from ever being returned to the UI.
