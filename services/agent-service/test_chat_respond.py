@@ -523,6 +523,65 @@ class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
             "Sunita",
         )
 
+    def test_count_assigned_to_name_unique_match(self):
+        async def edge(payload, *, user_id):
+            return {
+                "ok": True,
+                "result": [{"match_type": "unique", "chore_count": 3, "helper_name": "Rajesh"}],
+            }
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="how many chores are assigned to Rajesh?",
+                conversation_id="test-conv-count-unique",
+            )
+
+        body = res.json()
+        self.assertEqual(body.get("text"), "There are 3 chores assigned to Rajesh.")
+
+    def test_count_assigned_to_name_none_match(self):
+        async def edge(payload, *, user_id):
+            return {"ok": True, "result": [{"match_type": "none"}]}
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="how many chores are assigned to Ghost?",
+                conversation_id="test-conv-count-none",
+            )
+
+        body = res.json()
+        self.assertIn("couldn't find a helper named 'Ghost'", body.get("text") or "")
+
+    def test_count_assigned_to_name_ambiguous_match(self):
+        async def edge(payload, *, user_id):
+            return {
+                "ok": True,
+                "result": [{
+                    "match_type": "ambiguous",
+                    "candidates": ["Raj", "Rajiv", "Rajesh"],
+                }],
+            }
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="how many chores are assigned to Raj?",
+                conversation_id="test-conv-count-ambig",
+            )
+
+        body = res.json()
+        text = body.get("text") or ""
+        self.assertIn("multiple helpers matching 'Raj'", text)
+        self.assertIn("Raj, Rajiv, Rajesh", text)
+
     def test_list_assigned_to_name_none_helper_message(self):
         """Branch: match_type == 'none_helper' — handler returns a
         'couldn't find a helper matching' message verbatim."""

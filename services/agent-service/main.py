@@ -2452,68 +2452,10 @@ async def chat_respond(
         except Exception:
             pass
 
-        # Deterministic analytics shortcut: "How many chores are assigned to <name>?"
-        # Prefer the curated read-only RPC count_chores_assigned_to which accepts p_helper_name.
-        try:
-            helper_name = _extract_count_assigned_to_name(messages)
-        except Exception:
-            helper_name = ""
-        if helper_name:
-            _lf_span(
-                "orchestrator.deterministic.count_chores_assigned_to",
-                input={"helper_name": helper_name},
-                output={"tool": "query.rpc", "name": "count_chores_assigned_to"},
-            )
-            
-            if not household_id:
-                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
-            if not user_id:
-                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
-
-            tc = {
-                "id": f"tc_{uuid.uuid4().hex}",
-                "tool": "query.rpc",
-                "args": {"name": "count_chores_assigned_to", "params": {"p_helper_name": helper_name}},
-                "reason": "Count chores assigned to the specified helper.",
-            }
-            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
-            if isinstance(out, dict) and out.get("ok") is False:
-                err = out.get("error")
-                msg = err.get("message") if isinstance(err, dict) else None
-                msg2 = str(msg).strip() if isinstance(msg, str) else ""
-                if msg2:
-                    return _lf_return({"ok": True, "text": f"Tool error while counting chores assigned to {helper_name}: {msg2}"})
-                return _lf_return({"ok": True, "text": f"Tool error while counting chores assigned to {helper_name}."})
-            
-            if isinstance(out, dict) and out.get("ok"):
-                res = out.get("result")
-                if isinstance(res, list) and len(res) > 0:
-                    res = res[0]
-                if isinstance(res, dict):
-                    match_type = res.get("match_type", "")
-                    count = res.get("chore_count", 0)
-                    h_name = res.get("helper_name", helper_name)
-                    
-                    if match_type == "unique":
-                        plural = "chore" if count == 1 else "chores"
-                        return _lf_return({"ok": True, "text": f"There {'is' if count == 1 else 'are'} {count} {plural} assigned to {h_name}."})
-                    elif match_type == "none":
-                        return _lf_return({"ok": True, "text": f"I couldn't find a helper named '{helper_name}' in your household."})
-                    elif match_type == "ambiguous":
-                        cands = res.get("candidates") or []
-                        cands_str = ", ".join(str(c) for c in cands if c)
-                        return _lf_return({"ok": True, "text": f"I found multiple helpers matching '{helper_name}': {cands_str}. Please be more specific."})
-                    
-                # Fallback if structure is unexpected
-                return _lf_return({"ok": True, "text": f"Result: {json.dumps(res)}"})
-            
-            return _lf_return({"ok": True, "text": f"Unexpected error while counting chores assigned to {helper_name}."})
-
-        # ChoreAgent analytics shortcut dispatch — this method currently
-        # absorbs only the _wants_unassigned_count handler; remaining 6
-        # shortcuts below still live in chat_respond and will migrate into
-        # ChoreAgent.try_analytics_shortcut() in follow-up commits. If the
-        # method returns kind="defer" we fall through to the legacy chain.
+        # ChoreAgent analytics shortcut dispatch — all 7 phase-6 analytics
+        # shortcuts now live inside ChoreAgent.try_analytics_shortcut.
+        # If the method returns kind="defer" we fall through to the rest
+        # of the chore-domain flow (phases 7+).
         _chore_ctx = AgentContext(
             messages=messages,
             model=model,

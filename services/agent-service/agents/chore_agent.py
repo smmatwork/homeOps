@@ -430,6 +430,83 @@ class ChoreAgent:
                 text="Here are the chores assigned to " + list_name + ":\n" + "\n".join(lines),
             )
 
+        # ── Shortcut: "How many chores are assigned to <name>?" ────────────
+        # Uses the curated read-only RPC count_chores_assigned_to which
+        # accepts p_helper_name and returns match_type=unique/none/ambiguous
+        # with a helper_name + chore_count (unique) or candidates[] (ambiguous).
+        try:
+            helper_name = _extract_count_assigned_to_name(messages)
+        except Exception:
+            helper_name = ""
+        if helper_name:
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "count_chores_assigned_to", "params": {"p_helper_name": helper_name}},
+                "reason": "Count chores assigned to the specified helper.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                suffix = f": {msg2}" if msg2 else "."
+                return AgentResult(
+                    kind="text",
+                    text=f"Tool error while counting chores assigned to {helper_name}{suffix}",
+                )
+
+            if isinstance(out, dict) and out.get("ok"):
+                res = out.get("result")
+                if isinstance(res, list) and len(res) > 0:
+                    res = res[0]
+                if isinstance(res, dict):
+                    match_type = res.get("match_type", "")
+                    count = res.get("chore_count", 0)
+                    h_name = res.get("helper_name", helper_name)
+
+                    if match_type == "unique":
+                        plural = "chore" if count == 1 else "chores"
+                        verb = "is" if count == 1 else "are"
+                        return AgentResult(
+                            kind="text",
+                            text=f"There {verb} {count} {plural} assigned to {h_name}.",
+                        )
+                    elif match_type == "none":
+                        return AgentResult(
+                            kind="text",
+                            text=f"I couldn't find a helper named '{helper_name}' in your household.",
+                        )
+                    elif match_type == "ambiguous":
+                        cands = res.get("candidates") or []
+                        cands_str = ", ".join(str(c) for c in cands if c)
+                        return AgentResult(
+                            kind="text",
+                            text=f"I found multiple helpers matching '{helper_name}': {cands_str}. Please be more specific.",
+                        )
+
+                # Fallback if structure is unexpected.
+                return AgentResult(kind="text", text=f"Result: {json.dumps(res)}")
+
+            return AgentResult(
+                kind="text",
+                text=f"Unexpected error while counting chores assigned to {helper_name}.",
+            )
+
         # No shortcut matched — defer to the next handler.
         return AgentResult(kind="defer")
 
