@@ -598,6 +598,13 @@ from agents.chore_agent import (
 )
 
 
+# _resolve_chore_match_ids_via_rpc has moved to agents/chore_agent.py.
+# The shim below binds _edge_execute_tools (looked up from main's namespace
+# at call time) so existing tests that patch.object(agent_main,
+# "_edge_execute_tools", ...) still intercept the RPC call.
+from agents.chore_agent import _resolve_chore_match_ids_via_rpc as _chore_resolve_match_ids_via_rpc
+
+
 async def _resolve_chore_match_ids_via_rpc(
     *,
     household_id: str,
@@ -605,78 +612,13 @@ async def _resolve_chore_match_ids_via_rpc(
     match_text: str,
     bulk: bool,
 ) -> list[tuple[str, str]] | None:
-    """Resolve match_text → chore IDs via the find_chores_matching_keywords RPC.
-
-    The RPC scans the FULL chore corpus (no truncation, no row limit) using
-    case-insensitive substring match against title and description. Replaces
-    the FACTS-based scan, which only saw the 30 most recent chores with
-    descriptions truncated to 60 chars.
-
-    Returns:
-        - A list of (id, title) tuples on success (possibly empty if no
-          matches were found in the database).
-        - None if the RPC could not be invoked (e.g. missing IDs, network
-          error, or the RPC returned malformed data) so the caller can fall
-          back to the FACTS scan as a safety net.
-    """
-    if not household_id or not user_id:
-        return None
-    keywords = _split_match_keywords(match_text)
-    if not keywords:
-        keywords = [match_text.strip()] if match_text.strip() else []
-    if not keywords:
-        return []
-
-    payload = {
-        "household_id": household_id,
-        "tool_call": {
-            "id": f"tc_resolve_kw_{uuid.uuid4().hex[:8]}",
-            "tool": "query.rpc",
-            "args": {
-                "name": "find_chores_matching_keywords",
-                "params": {"p_keywords": keywords},
-            },
-            "reason": f"Resolve match_text to chore ids via keywords: {keywords}",
-        },
-    }
-
-    try:
-        out = await _edge_execute_tools(payload, user_id=user_id)
-    except Exception as e:
-        logging.warning(f"find_chores_matching_keywords RPC failed: {e}")
-        return None
-
-    if not isinstance(out, dict) or out.get("ok") is False:
-        logging.warning(f"find_chores_matching_keywords RPC returned not-ok: {out}")
-        return None
-
-    # The edge function unwraps a single-row RPC result to a bare object
-    # (see supabase/functions/server/index.ts: `data.length === 1 ? data[0] : data`).
-    # Normalize both shapes into a list of dicts.
-    rows_raw = out.get("result")
-    if rows_raw is None:
-        rows_raw = out.get("data")
-    if isinstance(rows_raw, dict):
-        rows = [rows_raw]
-    elif isinstance(rows_raw, list):
-        rows = rows_raw
-    elif rows_raw is None:
-        rows = []
-    else:
-        logging.warning(f"find_chores_matching_keywords RPC returned unexpected shape: {out}")
-        return None
-
-    matches: list[tuple[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        cid = row.get("id")
-        title = row.get("title") or ""
-        if isinstance(cid, str) and cid.strip():
-            matches.append((cid, str(title)))
-    if not bulk and len(matches) > 1:
-        matches = matches[:1]
-    return matches
+    return await _chore_resolve_match_ids_via_rpc(
+        _edge_execute_tools,
+        household_id=household_id,
+        user_id=user_id,
+        match_text=match_text,
+        bulk=bulk,
+    )
 
 
 async def _intent_to_tool_calls(
