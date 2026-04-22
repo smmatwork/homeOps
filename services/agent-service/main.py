@@ -254,102 +254,6 @@ def _init_langfuse() -> Any:
     return _langfuse_client
 
 
-def _extract_assign_or_create_chore(latest_user_text: str) -> dict[str, str] | None:
-    t = (latest_user_text or "").strip()
-    if not t:
-        return None
-    lower = t.lower()
-    if "chore" not in lower or "assign" not in lower:
-        return None
-
-    # Common shape: "Assign a chore to the cook to make chick biryani tomorrow"
-    m = re.search(
-        r"\bassign\s+(?:a\s+)?chore\s+to\s+(?:the\s+)?(?P<helper>.+?)\s+to\s+(?P<task>.+?)\s*(?P<when>tomorrow|today)?\s*$",
-        lower,
-    )
-    if not m:
-        return None
-
-    helper = (m.group("helper") or "").strip()
-    task = (m.group("task") or "").strip()
-    when = (m.group("when") or "").strip()
-
-    # Trim trailing punctuation in helper/task.
-    helper = re.sub(r"[.?!,;:]+$", "", helper).strip()
-    task = re.sub(r"[.?!,;:]+$", "", task).strip()
-
-    if not helper or not task:
-        return None
-
-    # If the message contains "tomorrow"/"today" anywhere, treat that as the schedule hint.
-    if not when and re.search(r"\btomorrow\b", lower):
-        when = "tomorrow"
-    if not when and re.search(r"\btoday\b", lower):
-        when = "today"
-
-    return {"helper_query": helper, "task": task, "when": when}
-
-
-def _extract_complete_chore_by_query(latest_user_text: str) -> dict[str, str] | None:
-    t = (latest_user_text or "").strip()
-    if not t:
-        return None
-    lower = t.lower().strip()
-    # Examples:
-    # - "Mark clean kitchen as done"
-    # - "Complete the biryani chore"
-    m = re.search(r"\b(mark|complete|finish|done)\b\s+(?:the\s+)?(?P<q>.+?)\s*(?:chore\s*)?(?:as\s+done)?\s*$", lower)
-    if not m:
-        return None
-    q = (m.group("q") or "").strip()
-    q = re.sub(r"[.?!,;:]+$", "", q).strip()
-    if not q:
-        return None
-    when = ""
-    if re.search(r"\btomorrow\b", lower):
-        when = "tomorrow"
-    elif re.search(r"\btoday\b", lower):
-        when = "today"
-    return {"query": q, "when": when}
-
-
-def _extract_reassign_or_unassign_chore(latest_user_text: str) -> dict[str, str | None] | None:
-    t = (latest_user_text or "").strip()
-    if not t:
-        return None
-    lower = t.lower().strip()
-
-    # Reassign shape: "Assign/Move <chore> to <helper>".
-    m = re.search(
-        r"\b(assign|reassign|move)\b\s+(?:the\s+)?(?P<chore>.+?)\s+to\s+(?:the\s+)?(?P<helper>.+?)\s*$",
-        lower,
-    )
-    if m:
-        cq = re.sub(r"[.?!,;:]+$", "", (m.group("chore") or "").strip()).strip()
-        hq = re.sub(r"[.?!,;:]+$", "", (m.group("helper") or "").strip()).strip()
-        if cq and hq:
-            when = ""
-            if re.search(r"\btomorrow\b", lower):
-                when = "tomorrow"
-            elif re.search(r"\btoday\b", lower):
-                when = "today"
-            return {"chore_query": cq, "helper_query": hq, "when": when}
-
-    # Unassign shape: "Unassign <chore>".
-    m2 = re.search(r"\bunassign\b\s+(?:the\s+)?(?P<chore>.+?)\s*$", lower)
-    if m2:
-        cq = re.sub(r"[.?!,;:]+$", "", (m2.group("chore") or "").strip()).strip()
-        if cq:
-            when = ""
-            if re.search(r"\btomorrow\b", lower):
-                when = "tomorrow"
-            elif re.search(r"\btoday\b", lower):
-                when = "today"
-            return {"chore_query": cq, "helper_query": None, "when": when}
-
-    return None
-
-
 def _extract_assignment_suggestions(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Extract a list of assignment suggestions from prior assistant messages.
 
@@ -631,6 +535,9 @@ from agents.chore_agent import (
     _wants_assignee_breakdown,
     _extract_space_list_query,
     _extract_list_assigned_to_name,
+    _extract_assign_or_create_chore,
+    _extract_complete_chore_by_query,
+    _extract_reassign_or_unassign_chore,
 )
 
 
@@ -2583,95 +2490,36 @@ async def chat_respond(
             )
             return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
 
-        # Deterministic shortcut: "Assign a chore to <helper> to <task> tomorrow"
-        # The UI executes tool calls one at a time without feeding tool results back into the agent,
-        # so we use a single RPC that resolves helper + matches/creates chore server-side.
-        assign_req = _extract_assign_or_create_chore(latest_user_text)
-        if assign_req is not None:
+        # Phase 6b deterministic actions (assign/complete/reassign) — all
+        # three regex-parsed shortcuts now live in ChoreAgent. Rebuild ctx
+        # here because last_user_text differs from `last_user` earlier in
+        # the handler (this is the `latest_user_text` variant computed
+        # after helper-agent dispatch).
+        _chore_ctx_b = AgentContext(
+            messages=messages,
+            model=model,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            req_id=req_id,
+            conv_id=conv_id,
+            sess_id=sess_id,
+            user_id=user_id,
+            household_id=household_id,
+            pending_key=pending_key,
+            last_user_text=latest_user_text,
+            facts_section=facts_section,
+            is_onboarding=_early_onboarding,
+            chat_fn=_sarvam_chat,
+            edge_execute_tools=_edge_execute_tools,
+            lf_span=_lf_span,
+        )
+        _chore_action = await _get_chore_agent().try_deterministic_action(_chore_ctx_b)
+        if _chore_action.kind != "defer":
             _lf_span(
-                "orchestrator.deterministic.assign_or_create_chore",
-                input={
-                    "helper_query": str(assign_req.get("helper_query") or "")[:120],
-                    "task": str(assign_req.get("task") or "")[:240],
-                    "when": str(assign_req.get("when") or "")[:40],
-                },
-                output={"tool": "query.rpc", "name": "assign_or_create_chore"},
+                "orchestrator.deterministic.chore_agent_action",
+                output={"agent_result_kind": _chore_action.kind},
             )
-            tool_calls = [
-                {
-                    "id": f"tc_{uuid.uuid4().hex}",
-                    "tool": "query.rpc",
-                    "args": {
-                        "name": "assign_or_create_chore",
-                        "params": {
-                            "p_helper_query": assign_req.get("helper_query") or "",
-                            "p_task": assign_req.get("task") or "",
-                            "p_when": assign_req.get("when") or None,
-                        },
-                    },
-                    "reason": "Resolve helper, find a matching chore for the requested day/task (or create a new one), then assign it using the helper schedule default time.",
-                }
-            ]
-            payload = {"tool_calls": tool_calls}
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-        # Deterministic shortcut: complete a chore by title-ish query.
-        complete_req = _extract_complete_chore_by_query(latest_user_text)
-        if complete_req is not None:
-            _lf_span(
-                "orchestrator.deterministic.complete_chore_by_query",
-                input={
-                    "query": str(complete_req.get("query") or "")[:240],
-                    "when": str(complete_req.get("when") or "")[:40],
-                },
-                output={"tool": "query.rpc", "name": "complete_chore_by_query"},
-            )
-            tool_calls = [
-                {
-                    "id": f"tc_{uuid.uuid4().hex}",
-                    "tool": "query.rpc",
-                    "args": {
-                        "name": "complete_chore_by_query",
-                        "params": {
-                            "p_query": complete_req.get("query") or "",
-                            "p_when": complete_req.get("when") or None,
-                        },
-                    },
-                    "reason": "Find the best matching pending chore and mark it as done (or ask for clarification if ambiguous).",
-                }
-            ]
-            payload = {"tool_calls": tool_calls}
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-        # Deterministic shortcut: reassign or unassign a chore by title-ish query.
-        reassign_req = _extract_reassign_or_unassign_chore(latest_user_text)
-        if reassign_req is not None:
-            _lf_span(
-                "orchestrator.deterministic.reassign_chore_by_query",
-                input={
-                    "chore_query": str(reassign_req.get("chore_query") or "")[:240],
-                    "helper_query": str(reassign_req.get("helper_query") or "")[:120] if reassign_req.get("helper_query") is not None else None,
-                    "when": str(reassign_req.get("when") or "")[:40],
-                },
-                output={"tool": "query.rpc", "name": "reassign_chore_by_query"},
-            )
-            tool_calls = [
-                {
-                    "id": f"tc_{uuid.uuid4().hex}",
-                    "tool": "query.rpc",
-                    "args": {
-                        "name": "reassign_chore_by_query",
-                        "params": {
-                            "p_chore_query": str(reassign_req.get("chore_query") or ""),
-                            "p_helper_query": (str(reassign_req.get("helper_query")) if reassign_req.get("helper_query") is not None else None),
-                            "p_when": str(reassign_req.get("when") or "") or None,
-                        },
-                    },
-                    "reason": "Find the best matching pending chore and reassign/unassign it (or ask for clarification if ambiguous).",
-                }
-            ]
-            payload = {"tool_calls": tool_calls}
-            return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
+            return _lf_return({"ok": True, "text": _chore_action.text or ""})
 
         clarification_response: dict[str, Any] | None = None
         if latest_user_text and latest_user_text.strip().startswith("{"):

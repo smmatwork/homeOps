@@ -21,6 +21,7 @@ we're validating.
 
 import asyncio
 import os
+import re
 import sys
 import time
 import unittest
@@ -629,6 +630,89 @@ class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
             tc.get("args", {}).get("params", {}).get("p_filters", {}).get("status"),
             "pending",
         )
+
+
+class ChatRespondDeterministicActionTests(unittest.TestCase):
+    """Phase 6b: regex-parsed action shortcuts (assign/complete/reassign)
+    now dispatch through ChoreAgent.try_deterministic_action and return
+    a fenced JSON tool_calls payload for the UI to execute.
+
+    Unlike the analytics shortcuts (which execute the RPC themselves via
+    edge_execute_tools), these just emit the tool_call and let the client
+    round-trip it back to the edge on its own turn. Tests verify the
+    payload shape (markdown fence + single query.rpc tool_call with the
+    parsed params)."""
+
+    def setUp(self):
+        self.client = TestClient(agent_main.app)
+        orch_state.pending_confirmations.clear()
+        orch_state.pending_clarifications.clear()
+        orch_state.clarification_counts.clear()
+        agent_main._chore_agent_instance = None
+
+    def _parse_fenced_payload(self, text: str) -> dict[str, Any]:
+        import json as _json
+        m = re.search(r"```json\s*([\s\S]+?)\s*```", text, flags=re.IGNORECASE)
+        assert m, f"expected fenced json block in text, got: {text!r}"
+        return _json.loads(m.group(1))
+
+    def test_assign_or_create_chore_returns_tool_call(self):
+        with patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text), \
+             patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
+            res = _post_respond(
+                self.client,
+                user_text="Assign a chore to the cook to make chicken biryani tomorrow",
+                conversation_id="test-conv-assign-action",
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        payload = self._parse_fenced_payload(body.get("text") or "")
+        tool_calls = payload.get("tool_calls") or []
+        self.assertEqual(len(tool_calls), 1)
+        tc = tool_calls[0]
+        self.assertEqual(tc.get("tool"), "query.rpc")
+        self.assertEqual(tc.get("args", {}).get("name"), "assign_or_create_chore")
+        params = tc.get("args", {}).get("params", {})
+        self.assertEqual(params.get("p_helper_query"), "cook")
+        self.assertEqual(params.get("p_task"), "make chicken biryani")
+        self.assertEqual(params.get("p_when"), "tomorrow")
+
+    def test_complete_chore_returns_tool_call(self):
+        with patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text), \
+             patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
+            res = _post_respond(
+                self.client,
+                user_text="Mark clean kitchen as done",
+                conversation_id="test-conv-complete-action",
+            )
+
+        body = res.json()
+        payload = self._parse_fenced_payload(body.get("text") or "")
+        tc = (payload.get("tool_calls") or [{}])[0]
+        self.assertEqual(tc.get("args", {}).get("name"), "complete_chore_by_query")
+        self.assertEqual(tc.get("args", {}).get("params", {}).get("p_query"), "clean kitchen")
+
+    def test_reassign_chore_returns_tool_call(self):
+        with patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text), \
+             patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
+            res = _post_respond(
+                self.client,
+                user_text="Assign clean kitchen to rajesh",
+                conversation_id="test-conv-reassign-action",
+            )
+
+        body = res.json()
+        payload = self._parse_fenced_payload(body.get("text") or "")
+        tc = (payload.get("tool_calls") or [{}])[0]
+        self.assertEqual(tc.get("args", {}).get("name"), "reassign_chore_by_query")
+        params = tc.get("args", {}).get("params", {})
+        self.assertEqual(params.get("p_chore_query"), "clean kitchen")
+        self.assertEqual(params.get("p_helper_query"), "rajesh")
 
 
 class ChatRespondSummarizerPathTests(unittest.TestCase):

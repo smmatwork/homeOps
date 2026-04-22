@@ -510,6 +510,98 @@ class ChoreAgent:
         # No shortcut matched — defer to the next handler.
         return AgentResult(kind="defer")
 
+    async def try_deterministic_action(self, ctx: AgentContext) -> AgentResult:
+        """Phase 6b — regex-parsed action shortcuts that emit a single
+        query.rpc tool call for the UI to execute.
+
+        Different shape from try_analytics_shortcut: these don't execute
+        the edge themselves; they return the tool_call JSON payload
+        wrapped in a markdown-fenced code block, which the UI parses
+        and then dispatches back to the edge on a follow-up round-trip.
+
+        Returns kind="text" on a detector match (the text holds the
+        fenced JSON payload), kind="defer" otherwise. Three detectors,
+        checked in order:
+          1. Assign/create a chore      (assign_or_create_chore RPC)
+          2. Complete chore by query    (complete_chore_by_query RPC)
+          3. Reassign/unassign by query (reassign_chore_by_query RPC)
+        """
+        last_user_text = ctx.last_user_text
+
+        assign_req = _extract_assign_or_create_chore(last_user_text)
+        if assign_req is not None:
+            tool_calls = [
+                {
+                    "id": f"tc_{uuid.uuid4().hex}",
+                    "tool": "query.rpc",
+                    "args": {
+                        "name": "assign_or_create_chore",
+                        "params": {
+                            "p_helper_query": assign_req.get("helper_query") or "",
+                            "p_task": assign_req.get("task") or "",
+                            "p_when": assign_req.get("when") or None,
+                        },
+                    },
+                    "reason": "Resolve helper, find a matching chore for the requested day/task (or create a new one), then assign it using the helper schedule default time.",
+                }
+            ]
+            payload = {"tool_calls": tool_calls}
+            return AgentResult(
+                kind="text",
+                text="```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```",
+            )
+
+        complete_req = _extract_complete_chore_by_query(last_user_text)
+        if complete_req is not None:
+            tool_calls = [
+                {
+                    "id": f"tc_{uuid.uuid4().hex}",
+                    "tool": "query.rpc",
+                    "args": {
+                        "name": "complete_chore_by_query",
+                        "params": {
+                            "p_query": complete_req.get("query") or "",
+                            "p_when": complete_req.get("when") or None,
+                        },
+                    },
+                    "reason": "Find the best matching pending chore and mark it as done (or ask for clarification if ambiguous).",
+                }
+            ]
+            payload = {"tool_calls": tool_calls}
+            return AgentResult(
+                kind="text",
+                text="```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```",
+            )
+
+        reassign_req = _extract_reassign_or_unassign_chore(last_user_text)
+        if reassign_req is not None:
+            tool_calls = [
+                {
+                    "id": f"tc_{uuid.uuid4().hex}",
+                    "tool": "query.rpc",
+                    "args": {
+                        "name": "reassign_chore_by_query",
+                        "params": {
+                            "p_chore_query": str(reassign_req.get("chore_query") or ""),
+                            "p_helper_query": (
+                                str(reassign_req.get("helper_query"))
+                                if reassign_req.get("helper_query") is not None
+                                else None
+                            ),
+                            "p_when": str(reassign_req.get("when") or "") or None,
+                        },
+                    },
+                    "reason": "Find the best matching pending chore and reassign/unassign it (or ask for clarification if ambiguous).",
+                }
+            ]
+            payload = {"tool_calls": tool_calls}
+            return AgentResult(
+                kind="text",
+                text="```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```",
+            )
+
+        return AgentResult(kind="defer")
+
 
 # ── Chore-domain intent detectors ────────────────────────────────────────────
 # These functions inspect the most recent user message and return True/str
@@ -686,6 +778,110 @@ def _extract_list_assigned_to_name(messages: list[dict[str, Any]]) -> str:
     return after
 
 
+# ── Phase 6b action parsers ──────────────────────────────────────────────────
+# Regex-parsed one-shot shortcuts that emit a single query.rpc tool call for
+# the UI to execute (assign_or_create_chore, complete_chore_by_query,
+# reassign_chore_by_query). Separate from the analytics detectors above
+# because these return structured dicts the downstream handler turns into
+# tool_call params, not just bool/str.
+
+
+def _extract_assign_or_create_chore(latest_user_text: str) -> dict[str, str] | None:
+    t = (latest_user_text or "").strip()
+    if not t:
+        return None
+    lower = t.lower()
+    if "chore" not in lower or "assign" not in lower:
+        return None
+
+    # Common shape: "Assign a chore to the cook to make chick biryani tomorrow"
+    m = re.search(
+        r"\bassign\s+(?:a\s+)?chore\s+to\s+(?:the\s+)?(?P<helper>.+?)\s+to\s+(?P<task>.+?)\s*(?P<when>tomorrow|today)?\s*$",
+        lower,
+    )
+    if not m:
+        return None
+
+    helper = (m.group("helper") or "").strip()
+    task = (m.group("task") or "").strip()
+    when = (m.group("when") or "").strip()
+
+    # Trim trailing punctuation in helper/task.
+    helper = re.sub(r"[.?!,;:]+$", "", helper).strip()
+    task = re.sub(r"[.?!,;:]+$", "", task).strip()
+
+    if not helper or not task:
+        return None
+
+    # If the message contains "tomorrow"/"today" anywhere, treat that as the schedule hint.
+    if not when and re.search(r"\btomorrow\b", lower):
+        when = "tomorrow"
+    if not when and re.search(r"\btoday\b", lower):
+        when = "today"
+
+    return {"helper_query": helper, "task": task, "when": when}
+
+
+def _extract_complete_chore_by_query(latest_user_text: str) -> dict[str, str] | None:
+    t = (latest_user_text or "").strip()
+    if not t:
+        return None
+    lower = t.lower().strip()
+    # Examples:
+    # - "Mark clean kitchen as done"
+    # - "Complete the biryani chore"
+    m = re.search(r"\b(mark|complete|finish|done)\b\s+(?:the\s+)?(?P<q>.+?)\s*(?:chore\s*)?(?:as\s+done)?\s*$", lower)
+    if not m:
+        return None
+    q = (m.group("q") or "").strip()
+    q = re.sub(r"[.?!,;:]+$", "", q).strip()
+    if not q:
+        return None
+    when = ""
+    if re.search(r"\btomorrow\b", lower):
+        when = "tomorrow"
+    elif re.search(r"\btoday\b", lower):
+        when = "today"
+    return {"query": q, "when": when}
+
+
+def _extract_reassign_or_unassign_chore(latest_user_text: str) -> dict[str, str | None] | None:
+    t = (latest_user_text or "").strip()
+    if not t:
+        return None
+    lower = t.lower().strip()
+
+    # Reassign shape: "Assign/Move <chore> to <helper>".
+    m = re.search(
+        r"\b(assign|reassign|move)\b\s+(?:the\s+)?(?P<chore>.+?)\s+to\s+(?:the\s+)?(?P<helper>.+?)\s*$",
+        lower,
+    )
+    if m:
+        cq = re.sub(r"[.?!,;:]+$", "", (m.group("chore") or "").strip()).strip()
+        hq = re.sub(r"[.?!,;:]+$", "", (m.group("helper") or "").strip()).strip()
+        if cq and hq:
+            when = ""
+            if re.search(r"\btomorrow\b", lower):
+                when = "tomorrow"
+            elif re.search(r"\btoday\b", lower):
+                when = "today"
+            return {"chore_query": cq, "helper_query": hq, "when": when}
+
+    # Unassign shape: "Unassign <chore>".
+    m2 = re.search(r"\bunassign\b\s+(?:the\s+)?(?P<chore>.+?)\s*$", lower)
+    if m2:
+        cq = re.sub(r"[.?!,;:]+$", "", (m2.group("chore") or "").strip()).strip()
+        if cq:
+            when = ""
+            if re.search(r"\btomorrow\b", lower):
+                when = "tomorrow"
+            elif re.search(r"\btoday\b", lower):
+                when = "today"
+            return {"chore_query": cq, "helper_query": None, "when": when}
+
+    return None
+
+
 __all__ = [
     "ChoreAgent",
     "_wants_unassigned_count",
@@ -695,4 +891,7 @@ __all__ = [
     "_wants_assignee_breakdown",
     "_extract_space_list_query",
     "_extract_list_assigned_to_name",
+    "_extract_assign_or_create_chore",
+    "_extract_complete_chore_by_query",
+    "_extract_reassign_or_unassign_chore",
 ]
