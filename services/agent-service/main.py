@@ -1,46 +1,22 @@
-import os
 import json
-import re
-import uuid
 import math
-import asyncio
-import logging
-import contextvars
-from dataclasses import dataclass
-from datetime import date
+import os
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
 from typing import Any, Literal, Optional
-from urllib.parse import urlencode
-
-try:
-    from zoneinfo import ZoneInfo  # py3.9+
-except Exception:  # pragma: no cover
-    ZoneInfo = None  # type: ignore
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-from langgraph.graph import END, StateGraph
-
-# OpenTelemetry + Langfuse setup moved to kernel/observability.py.
-# trace is still imported directly here because chat_respond starts a span
+# trace is still imported here because chat_respond starts a span
 # (`tracer.start_as_current_span("agent.chat_respond")`) around the router
 # invocation — the span object is what the Langfuse trace builder keys off.
 from opentelemetry import trace  # type: ignore
 
 from kernel.observability import (
-    _log_request_id,
-    _log_conversation_id,
-    _log_trace_id,
-    _log_user_id,
-    _log_session_id,
-    _logger,
-    _init_otel,
-    _init_langfuse,
     install_observability,
+    observability_lifespan,
     build_chat_respond_langfuse,
 )
 
@@ -54,21 +30,16 @@ except Exception:
 
 
 # Generic LLM-output parsers and tool-call validators live in
-# orchestrator/parsing.py. Imported here under their legacy underscore-
-# prefixed names so every call site in this module + the existing test
-# suite (which imports some of these from main) keep working.
+# orchestrator/parsing.py. Imported under their legacy underscore-prefixed
+# names so the handful of call sites still in main.py plus test_helper_agent.py's
+# `from main import _looks_like_chain_of_thought` keep working.
 from orchestrator.parsing import (
-    _strip_think_blocks,
-    _looks_like_chain_of_thought,
     _deterministic_trim_chain_of_thought,
     _extract_json_candidate,
+    _looks_like_chain_of_thought,  # re-export for test_helper_agent.py
     _safe_json_loads,
     _try_parse_json_obj,
     _validate_tool_calls_list,
-    _actions_to_tool_calls,
-    _ensure_tool_reason,
-    _parse_strict_llm_payload,
-    _try_normalize_tool_calls_block,
     _contains_structured_tool_calls_payload,
 )
 from orchestrator.router import route_chat_turn
@@ -413,7 +384,11 @@ from runs.proposal import (
 from runs.time_parsing import _safe_str, _local_dt_to_utc_iso, _parse_event_time
 
 
-app = FastAPI(title="HomeOps Agent Service", version="0.1.0")
+app = FastAPI(
+    title="HomeOps Agent Service",
+    version="0.1.0",
+    lifespan=observability_lifespan,
+)
 
 
 @app.exception_handler(Exception)

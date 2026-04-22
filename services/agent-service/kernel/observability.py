@@ -28,8 +28,9 @@ import contextvars
 import json
 import logging
 import os
-from datetime import datetime
-from typing import Any, Awaitable, Callable
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
 
@@ -341,10 +342,29 @@ async def _otel_correlation_middleware(request: Request, call_next: MiddlewareCa
             pass
 
 
+@asynccontextmanager
+async def observability_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """FastAPI lifespan context manager.
+
+    Runs the one-shot Langfuse init at startup so enable/disable status
+    surfaces in the logs on first request. Pass into `FastAPI(lifespan=...)`
+    at app construction — replaces the deprecated `@app.on_event("startup")`
+    pattern.
+    """
+    try:
+        _init_langfuse()
+    except Exception:
+        pass
+    yield
+
+
 def install_observability(app: FastAPI) -> None:
-    """One-call observability setup: init OTel, instrument httpx + FastAPI,
-    register the correlation middleware, and add a startup hook that does
-    a one-shot Langfuse init so enable/disable status surfaces in the logs.
+    """Wire OTel + httpx/FastAPI instrumentation + correlation middleware
+    onto the given app.
+
+    Must be called after `FastAPI(lifespan=observability_lifespan)`, not
+    before — the lifespan handles startup events, this call handles the
+    middleware + span exporter setup.
     """
     _init_otel()
     try:
@@ -355,13 +375,6 @@ def install_observability(app: FastAPI) -> None:
         FastAPIInstrumentor.instrument_app(app)
     except Exception:
         pass
-
-    @app.on_event("startup")
-    async def _startup_observability_init() -> None:
-        try:
-            _init_langfuse()
-        except Exception:
-            pass
 
     app.middleware("http")(_otel_correlation_middleware)
 
@@ -465,7 +478,7 @@ def build_chat_respond_langfuse(
                     "id": incoming_trace_id,
                     "metadata": {
                         "service": "agent-service",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "version": _env("APP_VERSION", "unknown"),
                     },
                 })
@@ -518,6 +531,7 @@ __all__ = [
     "_init_otel",
     "_init_langfuse",
     "install_observability",
+    "observability_lifespan",
     "build_chat_respond_langfuse",
     "_otel_correlation_middleware",
 ]
