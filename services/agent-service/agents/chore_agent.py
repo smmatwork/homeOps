@@ -44,8 +44,13 @@ import httpx
 
 from agents.base import AgentContext, AgentResult, ChatFn, EdgeExecuteFn
 from intent_registry import intent_to_tool_calls as registry_intent_to_tool_calls
-from orchestrator.intent import ExtractedIntent
-from orchestrator.parsing import _try_parse_json_obj
+from orchestrator.intent import ExtractedIntent, extract_structured_intent
+from orchestrator.parsing import _try_parse_json_obj, _ensure_tool_reason
+from orchestrator.state import (
+    stash_clarification as _stash_clarification,
+    stash_pending_confirmation as _stash_pending_confirmation,
+    take_clarification as _take_clarification,
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -622,6 +627,207 @@ class ChoreAgent:
             )
 
         return AgentResult(kind="defer")
+
+    async def try_structured_extraction_flow(
+        self,
+        ctx: AgentContext,
+        intent_to_tool_calls_fn: Callable[..., Any] | None = None,
+    ) -> AgentResult:
+        """Phase 6d — pending-clarification substitution + structured extraction
+        → plan-confirm-execute.
+
+        Runs after the analytics/deterministic-action shortcuts but before the
+        main LLM orchestrator turn. Two stages:
+
+          1. **Pending clarification substitution.** If the previous turn asked
+             "which bathroom?" and stashed a `PendingClarification`, consume
+             the user's reply as the clarified value, re-run
+             `_intent_to_tool_calls` with the substituted intents, and stash a
+             `PendingConfirmation` so the next turn's plan-confirm branch can
+             execute. Returns a plan-preview `kind="text"`.
+
+          2. **Structured extraction → plan-confirm-execute.** If not
+             onboarding, call `extract_structured_intent` on the user message;
+             if it yields a list of ExtractedIntents, convert each to tool
+             calls via `_intent_to_tool_calls`. Handle three outcomes:
+
+               a. `internal.no_match` — stash a clarification and reply with a
+                  no-match-with-suggestions message.
+               b. Have a pending_key — stash the confirmation and return the
+                  plan preview (plan-confirm-execute).
+               c. No pending_key — execute immediately via
+                  `ctx.edge_execute_tools`, return the execution-result text.
+
+        Returns AgentResult(kind="defer") in all other cases (no stashed
+        clarification, is_onboarding, extraction yielded nothing, or the
+        extraction raised — consistent with the pre-migration behaviour of
+        falling through to the main LLM turn).
+        """
+        last_user_text = ctx.last_user_text
+        pending_key = ctx.pending_key
+        facts_section = ctx.facts_section
+        household_id = ctx.household_id
+        user_id = ctx.user_id
+
+        # Callers in main.py pass _intent_to_tool_calls (the shim that binds
+        # _edge_execute_tools from main's namespace) so patch.object(agent_main,
+        # "_intent_to_tool_calls", ...) intercepts this flow. The default
+        # invokes the chore_agent implementation directly — useful when a
+        # future orchestrator.router builds its own AgentContext.
+        async def _call_intent_to_tool_calls(sub: ExtractedIntent) -> list[dict[str, Any]] | None:
+            if intent_to_tool_calls_fn is not None:
+                return await intent_to_tool_calls_fn(
+                    sub, facts_section,
+                    household_id=household_id, user_id=user_id,
+                )
+            return await _intent_to_tool_calls(
+                sub, facts_section,
+                edge_execute_tools=ctx.edge_execute_tools,
+                household_id=household_id, user_id=user_id,
+            )
+
+        # ── Pending clarification context ─────────────────────────────
+        if pending_key and last_user_text:
+            clarification = _take_clarification(pending_key)
+            if clarification is not None:
+                clarified_text = last_user_text.strip()
+                # Strip common prefixes like "I meant", "it's", "the one called"
+                clarified_text = re.sub(
+                    r"^(?:i\s+meant?|it'?s|the\s+one\s+called|the\s+)\s*",
+                    "", clarified_text, flags=re.IGNORECASE,
+                ).strip() or clarified_text
+
+                updated_intents: list[ExtractedIntent] = []
+                for orig in clarification.original_intents:
+                    if orig.match_text.lower() == clarification.failed_match_text.lower():
+                        updated_intents.append(ExtractedIntent(
+                            action=orig.action,
+                            entity=orig.entity,
+                            match_text=clarified_text,
+                            match_field=orig.match_field,
+                            update_field=orig.update_field,
+                            update_value=orig.update_value,
+                            bulk=orig.bulk,
+                            confidence=orig.confidence,
+                        ))
+                    else:
+                        updated_intents.append(orig)
+
+                all_tcs: list[dict[str, Any]] = []
+                for sub in updated_intents:
+                    sub_tcs = await _call_intent_to_tool_calls(sub)
+                    if sub_tcs:
+                        all_tcs.extend(sub_tcs)
+
+                if all_tcs and pending_key:
+                    extracted_intent = updated_intents[0]
+                    pending_match_ids = _match_ids_from_tool_calls(
+                        [tc for tc in all_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
+                    )
+                    _stash_pending_confirmation(
+                        conversation_id=pending_key,
+                        intent=extracted_intent,
+                        match_ids=pending_match_ids,
+                        tool_calls=all_tcs,
+                    )
+                    preview = _format_plan_preview(updated_intents, pending_match_ids)
+                    return AgentResult(kind="text", text=preview)
+
+        # ── Structured intent extraction ─────────────────────────────
+        if ctx.is_onboarding:
+            return AgentResult(kind="defer")
+
+        try:
+            raw_intent = await extract_structured_intent(
+                last_user_text, ctx.model, ctx.chat_fn, facts_section
+            )
+
+            intent_list: list[ExtractedIntent] = []
+            if isinstance(raw_intent, list):
+                intent_list = raw_intent
+            elif raw_intent is not None:
+                intent_list = [raw_intent]
+
+            if not intent_list:
+                return AgentResult(kind="defer")
+
+            all_deterministic_tcs: list[dict[str, Any]] = []
+            extracted_intent = intent_list[0]
+
+            for sub_intent in intent_list:
+                ctx.lf_span(
+                    "orchestrator.extraction",
+                    input={"user_text": last_user_text[:200]},
+                    output={
+                        "action": sub_intent.action,
+                        "entity": sub_intent.entity,
+                        "match_text": sub_intent.match_text,
+                        "update_field": sub_intent.update_field,
+                        "update_value": sub_intent.update_value,
+                        "confidence": sub_intent.confidence,
+                    },
+                )
+                sub_tcs = await _call_intent_to_tool_calls(sub_intent)
+                if sub_tcs:
+                    all_deterministic_tcs.extend(sub_tcs)
+
+            deterministic_tcs = all_deterministic_tcs if all_deterministic_tcs else None
+            if not (deterministic_tcs and household_id and user_id):
+                return AgentResult(kind="defer")
+
+            no_match_tcs = [
+                tc for tc in deterministic_tcs
+                if isinstance(tc, dict) and tc.get("tool") == "internal.no_match"
+            ]
+            if no_match_tcs:
+                args = no_match_tcs[0].get("args") or {}
+                keywords = args.get("keywords") or [extracted_intent.match_text]
+                match_term = keywords[0] if keywords else extracted_intent.match_text
+                if pending_key:
+                    _stash_clarification(
+                        conversation_id=pending_key,
+                        original_intents=intent_list,
+                        failed_match_text=match_term,
+                        question_type="space_not_found",
+                    )
+                final = _format_no_match_with_suggestions(match_term, facts_section)
+                return AgentResult(kind="text", text=final)
+
+            # ── Plan-Confirm-Execute ──────────────────────────
+            if pending_key:
+                pending_match_ids = _match_ids_from_tool_calls(
+                    [tc for tc in deterministic_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
+                )
+                _stash_pending_confirmation(
+                    conversation_id=pending_key,
+                    intent=extracted_intent,
+                    match_ids=pending_match_ids,
+                    tool_calls=deterministic_tcs,
+                )
+                preview = _format_plan_preview(intent_list, pending_match_ids)
+                return AgentResult(kind="text", text=preview)
+
+            # No conv_id (can't stash) — execute immediately as fallback.
+            ctx.lf_span("orchestrator.extraction.execute", input={"tool_calls": deterministic_tcs})
+            results: list[dict[str, Any]] = []
+            for tc in deterministic_tcs:
+                tc = _ensure_tool_reason(tc, f"Extracted intent: {extracted_intent.action}")
+                try:
+                    out = await ctx.edge_execute_tools(
+                        {"household_id": household_id, "tool_call": tc},
+                        user_id=user_id,
+                    )
+                except Exception as e:
+                    out = {"ok": False, "error": str(e), "tool_call_id": tc.get("id")}
+                results.append(out)
+
+            final = _format_execution_result(
+                results, deterministic_tcs, intent_list, extracted_intent, facts=facts_section
+            )
+            return AgentResult(kind="text", text=final)
+        except Exception as e:
+            logging.warning(f"deterministic intent path failed, falling back to LLM: {e}")
+            return AgentResult(kind="defer")
 
 
 # ── Chore-domain intent detectors ────────────────────────────────────────────
@@ -1428,6 +1634,30 @@ async def _resolve_chore_match_ids(
     return list(matched.items())
 
 
+# ── Phase 6d helper: reconstruct match_ids from tool_calls ──────────────────
+
+
+def _match_ids_from_tool_calls(tcs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Reconstruct (chore_id, title) pairs from db.update tool calls.
+
+    _intent_to_tool_calls embeds the title in the reason field as
+    "on '<title>'", so parsing is deterministic and local. Used by the
+    plan-confirm-execute flow to show the user which chores are affected.
+    """
+    out: list[tuple[str, str]] = []
+    for tc in tcs:
+        if not isinstance(tc, dict) or tc.get("tool") != "db.update":
+            continue
+        args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+        cid = str(args.get("id") or "") if isinstance(args, dict) else ""
+        reason = str(tc.get("reason") or "")
+        m = re.search(r"on '([^']+)'", reason)
+        title = m.group(1) if m else (cid[:8] if cid else "chore")
+        if cid:
+            out.append((cid, title))
+    return out
+
+
 # ── Phase 6e (cont.) deterministic intent → tool_calls orchestrator ──────────
 # Consumes an ExtractedIntent (from orchestrator.intent.extract_structured_intent)
 # and produces a concrete tool_calls list, or None to mean "fall through to the
@@ -1961,6 +2191,7 @@ __all__ = [
     "_resolve_chore_match_ids",
     "_resolve_chore_match_ids_via_rpc",
     "_intent_to_tool_calls",
+    "_match_ids_from_tool_calls",
     "_validate_tool_calls",
     "_enforce_assignment_policy",
     "JUDGE_SYSTEM_PROMPT",
