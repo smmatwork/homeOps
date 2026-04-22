@@ -610,5 +610,44 @@ class AnalyticsDetectorEdgeCaseTests(unittest.TestCase):
         self.assertFalse(_wants_status_breakdown([]))
 
 
+class ExtractSpaceListQueryGuardTests(unittest.TestCase):
+    """Regression tests for the "chores in <space>" shortcut regex that
+    greedily matched natural-sentence "for" and captured entire user
+    questions as space names (root cause of the 2026-04-22 mis-route).
+    """
+
+    def _extract(self, text: str) -> str:
+        from agents.chore_agent import _extract_space_list_query
+        return _extract_space_list_query([{"role": "user", "content": text}])
+
+    def test_list_chores_in_space_still_matches(self):
+        self.assertEqual(self._extract("Show me the chores in Kitchen"), "Kitchen")
+        self.assertEqual(self._extract("list chores for Master Bathroom"), "Master Bathroom")
+
+    def test_reschedule_request_is_not_space_query(self):
+        # The bug report: user said "reschedule all lower priority tasks"
+        # → must not be treated as "chores in <space>"
+        self.assertEqual(
+            self._extract("for the chores for Roopa can we reschedule all lower priority tasks that are assigned weekly to bi-weekly frequency"),
+            "",
+        )
+
+    def test_reassign_request_is_not_space_query(self):
+        self.assertEqual(self._extract("reassign all the bathroom chores to Roopa"), "")
+
+    def test_update_request_is_not_space_query(self):
+        self.assertEqual(self._extract("change the description of kitchen chores to wipe counters"), "")
+
+    def test_clean_verb_in_message_disables_shortcut(self):
+        # "Schedule a cleaning" is an action, not a list query.
+        self.assertEqual(self._extract("schedule a deep clean for the living room chores"), "")
+
+    def test_no_chore_word_returns_empty(self):
+        self.assertEqual(self._extract("tell me in Kitchen"), "")
+
+    def test_empty_messages(self):
+        self.assertEqual(self._extract(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -362,10 +362,25 @@ class ChoreAgent:
                 {"household_id": ctx.household_id, "tool_call": tc},
                 user_id=ctx.user_id,
             )
+            # An RPC error looks identical to a "no rows" result downstream —
+            # both leave `result` as None / empty. Defer to the LLM on error
+            # so the user doesn't see a misleading "No chores found for X"
+            # when the server actually 500'd.
+            if isinstance(out, dict) and out.get("ok") is False:
+                logging.warning(
+                    "list_chores_enriched failed for space_query=%r: %s",
+                    space_q, out.get("error"),
+                )
+                return AgentResult(kind="defer")
             payload = out.get("result") if isinstance(out, dict) else None
             match_type = payload.get("match_type") if isinstance(payload, dict) else None
             if match_type == "ambiguous_space":
                 return AgentResult(kind="text", text="Which space did you mean?")
+            if match_type == "none_space":
+                return AgentResult(
+                    kind="text",
+                    text=f"I couldn't find a space called \"{space_q}\" in your home profile.",
+                )
             result = payload.get("result") if isinstance(payload, dict) else None
             chores = result if isinstance(result, list) else []
             if not chores:
@@ -956,7 +971,26 @@ def _wants_assignee_breakdown(messages: list[dict[str, Any]]) -> bool:
     return True
 
 
+_SPACE_LIST_ACTION_WORDS = (
+    "reschedule", "assign", "reassign", "unassign", "change",
+    "update", "delete", "remove", "complete", "finish", "mark",
+    "mop", "clean", "sweep", "move", "set", "make",
+)
+
+
 def _extract_space_list_query(messages: list[dict[str, Any]]) -> str:
+    """Detect a "chores/tasks in <space>" listing question.
+
+    Guards (to avoid greedy mis-extraction):
+
+      - the user message must mention chore/task (so generic "for" clauses
+        about unrelated topics don't trip it)
+      - the message must NOT contain action verbs like "reassign", "change",
+        "mop", etc. — those are action requests, not list queries, and
+        should flow through the structured-extraction path instead
+      - the space span is 3–30 chars of letters/digits/space/dash, and
+        stops at the first action-like keyword or sentence-internal verb
+    """
     last_user = ""
     for m in reversed(messages or []):
         if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
@@ -968,6 +1002,15 @@ def _extract_space_list_query(messages: list[dict[str, Any]]) -> str:
     lower = s.lower()
     if not ("task" in lower or "tasks" in lower or "chore" in lower or "chores" in lower):
         return ""
+
+    # Action verbs anywhere in the message mean this is an action request
+    # (not a "list me the chores in X" query). Defer to the LLM / structured
+    # extraction path. Use word-boundary checks so "clean" doesn't match
+    # the "Clean" of a chore title the user echoed back.
+    for word in _SPACE_LIST_ACTION_WORDS:
+        if re.search(rf"\b{word}\b", lower):
+            return ""
+
     m = re.search(r"\b(in|for)\s+([A-Za-z][A-Za-z0-9\s\-]{1,40})\b", s, flags=re.IGNORECASE)
     if not m:
         return ""
