@@ -634,85 +634,14 @@ async def _semantic_match_chores(
         return []
 
 
-def _resolve_supabase_rest() -> tuple[str, str]:
-    """Return (base_url, service_or_anon_key) for direct Supabase REST calls.
-
-    Mirrors the resolution logic in _build_facts_section so we can reuse it
-    from any helper without duplicating the URL/key fallback chain.
-    """
-    sb_url = (_env("SUPABASE_URL") or "").strip().rstrip("/")
-    if not sb_url:
-        edge = (_env("EDGE_BASE_URL") or "").strip()
-        if edge:
-            import urllib.parse
-            parsed = urllib.parse.urlparse(edge)
-            host = parsed.hostname or "127.0.0.1"
-            if host == "host.docker.internal":
-                host = "127.0.0.1"
-            port = parsed.port or 54321
-            sb_url = f"{parsed.scheme or 'http'}://{host}:{port}"
-        else:
-            sb_url = "http://127.0.0.1:54321"
-    sb_key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY") or _env("EDGE_BEARER_TOKEN") or ""
-    if not sb_key and "127.0.0.1" in sb_url:
-        sb_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
-    return sb_url, sb_key
-
-
-async def _fetch_chores_by_ids(
-    household_id: str,
-    chore_ids: list[str],
-) -> list[dict[str, str]]:
-    """Fetch (id, title, description) for the given chore IDs via Supabase REST.
-
-    Used by the sync-followup logic to check whether a chore's title and
-    description are now out of sync after an update. Returns an empty list
-    on any failure so the caller can fall back to skipping the prompt.
-    """
-    if not household_id or not chore_ids:
-        return []
-    sb_url, sb_key = _resolve_supabase_rest()
-    if not sb_key:
-        return []
-
-    quoted_ids = ",".join(f'"{cid}"' for cid in chore_ids if isinstance(cid, str) and cid)
-    if not quoted_ids:
-        return []
-
-    headers = {
-        "apikey": sb_key,
-        "Authorization": f"Bearer {sb_key}",
-        "Content-Type": "application/json",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            r = await client.get(
-                f"{sb_url}/rest/v1/chores",
-                params={
-                    "household_id": f"eq.{household_id}",
-                    "id": f"in.({quoted_ids})",
-                    "select": "id,title,description",
-                },
-                headers=headers,
-            )
-        if r.status_code != 200:
-            logging.warning(f"_fetch_chores_by_ids non-200: {r.status_code} {r.text[:200]}")
-            return []
-        data = r.json()
-        if not isinstance(data, list):
-            return []
-        out: list[dict[str, str]] = []
-        for row in data:
-            if isinstance(row, dict):
-                out.append({
-                    "id": str(row.get("id") or ""),
-                    "title": str(row.get("title") or ""),
-                    "description": str(row.get("description") or ""),
-                })
-        return out
-    except Exception as e:
-        logging.warning(f"_fetch_chores_by_ids failed: {e}")
-        return []
+# _resolve_supabase_rest + _fetch_chores_by_ids have moved to
+# agents/chore_agent.py. Re-imported under the legacy names so
+# chat_respond's sync-followup flow (and the wider call sites that go
+# direct to Supabase REST) keep working.
+from agents.chore_agent import (
+    _resolve_supabase_rest,
+    _fetch_chores_by_ids,
+)
 
 
 async def _resolve_chore_match_ids_via_rpc(
@@ -984,61 +913,10 @@ from agents.chore_agent import (
 
 
 # ── #5b: Silent auto-assignment graduation ─────────────────────────────────
-
-async def _check_graduation_status(
-    household_id: str,
-    chore_predicate_hash: str,
-    helper_id: str,
-) -> dict[str, Any]:
-    """Check if a (chore pattern, helper) combination has graduated to
-    silent auto-assignment. Returns {should_graduate, consecutive_approvals}.
-
-    Graduation threshold: 5 consecutive one_tap approvals without override.
-    """
-    sb_url = (_env("SUPABASE_URL") or "").strip().rstrip("/")
-    if not sb_url:
-        edge = (_env("EDGE_BASE_URL") or "").strip()
-        if edge:
-            import urllib.parse
-            parsed = urllib.parse.urlparse(edge)
-            host = parsed.hostname or "127.0.0.1"
-            if host == "host.docker.internal":
-                host = "127.0.0.1"
-            port = parsed.port or 54321
-            sb_url = f"{parsed.scheme or 'http'}://{host}:{port}"
-        else:
-            sb_url = "http://127.0.0.1:54321"
-    sb_key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY") or _env("EDGE_BEARER_TOKEN") or ""
-    if not sb_key and "127.0.0.1" in sb_url:
-        sb_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            r = await client.post(
-                f"{sb_url}/rest/v1/rpc/check_auto_assignment_graduation",
-                headers={
-                    "apikey": sb_key,
-                    "Authorization": f"Bearer {sb_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "p_household_id": household_id,
-                    "p_chore_predicate_hash": chore_predicate_hash,
-                    "p_helper_id": helper_id,
-                },
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list) and data:
-                    return data[0]
-                elif isinstance(data, dict):
-                    return data
-    except Exception as e:
-        logging.getLogger("homeops.agent_service").warning(
-            "Graduation check failed: %s", str(e)[:100]
-        )
-
-    return {"should_graduate": False, "consecutive_approvals": 0}
+# _check_graduation_status has moved to agents/chore_agent.py (one of three
+# helpers that talk direct Supabase REST instead of going through the edge
+# function). Re-imported here under the legacy name.
+from agents.chore_agent import _check_graduation_status
 
 
 # ── #6: LLM-as-Judge guardrail ─────────────────────────────────────────────
