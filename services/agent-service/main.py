@@ -561,57 +561,17 @@ from agents.chore_agent import (
 # both: split match_text into individual keywords, then resolve each via
 # substring-then-semantic search against the FACTS chore list.
 
-SEMANTIC_MATCH_THRESHOLD = float(_env("AGENT_SEMANTIC_MATCH_THRESHOLD", "0.55") or "0.55")
-SEMANTIC_MATCH_TOP_K = int(_env("AGENT_SEMANTIC_MATCH_TOP_K", "5") or "5")
-
-_KEYWORD_SPLIT_RE = re.compile(r"\s+(?:and|or)\s+|[,/&]", re.IGNORECASE)
-_KEYWORD_STOPWORDS = {
-    "the", "a", "an", "of", "for", "to", "in", "on", "with",
-    "this", "that", "those", "these", "any", "all", "some",
-}
-_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
-
-
-def _split_match_keywords(text: str) -> list[str]:
-    """Split match_text into individual searchable keywords.
-
-    Splits on conjunctions (and/or) and separators (comma, slash, ampersand),
-    strips leading articles, drops stopwords, dedupes case-insensitively
-    while preserving order.
-    """
-    if not text:
-        return []
-    parts = _KEYWORD_SPLIT_RE.split(text)
-    out: list[str] = []
-    seen: set[str] = set()
-    for p in parts:
-        s = p.strip().strip("\"'.,;:")
-        # Strip leading articles ("the toy" → "toy") so substring matches
-        # against actual chore content work.
-        s = _LEADING_ARTICLE_RE.sub("", s).strip()
-        if not s or s.lower() in _KEYWORD_STOPWORDS:
-            continue
-        key = s.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(s)
-    return out
-
-
-def _parse_chores_from_facts(facts_section: str) -> list[dict[str, str]]:
-    """Extract structured chore records (id/title/description) from FACTS."""
-    line_re = re.compile(
-        r'"(?P<title>[^"]+)"\s*\(id=(?P<id>[0-9a-f-]{36})[^)]*?(?:desc="(?P<desc>[^"]*)")?\)'
-    )
-    out: list[dict[str, str]] = []
-    for m in line_re.finditer(facts_section):
-        out.append({
-            "id": m.group("id"),
-            "title": m.group("title"),
-            "description": m.group("desc") or "",
-        })
-    return out
+# Match-resolution utilities (SEMANTIC_MATCH_* constants, _split_match_keywords,
+# _parse_chores_from_facts, _resolve_chore_match_ids) have moved to
+# agents/chore_agent.py. Re-imported under the same names for existing
+# call sites in main.py and test_helper_agent.py's direct imports.
+from agents.chore_agent import (
+    SEMANTIC_MATCH_THRESHOLD,
+    SEMANTIC_MATCH_TOP_K,
+    _split_match_keywords,
+    _parse_chores_from_facts,
+    _resolve_chore_match_ids,
+)
 
 
 async def _semantic_match_chores(
@@ -672,51 +632,6 @@ async def _semantic_match_chores(
     except Exception as e:
         logging.warning(f"semantic chore match: thread failed: {e}")
         return []
-
-
-async def _resolve_chore_match_ids(
-    match_text: str,
-    chores: list[dict[str, str]],
-    *,
-    bulk: bool,
-) -> list[tuple[str, str]]:
-    """Resolve match_text into chore (id, title) pairs via substring only.
-
-    Splits match_text into keywords and runs a case-insensitive substring
-    scan against title and description. Returns the union of hits.
-
-    We deliberately do NOT fall back to semantic search: short keywords
-    like "toy" or "clutter sweep" collapse onto generic "cleaning"
-    semantics in BGE-small and produce loose false positives (e.g.
-    "Sweep Deck area" scoring above threshold for "clutter sweep"). If
-    no substring hits, the caller reports "no matches" and asks the user
-    to clarify. _semantic_match_chores stays in place for future
-    conceptual-query use cases (e.g. explicit "anything about ...").
-    """
-    keywords = _split_match_keywords(match_text)
-    if not keywords:
-        keywords = [match_text.strip()] if match_text.strip() else []
-    if not keywords or not chores:
-        return []
-
-    matched: dict[str, str] = {}  # id -> title
-
-    for kw in keywords:
-        kw_lower = kw.lower()
-        hits_for_kw: list[tuple[str, str]] = []
-        for c in chores:
-            if kw_lower in c["title"].lower() or kw_lower in c["description"].lower():
-                hits_for_kw.append((c["id"], c["title"]))
-                if not bulk:
-                    break
-        if hits_for_kw:
-            for cid, ctitle in hits_for_kw:
-                matched.setdefault(cid, ctitle)
-            if not bulk:
-                # Single-target intent — first substring hit wins, stop.
-                return list(matched.items())
-
-    return list(matched.items())
 
 
 def _resolve_supabase_rest() -> tuple[str, str]:
