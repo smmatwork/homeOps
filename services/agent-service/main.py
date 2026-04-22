@@ -66,9 +66,7 @@ from orchestrator.parsing import (
     _try_normalize_tool_calls_block,
     _contains_structured_tool_calls_payload,
 )
-from orchestrator.confirmation import handle_pending_confirmation
-from orchestrator.prompt_builder import build_system_prompt_augmentation
-from orchestrator.llm_loop import run_llm_loop
+from orchestrator.router import route_chat_turn
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -1270,287 +1268,12 @@ async def chat_respond(
             _langfuse_flush(lf)
             return out
 
-        last_user = ""
-        for m in reversed(messages or []):
-            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-                last_user = str(m.get("content") or "").strip()
-                break
-
-        # ── Pending confirmation (must run BEFORE any agent routing) ──
-        # If the user is replying yes/no to a preview shown last turn,
-        # short-circuit and execute (or cancel). Runs at the very top of
-        # the request so neither the helper-agent nor orchestrator paths
-        # can intercept "yes" first.
-        pending_key = conv_id or (
-            f"fallback:{user_id}:{household_id}" if user_id and household_id else ""
-        )
-
-        # Initialize facts_section early so it's available in the confirmation
-        # handler (build it lazily only once we need it for formatting).
-        facts_section = ""
-
-        # ── Pending-confirmation branch (sync followup / accept / cancel) ──
-        # Full flow extracted to orchestrator/confirmation.py. The handler
-        # returns final response text to return, or None to signal "no
-        # pending stashed" OR "user typed freeform" — in which case we
-        # continue to the normal routing below.
-        _pending_response = await handle_pending_confirmation(
-            pending_key=pending_key,
-            last_user=last_user,
-            conv_id=conv_id,
-            user_id=user_id,
-            household_id=household_id,
-            facts_section=facts_section,
-            edge_execute_tools=_edge_execute_tools,
-            lf_span=_lf_span,
-        )
-        if _pending_response is not None:
-            return _lf_return({"ok": True, "text": _pending_response})
-
-        # Detect onboarding mode early — skip helper-agent routing entirely.
-        _early_onboarding = False
-        if messages and isinstance(messages[0], dict):
-            _sys0 = str(messages[0].get("content") or "")
-            _early_onboarding = "ONBOARDING FLOW" in _sys0
-
-        helper_intent = False if _early_onboarding else _get_helper_agent().is_intent(messages)
-        _lf_span(
-            "orchestrator.intent_route",
-            input={"last_user": last_user[:600], "onboarding": _early_onboarding},
-            output={"helper_intent": bool(helper_intent)},
-        )
-        try:
-            dbg_raw = (os.environ.get("DEBUG_INTENT_ROUTING") or "").strip().lower()
-            dbg = dbg_raw in {"1", "true", "yes", "y", "on"}
-            if dbg:
-                last_user = ""
-                for m in reversed(messages or []):
-                    if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-                        last_user = str(m.get("content") or "").strip()
-                        break
-                _lf_span(
-                    "orchestrator.intent_route",
-                    input={"last_user": last_user[:600]},
-                    output={"helper_intent": bool(helper_intent)},
-                )
-        except Exception:
-            pass
-        try:
-            dbg_raw = (os.environ.get("DEBUG_INTENT_ROUTING") or "").strip().lower()
-            dbg = dbg_raw in {"1", "true", "yes", "y", "on"}
-            if dbg:
-                last_user = ""
-                for m in reversed(messages or []):
-                    if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-                        last_user = str(m.get("content") or "").strip()
-                        break
-                print(
-                    "intent_routing_debug",
-                    json.dumps(
-                        {
-                            "request_id": req_id,
-                            "conversation_id": conv_id,
-                            "session_id": sess_id,
-                            "helper_intent": helper_intent,
-                            "last_user": last_user,
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-        except Exception:
-            pass
-
-        # ChoreAgent analytics shortcut dispatch — all 7 phase-6 analytics
-        # shortcuts now live inside ChoreAgent.try_analytics_shortcut.
-        # If the method returns kind="defer" we fall through to the rest
-        # of the chore-domain flow (phases 7+).
-        _chore_ctx = AgentContext(
-            messages=messages,
-            model=model,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            req_id=req_id,
-            conv_id=conv_id,
-            sess_id=sess_id,
-            user_id=user_id,
-            household_id=household_id,
-            pending_key=pending_key,
-            last_user_text=last_user,
-            facts_section=facts_section,
-            is_onboarding=_early_onboarding,
-            chat_fn=_sarvam_chat,
-            edge_execute_tools=_edge_execute_tools,
-            lf_span=_lf_span,
-        )
-        _chore_result = await _get_chore_agent().try_analytics_shortcut(_chore_ctx)
-        if _chore_result.kind != "defer":
-            _lf_span(
-                "orchestrator.deterministic.chore_agent_shortcut",
-                output={"agent_result_kind": _chore_result.kind},
-            )
-            return _lf_return({"ok": True, "text": _chore_result.text or ""})
-
-        if helper_intent:
-            _lf_span(
-                "orchestrator.route.helper_agent",
-                output={"routed": True},
-            )
-            helper = await _get_helper_agent().run(
-                messages=messages,
-                model=model,
-                temperature=req.temperature,
-                max_tokens=req.max_tokens,
-            )
-            if helper is None:
-                out = {"ok": True, "text": "I can help manage helpers. What exactly would you like to do?"}
-                return _lf_return(out)
-
-            clarifications = helper.get("clarifications")
-            tool_calls = helper.get("tool_calls")
-            user_summary = str(helper.get("user_summary") or "").strip()
-
-            if isinstance(clarifications, list) and clarifications:
-                lines: list[str] = []
-                for c in clarifications:
-                    if not isinstance(c, dict):
-                        continue
-                    q = c.get("question")
-                    if isinstance(q, str) and q.strip():
-                        lines.append(f"- {_deterministic_trim_chain_of_thought(q).strip()}")
-                    opts = c.get("options")
-                    if isinstance(opts, list) and opts:
-                        opts_clean = [str(o).strip() for o in opts if isinstance(o, str) and str(o).strip()]
-                        if opts_clean:
-                            lines.append("  Options: " + ", ".join(opts_clean))
-                return _lf_return({"ok": True, "text": _deterministic_trim_chain_of_thought("\n".join(lines).strip()) or "What would you like to do?"})
-
-            if isinstance(tool_calls, list) and tool_calls:
-                payload = {"tool_calls": tool_calls}
-                return _lf_return({"ok": True, "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"})
-
-            safe_summary = _deterministic_trim_chain_of_thought(user_summary or "")
-            return _lf_return({"ok": True, "text": safe_summary or "What would you like to do?"})
-
-        # ── Orchestrator (manager loop) ─────────────────────────────────────────
-        # Extract the latest user message once for the downstream phases.
-        latest_user_text = ""
-        for m in reversed(messages):
-            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-                latest_user_text = str(m.get("content") or "").strip()
-                break
-
-        # ── apply_chore_assignments shortcut ──
-        # "yes" / "create these assignments" → parse the previously-suggested
-        # list and emit a single apply_chore_assignments RPC.
-        _apply_resp = handle_apply_assignments(messages, latest_user_text, lf_span=_lf_span)
-        if _apply_resp is not None:
-            return _lf_return({"ok": True, "text": _apply_resp})
-
-        # Phase 6b deterministic actions (assign/complete/reassign) — all
-        # three regex-parsed shortcuts live in ChoreAgent. Rebuild ctx here
-        # because last_user_text differs from `last_user` earlier in the
-        # handler (this is the `latest_user_text` variant computed after
-        # helper-agent dispatch).
-        _chore_ctx_b = AgentContext(
-            messages=messages,
-            model=model,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            req_id=req_id,
-            conv_id=conv_id,
-            sess_id=sess_id,
-            user_id=user_id,
-            household_id=household_id,
-            pending_key=pending_key,
-            last_user_text=latest_user_text,
-            facts_section=facts_section,
-            is_onboarding=_early_onboarding,
-            chat_fn=_sarvam_chat,
-            edge_execute_tools=_edge_execute_tools,
-            lf_span=_lf_span,
-        )
-        _chore_action = await _get_chore_agent().try_deterministic_action(_chore_ctx_b)
-        if _chore_action.kind != "defer":
-            _lf_span(
-                "orchestrator.deterministic.chore_agent_action",
-                output={"agent_result_kind": _chore_action.kind},
-            )
-            return _lf_return({"ok": True, "text": _chore_action.text or ""})
-
-        # ── Schedule / space clarification + deterministic chore emission ──
-        _schedule_resp = handle_schedule_and_space(messages, latest_user_text)
-        if _schedule_resp is not None:
-            return _lf_return({"ok": True, "text": _schedule_resp})
-
-        # ── #1 + #2: FACTS injection + intent-specific instruction ────
-        # Strict JSON output contract + FACTS block + classify_intent tailor
-        # all moved to orchestrator/prompt_builder.py. The function takes the
-        # incoming messages and returns (augmented_messages, facts_section,
-        # intent_label) so downstream phases can validate IDs against FACTS
-        # and telemetry can log the intent.
-        last_user_text = ""
-        for m in reversed(messages or []):
-            if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
-                last_user_text = str(m["content"]).strip()
-                break
-
-        is_onboarding = False
-        if messages and isinstance(messages[0], dict):
-            sys_content = str(messages[0].get("content") or "")
-            is_onboarding = "ONBOARDING FLOW" in sys_content
-
-        messages, facts_section, intent = await build_system_prompt_augmentation(
-            messages,
-            household_id=household_id,
-            user_id=user_id,
-            last_user_text=last_user_text,
-            is_onboarding=is_onboarding,
-        )
-
-        _lf_span(
-            "orchestrator.hardening",
-            input={"intent": intent, "facts_len": len(facts_section)},
-        )
-
-        # ── Phase 6d: pending-clarification + structured-extraction + plan-confirm-execute ──
-        # The full flow (clarification substitution → re-run _intent_to_tool_calls
-        # → stash confirmation → plan preview, or structured extraction → no-match
-        # / plan-confirm-execute / immediate execute) now lives in
-        # ChoreAgent.try_structured_extraction_flow. We build an AgentContext
-        # so the method can reach ctx.chat_fn / ctx.edge_execute_tools / ctx.lf_span
-        # and propagate test patches.
-        _ctx_6d = AgentContext(
-            messages=messages,
-            model=model,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            req_id=req_id,
-            conv_id=conv_id,
-            sess_id=sess_id,
-            user_id=user_id,
-            household_id=household_id,
-            pending_key=pending_key,
-            last_user_text=last_user_text,
-            facts_section=facts_section,
-            is_onboarding=is_onboarding,
-            chat_fn=_sarvam_chat,
-            edge_execute_tools=_edge_execute_tools,
-            lf_span=_lf_span,
-        )
-        _6d_result = await _get_chore_agent().try_structured_extraction_flow(
-            _ctx_6d,
-            intent_to_tool_calls_fn=_intent_to_tool_calls,
-        )
-        if _6d_result.kind == "text":
-            return _lf_return({"ok": True, "text": _6d_result.text or ""})
-
-        # ── Main LLM orchestrator loop ──
-        # Everything from "prompt is augmented" through "final_text to
-        # return" lives in orchestrator.llm_loop. Takes the augmented
-        # messages, runs the initial LLM call + parse/repair/regen, the
-        # tool-call validation/execution/followup/judge branch, the
-        # final-text hallucination-override + guardrails + judge branch,
-        # and returns the final text string.
+        # All phase dispatch lives in orchestrator/router.py. The router
+        # expects the two langfuse callbacks and the injected domain deps
+        # (chat_fn, edge_execute_tools, judge_fn, summarize_history,
+        # needs_fetch_override, intent_to_tool_calls_fn) which this module
+        # holds via module-level names — test patches on agent_main._sarvam_chat
+        # etc. propagate because the names are resolved at call time here.
         def _needs_fetch_override(t: str) -> bool:
             return (
                 _needs_helpers_fetch_override(t)
@@ -1558,24 +1281,27 @@ async def chat_respond(
                 or _needs_spaces_fetch_override(t)
             )
 
-        _final_text = await run_llm_loop(
+        return await route_chat_turn(
             messages=messages,
             model=model,
             temperature=req.temperature,
             max_tokens=req.max_tokens,
+            req_id=req_id,
             conv_id=conv_id,
+            sess_id=sess_id,
             user_id=user_id,
             household_id=household_id,
-            last_user_text=last_user_text,
-            facts_section=facts_section,
+            lf_span=_lf_span,
+            lf_return=_lf_return,
+            get_chore_agent=_get_chore_agent,
+            get_helper_agent=_get_helper_agent,
             chat_fn=_sarvam_chat,
             edge_execute_tools=_edge_execute_tools,
             judge_fn=_judge_response,
             summarize_history=_summarize_history_if_needed,
+            intent_to_tool_calls_fn=_intent_to_tool_calls,
             needs_fetch_override=_needs_fetch_override,
-            lf_span=_lf_span,
         )
-        return _lf_return({"ok": True, "text": _final_text})
 
 
 async def _gemini_sanitize_final_only(text: str) -> str:
