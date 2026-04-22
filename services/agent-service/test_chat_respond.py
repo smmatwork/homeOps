@@ -376,6 +376,74 @@ class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
             True,
         )
 
+    def test_status_breakdown_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {
+                "ok": True,
+                "result": {"result": [
+                    {"status": "pending", "count": 4},
+                    {"status": "completed", "count": 2},
+                ]},
+            }
+
+        conv_id = "test-conv-analytics-status"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="show chores by status breakdown",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = body.get("text") or ""
+        self.assertIn("Chores by status", text)
+        self.assertIn("- pending: 4", text)
+        self.assertIn("- completed: 2", text)
+        self.assertEqual(len(edge_calls), 1)
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("args", {}).get("name"), "group_chores_by_status")
+
+    def test_assignee_breakdown_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {
+                "ok": True,
+                "result": {"result": [
+                    {"helper_name": "Rajesh", "count": 3},
+                    {"helper_name": "Sunita", "count": 5},
+                ]},
+            }
+
+        conv_id = "test-conv-analytics-assignee"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="show chores by helper",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = body.get("text") or ""
+        self.assertIn("Chores by assignee", text)
+        self.assertIn("- Rajesh: 3", text)
+        self.assertIn("- Sunita: 5", text)
+        self.assertEqual(len(edge_calls), 1)
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("args", {}).get("name"), "group_chores_by_assignee")
+
     def test_total_pending_count_routes_through_chore_agent(self):
         edge_calls: list[dict[str, Any]] = []
 

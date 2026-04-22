@@ -211,6 +211,99 @@ class ChoreAgent:
                 text="There was an error retrieving the total number of pending tasks. Please try again later.",
             )
 
+        # ── Shortcut: "Chores by status" ───────────────────────────────────
+        if _wants_status_breakdown(messages):
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "group_chores_by_status", "params": {"p_filters": {}}},
+                "reason": "Group chores by status.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                suffix = f": {msg2}" if msg2 else "."
+                return AgentResult(kind="text", text=f"Tool error while grouping chores by status{suffix}")
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            # Edge wraps RPC payload under out.result; RPC returns a row with key 'result' containing the list.
+            rows: list[Any] = []
+            if isinstance(payload, dict):
+                r0 = payload.get("result")
+                if isinstance(r0, list):
+                    rows = r0
+            elif isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                r0 = payload[0].get("result")
+                if isinstance(r0, list):
+                    rows = r0
+            if not rows:
+                return AgentResult(kind="text", text="No chores found.")
+            lines: list[str] = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                st = str(r.get("status") or "").strip()
+                cnt = r.get("count")
+                if st and isinstance(cnt, int):
+                    lines.append(f"- {st}: {cnt}")
+            if len(lines) <= 1:
+                return AgentResult(kind="text", text="Chores by status (only one status bucket found):\n" + "\n".join(lines))
+            return AgentResult(kind="text", text="Chores by status:\n" + "\n".join(lines))
+
+        # ── Shortcut: "Chores by assignee" ─────────────────────────────────
+        if _wants_assignee_breakdown(messages):
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "group_chores_by_assignee", "params": {"p_filters": {}}},
+                "reason": "Group chores by assignee.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+            payload = out.get("result") if isinstance(out, dict) else None
+            result = payload.get("result") if isinstance(payload, dict) else None
+            rows = result if isinstance(result, list) else []
+            if not rows:
+                return AgentResult(kind="text", text="No chores found.")
+            lines = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                name = str(r.get("helper_name") or r.get("helper") or "").strip()
+                cnt = r.get("count")
+                if name and isinstance(cnt, int):
+                    lines.append(f"- {name}: {cnt}")
+            return AgentResult(kind="text", text="Chores by assignee:\n" + "\n".join(lines))
+
         # No shortcut matched — defer to the next handler.
         return AgentResult(kind="defer")
 
