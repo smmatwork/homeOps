@@ -21,6 +21,7 @@ import { useI18n } from "../../i18n";
 import { useOnboardingSteps, type OnboardingStep } from "../../hooks/useOnboardingSteps";
 import type { OnboardingState } from "../../services/onboardingState";
 import { generateChoreRecommendations } from "../../services/choreGenerator";
+import { firstDueAtFromCadence } from "../../services/firstDueAt";
 import { OnboardingInlineForm } from "./OnboardingInlineForms";
 import { supabase } from "../../services/supabaseClient";
 import { executeToolCall } from "../../services/agentApi";
@@ -196,6 +197,7 @@ export function OnboardingPanel({
           const chores = Array.isArray(data.confirmed_chores) ? data.confirmed_chores : [];
           if (chores.length > 0 && householdId && accessToken) {
             for (const c of chores as Array<Record<string, unknown>>) {
+              const cadenceStr = typeof c.cadence === "string" ? c.cadence : "";
               await executeToolCall({
                 accessToken,
                 householdId,
@@ -209,6 +211,12 @@ export function OnboardingPanel({
                       title: c.title,
                       status: "pending",
                       priority: typeof c.priority === "number" ? c.priority : 1,
+                      // First-occurrence date derived from the recommended
+                      // cadence. Without this, chores land with due_at=null
+                      // and never appear in DayFocusView's today / tomorrow /
+                      // this-week buckets. The rollover/scheduler handle
+                      // subsequent occurrences.
+                      due_at: firstDueAtFromCadence(cadenceStr),
                       metadata: {
                         space: c.space,
                         cadence: c.cadence,

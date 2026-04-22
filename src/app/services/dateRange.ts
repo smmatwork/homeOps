@@ -7,7 +7,7 @@
  * ISO so the server respects the client's timezone.
  */
 
-export type DateRange = "today" | "tomorrow" | "this_week" | "all";
+export type DateRange = "today" | "tomorrow" | "this_week" | "all" | "unscheduled";
 
 export function startOfLocalDay(d: Date = new Date()): Date {
   const out = new Date(d);
@@ -94,6 +94,11 @@ export function rangeBounds(range: DateRange): { start: Date | null; end: Date |
       return { start: startOfTomorrow(), end: endOfTomorrow() };
     case "this_week":
       return { start: startOfThisWeek(), end: endOfThisWeek() };
+    case "unscheduled":
+      // Sentinel: unscheduled chores don't live on a calendar range. Callers
+      // using rangeBounds for date math should special-case this range
+      // upstream — it's here so the switch is exhaustive.
+      return { start: null, end: null };
     case "all":
     default:
       return { start: null, end: null };
@@ -102,6 +107,10 @@ export function rangeBounds(range: DateRange): { start: Date | null; end: Date |
 
 export function isoInRange(iso: string | null | undefined, range: DateRange): boolean {
   if (range === "all") return true;
+  if (range === "unscheduled") {
+    // Chores with no due_at — the "someday" bucket.
+    return !iso;
+  }
   if (!iso) return false;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return false;

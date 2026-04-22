@@ -195,7 +195,16 @@ export function DayFocusView(props: DayFocusViewProps) {
     setFilterHelper("");
   };
 
-  const rangeLabel = range === "today" ? "today" : range === "tomorrow" ? "tomorrow" : range === "this_week" ? "this week" : "all time";
+  const rangeLabel =
+    range === "today"
+      ? "today"
+      : range === "tomorrow"
+        ? "tomorrow"
+        : range === "this_week"
+          ? "this week"
+          : range === "unscheduled"
+            ? "unscheduled"
+            : "all time";
 
   return (
     <Stack spacing={2}>
@@ -209,6 +218,7 @@ export function DayFocusView(props: DayFocusViewProps) {
         <ToggleButton value="today">Today</ToggleButton>
         <ToggleButton value="tomorrow">Tomorrow</ToggleButton>
         <ToggleButton value="this_week">This week</ToggleButton>
+        <ToggleButton value="unscheduled">Unscheduled</ToggleButton>
         <ToggleButton value="all">All</ToggleButton>
       </ToggleButtonGroup>
 
@@ -362,7 +372,9 @@ export function DayFocusView(props: DayFocusViewProps) {
                   ? "Nothing due tomorrow yet."
                   : range === "this_week"
                     ? "Nothing due this week."
-                    : "No chores match these filters."}
+                    : range === "unscheduled"
+                      ? "All chores have a scheduled date."
+                      : "No chores match these filters."}
             </Typography>
           </CardContent>
         </Card>
