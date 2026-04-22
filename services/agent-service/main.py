@@ -25,19 +25,24 @@ from starlette.responses import JSONResponse
 
 from langgraph.graph import END, StateGraph
 
+# OpenTelemetry + Langfuse setup moved to kernel/observability.py.
+# trace is still imported directly here because chat_respond starts a span
+# (`tracer.start_as_current_span("agent.chat_respond")`) around the router
+# invocation — the span object is what the Langfuse trace builder keys off.
 from opentelemetry import trace  # type: ignore
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter  # type: ignore
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # type: ignore
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
-from opentelemetry.sdk.resources import Resource  # type: ignore
-from opentelemetry.sdk.trace import TracerProvider  # type: ignore
-from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
 
-try:
-    from langfuse import Langfuse  # type: ignore
-except Exception as e:  # pragma: no cover
-    Langfuse = None  # type: ignore
-    logging.warning(f"Langfuse import failed: {str(e)}")
+from kernel.observability import (
+    _log_request_id,
+    _log_conversation_id,
+    _log_trace_id,
+    _log_user_id,
+    _log_session_id,
+    _logger,
+    _init_otel,
+    _init_langfuse,
+    install_observability,
+    build_chat_respond_langfuse,
+)
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -77,182 +82,8 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     return v if v else default
 
 
-_log_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("homeops_request_id", default="")
-_log_conversation_id: contextvars.ContextVar[str] = contextvars.ContextVar("homeops_conversation_id", default="")
-_log_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("homeops_trace_id", default="")
-_log_user_id: contextvars.ContextVar[str] = contextvars.ContextVar("homeops_user_id", default="")
-_log_session_id: contextvars.ContextVar[str] = contextvars.ContextVar("homeops_session_id", default="")
-
-_old_factory = logging.getLogRecordFactory()
-def _record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-    record = _old_factory(*args, **kwargs)
-    try:
-        record.request_id = _log_request_id.get() or "-"
-    except Exception:
-        record.request_id = "-"
-    try:
-        record.conversation_id = _log_conversation_id.get() or "-"
-    except Exception:
-        record.conversation_id = "-"
-    try:
-        record.trace_id = _log_trace_id.get() or "-"
-    except Exception:
-        record.trace_id = "-"
-    try:
-        record.user_id = _log_user_id.get() or "-"
-    except Exception:
-        record.user_id = "-"
-    try:
-        record.session_id = _log_session_id.get() or "-"
-    except Exception:
-        record.session_id = "-"
-    return record
-logging.setLogRecordFactory(_record_factory)
-
-class _CorrelationFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            record.request_id = _log_request_id.get() or "-"
-        except Exception:
-            record.request_id = "-"
-        try:
-            record.conversation_id = _log_conversation_id.get() or "-"
-        except Exception:
-            record.conversation_id = "-"
-        try:
-            record.trace_id = _log_trace_id.get() or "-"
-        except Exception:
-            record.trace_id = "-"
-        try:
-            record.user_id = _log_user_id.get() or "-"
-        except Exception:
-            record.user_id = "-"
-        try:
-            record.session_id = _log_session_id.get() or "-"
-        except Exception:
-            record.session_id = "-"
-        return True
-
-
-_logger = logging.getLogger("homeops.agent_service")
-if not _logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s conversation_id=%(conversation_id)s session_id=%(session_id)s user_id=%(user_id)s trace_id=%(trace_id)s %(message)s"
-        )
-    )
-    handler.addFilter(_CorrelationFilter())
-    _logger.addHandler(handler)
-    _logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-_logger.propagate = True
-
-
-_otel_inited = False
-_langfuse_client: Any = None
-_langfuse_init_logged = False
-
-
-def _init_otel() -> None:
-    global _otel_inited
-    if _otel_inited:
-        return
-    _otel_inited = True
-
-    endpoint = _env("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if not endpoint:
-        return
-
-    headers_raw = (_env("OTEL_EXPORTER_OTLP_HEADERS", "") or "").strip()
-    headers: dict[str, str] = {}
-    for part in [p.strip() for p in headers_raw.split(",") if p.strip()]:
-        if "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if k and v:
-            headers[k] = v
-
-    service_name = (_env("OTEL_SERVICE_NAME", "homeops-agent-service") or "homeops-agent-service").strip()
-    env_name = (_env("HOMEOPS_ENV") or _env("ENVIRONMENT") or _env("DEPLOYMENT_ENVIRONMENT") or "").strip()
-    resource = Resource.create({"service.name": service_name, "deployment.environment": env_name})
-
-    provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers or None)
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
-
-
-def _init_langfuse() -> Any:
-    """
-    Initialize and return the Langfuse client with thread safety
-    
-    Returns:
-        Langfuse client instance or None if not configured
-    """
-    global _langfuse_client
-    global _langfuse_init_logged
-    if _langfuse_client is not None:
-        return _langfuse_client
-    if Langfuse is None:
-        _langfuse_client = None
-        if not _langfuse_init_logged:
-            _langfuse_init_logged = True
-            try:
-                _logger.info("langfuse_disabled", extra={"reason": "langfuse_package_missing"})
-            except Exception:
-                pass
-        return None
-
-    public_key = (_env("LANGFUSE_PUBLIC_KEY") or "").strip()
-    secret_key = (_env("LANGFUSE_SECRET_KEY") or "").strip()
-    host = (_env("LANGFUSE_HOST") or "https://cloud.langfuse.com").strip()
-    if not public_key or not secret_key:
-        _logger.debug("Langfuse disabled: Missing required API keys")
-        _langfuse_client = None
-        return None
-    if not host:
-        _logger.warning("Langfuse using default host URL")
-        host = "https://cloud.langfuse.com"
-        _langfuse_client = None
-        if not _langfuse_init_logged:
-            _langfuse_init_logged = True
-            try:
-                _logger.info(
-                    "langfuse_disabled",
-                    extra={
-                        "reason": "missing_keys",
-                        "has_public_key": bool(public_key),
-                        "has_secret_key": bool(secret_key),
-                        "host": host,
-                    },
-                )
-            except Exception:
-                pass
-        return None
-
-    kwargs: dict[str, Any] = {"public_key": public_key, "secret_key": secret_key}
-    if host:
-        kwargs["host"] = host
-    try:
-        _langfuse_client = Langfuse(**kwargs)
-        if not _langfuse_init_logged:
-            _logger.info(f"Langfuse initialized with endpoint: {host}")
-            _langfuse_init_logged = True
-            try:
-                _logger.info("langfuse_enabled", extra={"host": host or "(default)"})
-            except Exception:
-                pass
-    except Exception as e:
-        _langfuse_client = None
-        if not _langfuse_init_logged:
-            _langfuse_init_logged = True
-        try:
-            _logger.exception("langfuse_init_failed", extra={"host": host, "error": str(e)})
-        except Exception:
-            pass
-    return _langfuse_client
+# Correlation contextvars, log-record factory, logger, _init_otel, _init_langfuse
+# moved to kernel/observability.py and imported above.
 
 
 # _extract_assignment_suggestions / _normalize_space_token /
@@ -610,107 +441,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     except Exception:
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
-_init_otel()
-try:
-    HTTPXClientInstrumentor().instrument()
-except Exception:
-    pass
-try:
-    FastAPIInstrumentor.instrument_app(app)
-except Exception:
-    pass
-
-
-@app.on_event("startup")
-async def _startup_observability_init() -> None:
-    # Trigger Langfuse init once at startup so we can see enable/disable status in logs.
-    try:
-        _init_langfuse()
-    except Exception:
-        pass
-
-
-@app.middleware("http")
-async def _otel_correlation_middleware(request: Request, call_next):
-    token_req = None
-    token_conv = None
-    token_trace = None
-    token_user = None
-    token_sess = None
-    try:
-        span = trace.get_current_span()
-        if span is not None:
-            req_id = (request.headers.get("x-request-id") or "").strip()
-            conv_id = (request.headers.get("x-conversation-id") or "").strip()
-            sess_id = (request.headers.get("x-session-id") or "").strip()
-            user_id = (request.headers.get("x-user-id") or "").strip()
-            if req_id:
-                span.set_attribute("x-request-id", req_id)
-            if conv_id:
-                span.set_attribute("x-conversation-id", conv_id)
-            if sess_id:
-                span.set_attribute("x-session-id", sess_id)
-            if user_id:
-                span.set_attribute("enduser.id", user_id)
-
-            try:
-                token_req = _log_request_id.set(req_id)
-            except Exception:
-                token_req = None
-            try:
-                token_conv = _log_conversation_id.set(conv_id)
-            except Exception:
-                token_conv = None
-            try:
-                token_sess = _log_session_id.set(sess_id)
-            except Exception:
-                token_sess = None
-            try:
-                ctx = getattr(span, "get_span_context", lambda: None)()
-                tid = getattr(ctx, "trace_id", 0) or 0
-                trace_hex = f"{tid:032x}" if isinstance(tid, int) and tid else ""
-                token_trace = _log_trace_id.set(trace_hex)
-            except Exception:
-                token_trace = None
-            try:
-                token_user = _log_user_id.set(user_id)
-            except Exception:
-                token_user = None
-    except Exception:
-        pass
-    try:
-        resp = await call_next(request)
-        try:
-            _logger.info("http_request", extra={"method": request.method, "path": request.url.path, "status_code": getattr(resp, "status_code", None)})
-        except Exception:
-            pass
-        return resp
-    finally:
-        try:
-            if token_req is not None:
-                _log_request_id.reset(token_req)
-        except Exception:
-            pass
-        try:
-            if token_conv is not None:
-                _log_conversation_id.reset(token_conv)
-        except Exception:
-            pass
-        try:
-            if token_trace is not None:
-                _log_trace_id.reset(token_trace)
-        except Exception:
-            pass
-        try:
-            if token_user is not None:
-                _log_user_id.reset(token_user)
-        except Exception:
-            pass
-        try:
-            if token_sess is not None:
-                _log_session_id.reset(token_sess)
-        except Exception:
-            pass
+# OTel init, FastAPI/httpx instrumentation, correlation middleware, Langfuse
+# startup hook — all one call now.
+install_observability(app)
 
 # Simple marker to confirm which code version is running.
 print("agent_service_loaded", {"file": __file__})
@@ -896,43 +629,6 @@ async def chat_respond(
     model = (req.model or SARVAM_MODEL_DEFAULT or "sarvam-m").strip()
     messages = [m.model_dump() for m in req.messages]
 
-    def _langfuse_flush(lf_client: Any) -> None:
-        if lf_client is None:
-            return
-        try:
-            if hasattr(lf_client, "flush"):
-                lf_client.flush()
-        except Exception:
-            pass
-
-    def _langfuse_safe_update(trace_obj: Any, *, output: Any | None = None, status: str | None = None) -> None:
-        if trace_obj is None:
-            return
-        try:
-            if hasattr(trace_obj, "update"):
-                payload: dict[str, Any] = {}
-                if output is not None:
-                    payload["output"] = output
-                if status is not None:
-                    payload["status"] = status
-                if payload:
-                    trace_obj.update(**payload)
-        except Exception:
-            pass
-
-    def _langfuse_input_payload(msgs: list[dict[str, Any]]) -> dict[str, Any]:
-        # Keep payload small and avoid accidentally sending huge content blobs.
-        out_msgs: list[dict[str, Any]] = []
-        for m in msgs[-12:]:
-            if not isinstance(m, dict):
-                continue
-            role = str(m.get("role") or "")
-            content = m.get("content")
-            if not isinstance(content, str):
-                content = json.dumps(content, ensure_ascii=False) if content is not None else ""
-            out_msgs.append({"role": role, "content": content[:2000]})
-        return {"messages": out_msgs}
-
     with tracer.start_as_current_span("agent.chat_respond") as span:
         try:
             if req_id:
@@ -946,62 +642,18 @@ async def chat_respond(
         except Exception:
             pass
 
-        lf = None
-        lf_trace = None
-        try:
-            lf = _init_langfuse()
-            if lf is not None:
-                trace_kwargs: dict[str, Any] = {
-                    "name": "agent.chat_respond",
-                    "input": _langfuse_input_payload(messages),
-                    "metadata": {
-                        "conversation_id": conv_id,
-                        "session_id": sess_id,
-                        "request_id": req_id,
-                        "user_id": user_id,
-                        "model": model,
-                        "otel_trace_id": f"{span.get_span_context().trace_id:032x}",
-                    },
-                }
-                incoming_trace_id = (x_langfuse_trace_id or "").strip() if isinstance(x_langfuse_trace_id, str) else ""
-                if incoming_trace_id:
-                    # Enhanced trace linking with service context
-                    trace_kwargs.update({
-                        "id": incoming_trace_id,
-                        "metadata": {
-                            "service": "agent-service",
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "version": _env("APP_VERSION", "unknown")
-                        }
-                    })
-                try:
-                    lf_trace = lf.trace(**trace_kwargs)
-                except TypeError:
-                    trace_kwargs.pop("id", None)
-                    lf_trace = lf.trace(**trace_kwargs)
-        except Exception:
-            lf = None
-            lf_trace = None
-
-        lf_trace_id = None
-        try:
-            lf_trace_id = getattr(lf_trace, "id", None) if lf_trace is not None else None
-        except Exception:
-            lf_trace_id = None
-
-        def _lf_span(name: str, *, input: Any | None = None, output: Any | None = None, status_message: str | None = None, level: Any | None = None) -> None:
-            if lf is None or lf_trace_id is None:
-                return
-            try:
-                sp = lf.span(name=name, trace_id=str(lf_trace_id), input=input, level=level)
-                sp.end(output=output, status_message=status_message)
-            except Exception:
-                return
-
-        def _lf_return(out: dict[str, Any]) -> dict[str, Any]:
-            _langfuse_safe_update(lf_trace, output=out, status="success")
-            _langfuse_flush(lf)
-            return out
+        # Build the per-request Langfuse trace + the two closures the router
+        # uses to record spans and wrap the final response.
+        lf, lf_trace, _lf_span, _lf_return = build_chat_respond_langfuse(
+            otel_span=span,
+            messages=messages,
+            req_id=req_id,
+            conv_id=conv_id,
+            sess_id=sess_id,
+            user_id=user_id,
+            model=model,
+            x_langfuse_trace_id=x_langfuse_trace_id,
+        )
 
         # All phase dispatch lives in orchestrator/router.py. The router
         # expects the two langfuse callbacks and the injected domain deps
