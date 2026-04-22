@@ -108,23 +108,6 @@ from agents.chore_agent import (
 )
 
 
-def _helpers_select_tool_call_json(tool_call_id: str = "tc_helpers_1") -> str:
-    payload = {
-        "tool_calls": [
-            {
-                "id": tool_call_id,
-                "tool": "db.select",
-                "args": {
-                    "table": "helpers",
-                    "limit": 25,
-                },
-                "reason": "Fetch real helpers/cleaners from the database before listing any names.",
-            }
-        ]
-    }
-    return "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```"
-
-
 # Helper Agent has moved to agents/helper_agent.py. It's instantiated lazily
 # via _get_helper_agent() below so dependencies defined later in this file
 # (_sarvam_chat, _safe_json_loads, etc.) are resolvable at call time. The
@@ -458,89 +441,17 @@ def health() -> dict[str, Any]:
     }
 
 
-class DispatchInviteRequest(BaseModel):
-    helper_id: str
-    helper_name: str
-    helper_phone: str | None = None
-    channel_chain: list[str] = ["whatsapp", "sms", "web"]
-    magic_link_url: str
-    household_id: str
+# Helper/onboarding routes moved to routes/helpers.py. The router reads
+# _edge_execute_tools from main's namespace at call time, so test patches
+# on agent_main._edge_execute_tools still propagate through the endpoint.
+from routes import build_helpers_router
 
-
-@app.post("/v1/helpers/dispatch-invite")
-async def dispatch_invite(
-    req: DispatchInviteRequest,
-    x_agent_service_key: str | None = Header(default=None, alias="x-agent-service-key"),
-) -> dict[str, Any]:
-    """Send a helper onboarding magic link via the channel dispatcher."""
-    expected = (AGENT_SERVICE_KEY or "").strip()
-    provided = (x_agent_service_key or "").strip()
-    if not expected or not provided or provided != expected:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    from channel_dispatcher import ChannelDispatcher, OutreachIntent
-    from channel_adapters.whatsapp import WhatsAppAdapter
-    from channel_adapters.sms import SmsAdapter
-    from channel_adapters.web import WebAdapter
-
-    adapters = {
-        "whatsapp": WhatsAppAdapter(),
-        "sms": SmsAdapter(),
-        "web": WebAdapter(),
-    }
-
-    async def persist_attempt(attempt: Any) -> None:
-        """Best-effort persist to helper_outreach_attempts via edge."""
-        try:
-            await _edge_execute_tools(
-                {
-                    "household_id": req.household_id,
-                    "tool_call": {
-                        "id": f"outreach_{req.helper_id}_{int(__import__('time').time())}",
-                        "tool": "db.insert",
-                        "args": {
-                            "table": "helper_outreach_attempts",
-                            "record": {
-                                "helper_id": req.helper_id,
-                                "household_id": req.household_id,
-                                "channel": getattr(attempt, "channel", "unknown"),
-                                "status": getattr(attempt, "status", "unknown"),
-                                "intent": "stage2_onboarding",
-                            },
-                        },
-                        "reason": "Persist outreach attempt",
-                    },
-                },
-                user_id=None,
-            )
-        except Exception:
-            pass  # best-effort
-
-    dispatcher = ChannelDispatcher(adapters=adapters, persist_attempt=persist_attempt)
-
-    helper = {
-        "id": req.helper_id,
-        "name": req.helper_name,
-        "phone": req.helper_phone,
-        "channel_preferences": req.channel_chain,
-    }
-
-    invite = {
-        "magic_link_url": req.magic_link_url,
-        "household_id": req.household_id,
-    }
-
-    result = await dispatcher.initiate_outreach(
-        helper=helper,
-        intent=OutreachIntent.STAGE2_ONBOARDING,
-        invite=invite,
+app.include_router(
+    build_helpers_router(
+        agent_service_key=AGENT_SERVICE_KEY,
+        edge_execute_tools=_edge_execute_tools,
     )
-
-    return {
-        "ok": result.success,
-        "channel": result.final_channel,
-        "attempts": len(result.attempts),
-    }
+)
 
 
 class EmbedRequest(BaseModel):
