@@ -45,7 +45,11 @@ import httpx
 from agents.base import AgentContext, AgentResult, ChatFn, EdgeExecuteFn
 from intent_registry import intent_to_tool_calls as registry_intent_to_tool_calls
 from orchestrator.intent import ExtractedIntent, extract_structured_intent
-from orchestrator.parsing import _try_parse_json_obj, _ensure_tool_reason
+from orchestrator.parsing import (
+    _try_parse_json_obj,
+    _ensure_tool_reason,
+    _contains_structured_tool_calls_payload,
+)
 from orchestrator.state import (
     stash_clarification as _stash_clarification,
     stash_pending_confirmation as _stash_pending_confirmation,
@@ -2165,6 +2169,121 @@ async def _judge_response(
     return {"pass": False, "reason": "Judge could not parse response", "correction": "Review response manually"}
 
 
+# ── Phase 6f hallucination-override detectors ───────────────────────────────
+# Pure text → bool checks that fire when the LLM returns a final_text looking
+# like a hallucinated list of helpers / chores / spaces. Called from
+# orchestrator.llm_loop via a composed `needs_fetch_override` closure so the
+# module stays domain-agnostic.
+
+
+def _needs_helpers_fetch_override(text: str) -> bool:
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if _contains_structured_tool_calls_payload(text):
+        return False
+    # Guard against hallucinated helper lists like:
+    # "Here are available cleaners... 1) Rajesh ... 2) Sunita ..."
+    triggers = (
+        "here are available cleaners",
+        "here are available helpers",
+        "available cleaners",
+        "available helper",
+        "available helpers",
+        "available cleaner",
+        "here are the available cleaners",
+        "here are the available helpers",
+    )
+    if any(t in s for t in triggers):
+        return True
+    # Numbered lists that mention cleaners/helpers.
+    if ("cleaner" in s or "cleaners" in s or "helper" in s or "helpers" in s) and re.search(r"\n\s*\d+\.", s):
+        return True
+
+    # Hallucinated assignments like:
+    # "Rajesh will receive the task" / "Assigned to Sunita" etc.
+    # If the model is naming a person as the assignee without having fetched
+    # helpers, force a helpers select.
+    assignment_phrases = (
+        "will receive the task",
+        "will receive this task",
+        "will be assigned",
+        "assigned to",
+        "i'll assign",
+        "i will assign",
+        "i have assigned",
+        "scheduled with",
+    )
+    if any(p in s for p in assignment_phrases):
+        return True
+    # Proper-noun-ish name followed by an assignment phrase.
+    if re.search(r"\b[A-Z][a-z]{2,}\b.*\b(will\s+receive|assigned\s+to|scheduled\s+with)\b", text or ""):
+        return True
+    return False
+
+
+def _needs_chores_fetch_override(text: str) -> bool:
+    """Detect hallucinated chore lists in the assistant response.
+
+    Triggers when the model invents chore names/status without querying the DB.
+    """
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if _contains_structured_tool_calls_payload(text):
+        return False
+
+    chore_list_triggers = (
+        "here are your chores",
+        "here are your current chores",
+        "here are the chores",
+        "your current tasks include",
+        "you have the following chores",
+        "your chore list",
+        "here are the tasks",
+        "here is your task list",
+        "here is your schedule",
+        "your scheduled chores",
+    )
+    if any(t in s for t in chore_list_triggers):
+        return True
+    # Numbered list that mentions chores/tasks without a prior DB query
+    if ("chore" in s or "task" in s) and re.search(r"\n\s*\d+[\.\)]\s+\w", s):
+        return True
+    return False
+
+
+def _needs_spaces_fetch_override(text: str) -> bool:
+    """Detect hallucinated room/space names in the assistant response."""
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    if _contains_structured_tool_calls_payload(text):
+        return False
+
+    space_list_triggers = (
+        "your home has the following rooms",
+        "here are your rooms",
+        "rooms in your home",
+        "your spaces include",
+        "the rooms are",
+    )
+    if any(t in s for t in space_list_triggers):
+        return True
+    return False
+
+
+def _needs_fetch_override(text: str) -> bool:
+    """Composed OR of the three domain detectors — the hook the LLM loop
+    calls each turn to decide whether to force a tool-backed retry.
+    """
+    return (
+        _needs_helpers_fetch_override(text)
+        or _needs_chores_fetch_override(text)
+        or _needs_spaces_fetch_override(text)
+    )
+
+
 __all__ = [
     "ChoreAgent",
     "_wants_unassigned_count",
@@ -2199,4 +2318,8 @@ __all__ = [
     "_resolve_supabase_rest",
     "_fetch_chores_by_ids",
     "_check_graduation_status",
+    "_needs_helpers_fetch_override",
+    "_needs_chores_fetch_override",
+    "_needs_spaces_fetch_override",
+    "_needs_fetch_override",
 ]

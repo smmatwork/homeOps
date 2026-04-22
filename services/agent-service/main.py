@@ -266,100 +266,15 @@ from orchestrator.prompting import (
 )
 
 
-def _needs_helpers_fetch_override(text: str) -> bool:
-    s = (text or "").strip().lower()
-    if not s:
-        return False
-    if _contains_structured_tool_calls_payload(text):
-        return False
-    # Guard against hallucinated helper lists like:
-    # "Here are available cleaners... 1) Rajesh ... 2) Sunita ..."
-    triggers = (
-        "here are available cleaners",
-        "here are available helpers",
-        "available cleaners",
-        "available helper",
-        "available helpers",
-        "available cleaner",
-        "here are the available cleaners",
-        "here are the available helpers",
-    )
-    if any(t in s for t in triggers):
-        return True
-    # Also catch numbered lists that mention cleaners/helpers.
-    if ("cleaner" in s or "cleaners" in s or "helper" in s or "helpers" in s) and re.search(r"\n\s*\d+\.", s):
-        return True
-
-    # Catch hallucinated assignments like:
-    # "Rajesh will receive the task" / "Assigned to Sunita" etc.
-    # If the model is naming a person as the assignee without having fetched helpers, force a helpers select.
-    assignment_phrases = (
-        "will receive the task",
-        "will receive this task",
-        "will be assigned",
-        "assigned to",
-        "i'll assign",
-        "i will assign",
-        "i have assigned",
-        "scheduled with",
-    )
-    if any(p in s for p in assignment_phrases):
-        return True
-    # Proper-noun-ish name followed by an assignment phrase.
-    if re.search(r"\b[A-Z][a-z]{2,}\b.*\b(will\s+receive|assigned\s+to|scheduled\s+with)\b", text or ""):
-        return True
-    return False
-
-
-def _needs_chores_fetch_override(text: str) -> bool:
-    """Detect hallucinated chore lists in the assistant response.
-
-    Triggers when the model invents chore names/status without querying the DB.
-    """
-    s = (text or "").strip().lower()
-    if not s:
-        return False
-    if _contains_structured_tool_calls_payload(text):
-        return False
-
-    chore_list_triggers = (
-        "here are your chores",
-        "here are your current chores",
-        "here are the chores",
-        "your current tasks include",
-        "you have the following chores",
-        "your chore list",
-        "here are the tasks",
-        "here is your task list",
-        "here is your schedule",
-        "your scheduled chores",
-    )
-    if any(t in s for t in chore_list_triggers):
-        return True
-    # Numbered list that mentions chores/tasks without a prior DB query
-    if ("chore" in s or "task" in s) and re.search(r"\n\s*\d+[\.\)]\s+\w", s):
-        return True
-    return False
-
-
-def _needs_spaces_fetch_override(text: str) -> bool:
-    """Detect hallucinated room/space names in the assistant response."""
-    s = (text or "").strip().lower()
-    if not s:
-        return False
-    if _contains_structured_tool_calls_payload(text):
-        return False
-
-    space_list_triggers = (
-        "your home has the following rooms",
-        "here are your rooms",
-        "rooms in your home",
-        "your spaces include",
-        "the rooms are",
-    )
-    if any(t in s for t in space_list_triggers):
-        return True
-    return False
+# Phase 6f hallucination-override detectors moved to agents/chore_agent.py.
+# The composed `_needs_fetch_override` callable the llm_loop calls is also
+# there; main.py just re-imports it for the router call site below.
+from agents.chore_agent import (
+    _needs_helpers_fetch_override,
+    _needs_chores_fetch_override,
+    _needs_spaces_fetch_override,
+    _needs_fetch_override,
+)
 
 
 def _helpers_select_tool_call_json(tool_call_id: str = "tc_helpers_1") -> str:
@@ -1274,13 +1189,6 @@ async def chat_respond(
         # needs_fetch_override, intent_to_tool_calls_fn) which this module
         # holds via module-level names — test patches on agent_main._sarvam_chat
         # etc. propagate because the names are resolved at call time here.
-        def _needs_fetch_override(t: str) -> bool:
-            return (
-                _needs_helpers_fetch_override(t)
-                or _needs_chores_fetch_override(t)
-                or _needs_spaces_fetch_override(t)
-            )
-
         return await route_chat_turn(
             messages=messages,
             model=model,
