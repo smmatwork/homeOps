@@ -18,6 +18,8 @@ COPY channel_adapters/ ./channel_adapters/
 COPY orchestrator/ ./orchestrator/
 COPY agents/ ./agents/
 COPY kernel/ ./kernel/
+COPY routes/ ./routes/
+COPY runs/ ./runs/
 
 EXPOSE 8011
 
