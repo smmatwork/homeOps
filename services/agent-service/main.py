@@ -972,106 +972,15 @@ async def _intent_to_tool_calls(
 from orchestrator.facts import build_facts_section as _build_facts_section
 
 
-# ── #4: Output validation ──────────────────────────────────────────────────
-
-def _validate_tool_calls(
-    tool_calls: list[dict],
-    known_chore_ids: set[str],
-    known_helper_ids: set[str],
-    known_person_ids: set[str] | None = None,
-) -> list[str]:
-    """Validate tool call IDs against known entities. Returns list of error messages."""
-    errors: list[str] = []
-    _person_ids = known_person_ids or set()
-    for tc in tool_calls:
-        if not isinstance(tc, dict):
-            continue
-        tool = str(tc.get("tool", ""))
-        args = tc.get("args", {})
-        if not isinstance(args, dict):
-            continue
-
-        if tool == "db.update" and "id" in args:
-            rec_id = str(args["id"])
-            table = str(args.get("table", ""))
-            if table == "chores" and known_chore_ids and rec_id not in known_chore_ids:
-                errors.append(f"db.update references unknown chore id={rec_id}")
-            if table == "helpers" and known_helper_ids and rec_id not in known_helper_ids:
-                errors.append(f"db.update references unknown helper id={rec_id}")
-            # Validate person assignment: if patch sets assignee_person_id,
-            # verify it's a known household person
-            if table == "chores":
-                patch = args.get("patch", {})
-                if isinstance(patch, dict) and "assignee_person_id" in patch:
-                    pid = str(patch["assignee_person_id"])
-                    if pid and pid != "null" and _person_ids and pid not in _person_ids:
-                        errors.append(f"db.update assigns chore to unknown person id={pid}")
-
-        if tool == "db.delete" and "id" in args:
-            rec_id = str(args["id"])
-            table = str(args.get("table", ""))
-            if table == "chores" and known_chore_ids and rec_id not in known_chore_ids:
-                errors.append(f"db.delete references unknown chore id={rec_id}")
-
-        # Validate RPC calls that reference helper/person IDs
-        if tool == "query.rpc" and isinstance(args.get("params"), dict):
-            params = args["params"]
-            # Check p_helper_id in assignment RPCs
-            helper_id = params.get("p_helper_id")
-            if helper_id and known_helper_ids and str(helper_id) not in known_helper_ids:
-                # Could be a person ID — check that too
-                if not _person_ids or str(helper_id) not in _person_ids:
-                    errors.append(f"query.rpc references unknown helper/person id={helper_id}")
-
-    return errors
-
-
-# ── #5: Policy enforcement ────────────────────────────────────────────────
-
-def _enforce_assignment_policy(
-    tool_calls: list[dict],
-    facts_section: str = "",  # noqa: ARG001 — reserved for future rule lookups
-) -> list[str]:
-    """Enforce assignment policy rules on tool calls. Returns list of warnings.
-
-    Policy rules (from the system manifest):
-    1. Cannot assign to both helper_id and assignee_person_id simultaneously
-    2. Assignment operations must reference valid entities from FACTS
-    3. Consent defaults: helper vision capture defaults to opt-out
-    4. Override tracking: reassignments should use apply_assignment_decision RPC
-    """
-    warnings: list[str] = []
-
-    for tc in tool_calls:
-        if not isinstance(tc, dict):
-            continue
-        tool = str(tc.get("tool", ""))
-        args = tc.get("args", {})
-        if not isinstance(args, dict):
-            continue
-
-        # Rule 1: Cannot set both helper_id and assignee_person_id
-        if tool == "db.update":
-            patch = args.get("patch", {})
-            if isinstance(patch, dict):
-                has_helper = "helper_id" in patch and patch["helper_id"] is not None
-                has_person = "assignee_person_id" in patch and patch["assignee_person_id"] is not None
-                if has_helper and has_person:
-                    warnings.append(
-                        "Cannot assign a chore to both a helper and a person. "
-                        "Clear one before setting the other."
-                    )
-
-        # Rule 4: Prefer apply_assignment_decision RPC for assignments (O1 tracking)
-        if tool == "db.update" and str(args.get("table", "")) == "chores":
-            patch = args.get("patch", {})
-            if isinstance(patch, dict) and ("helper_id" in patch or "assignee_person_id" in patch):
-                # This is a direct chore assignment via db.update — warn that
-                # apply_assignment_decision RPC should be used for O1 tracking.
-                # Not blocking — some paths (like bulk assignment) use db.update.
-                pass  # Logged for future telemetry but not blocking
-
-    return warnings
+# ── #4: Output validation + #5: Policy enforcement ────────────────────────
+# _validate_tool_calls (ID/shape checks vs FACTS) and _enforce_assignment_policy
+# (helper-vs-person conflict rules) have moved to agents/chore_agent.py.
+# Re-imported here so chat_respond's post-LLM validation step keeps working
+# under the legacy names.
+from agents.chore_agent import (
+    _validate_tool_calls,
+    _enforce_assignment_policy,
+)
 
 
 # ── #5b: Silent auto-assignment graduation ─────────────────────────────────
