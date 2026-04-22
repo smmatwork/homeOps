@@ -31,7 +31,6 @@ alongside `HelperAgent` in the orchestrator router (Commit 5).
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -156,6 +155,60 @@ class ChoreAgent:
             return AgentResult(
                 kind="text",
                 text="There was an error retrieving the number of unassigned tasks. Please try again later.",
+            )
+
+        # ── Shortcut: "Total pending tasks?" ───────────────────────────────
+        if _wants_total_pending_count(messages):
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {
+                    "name": "count_chores",
+                    "params": {"p_filters": {"status": "pending"}},
+                },
+                "reason": "Count pending chores in the household.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+            if isinstance(out, dict) and out.get("ok") is False:
+                err = out.get("error")
+                msg = err.get("message") if isinstance(err, dict) else None
+                msg2 = str(msg).strip() if isinstance(msg, str) else ""
+                suffix = f": {msg2}" if msg2 else "."
+                return AgentResult(kind="text", text=f"Tool error while counting pending tasks{suffix}")
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            chore_count = None
+            if isinstance(payload, dict):
+                chore_count = payload.get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), dict):
+                    chore_count = (payload.get("result") or {}).get("chore_count")
+                if chore_count is None and isinstance(payload.get("result"), list) and payload.get("result"):
+                    first = payload.get("result")[0]
+                    if isinstance(first, dict):
+                        chore_count = first.get("chore_count")
+            elif isinstance(payload, list) and payload:
+                first = payload[0]
+                if isinstance(first, dict):
+                    chore_count = first.get("chore_count")
+            if isinstance(chore_count, int):
+                return AgentResult(kind="text", text=f"Total pending tasks: {chore_count}.")
+            return AgentResult(
+                kind="text",
+                text="There was an error retrieving the total number of pending tasks. Please try again later.",
             )
 
         # No shortcut matched — defer to the next handler.

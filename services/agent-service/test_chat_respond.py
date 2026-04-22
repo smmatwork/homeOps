@@ -376,6 +376,35 @@ class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
             True,
         )
 
+    def test_total_pending_count_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {"ok": True, "result": {"chore_count": 12}}
+
+        conv_id = "test-conv-analytics-pending"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="What's the total number of pending chores?",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        self.assertEqual(body.get("text"), "Total pending tasks: 12.")
+        self.assertEqual(len(edge_calls), 1)
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("args", {}).get("name"), "count_chores")
+        self.assertEqual(
+            tc.get("args", {}).get("params", {}).get("p_filters", {}).get("status"),
+            "pending",
+        )
+
 
 class ChatRespondSummarizerPathTests(unittest.TestCase):
     """Gap 1: exercise summarize_history_if_needed under char-budget pressure.

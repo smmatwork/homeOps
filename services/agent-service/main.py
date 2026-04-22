@@ -2540,51 +2540,6 @@ async def chat_respond(
             )
             return _lf_return({"ok": True, "text": _chore_result.text or ""})
 
-        if _wants_total_pending_count(messages):
-            if not household_id:
-                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
-            if not user_id:
-                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
-
-            tc = {
-                "id": f"tc_{uuid.uuid4().hex}",
-                "tool": "query.rpc",
-                "args": {
-                    "name": "count_chores",
-                    "params": {
-                        "p_filters": {"status": "pending"},
-                    },
-                },
-                "reason": "Count pending chores in the household.",
-            }
-            one_payload = {"household_id": household_id, "tool_call": tc}
-            out = await _edge_execute_tools(one_payload, user_id=user_id)
-            if isinstance(out, dict) and out.get("ok") is False:
-                err = out.get("error")
-                msg = err.get("message") if isinstance(err, dict) else None
-                msg2 = str(msg).strip() if isinstance(msg, str) else ""
-                if msg2:
-                    return _lf_return({"ok": True, "text": f"Tool error while counting pending tasks: {msg2}"})
-                return _lf_return({"ok": True, "text": "Tool error while counting pending tasks."})
-
-            payload = out.get("result") if isinstance(out, dict) else None
-            chore_count: Any = None
-            if isinstance(payload, dict):
-                chore_count = payload.get("chore_count")
-                if chore_count is None and isinstance(payload.get("result"), dict):
-                    chore_count = (payload.get("result") or {}).get("chore_count")
-                if chore_count is None and isinstance(payload.get("result"), list) and payload.get("result"):
-                    first = payload.get("result")[0]
-                    if isinstance(first, dict):
-                        chore_count = first.get("chore_count")
-            elif isinstance(payload, list) and payload:
-                first = payload[0]
-                if isinstance(first, dict):
-                    chore_count = first.get("chore_count")
-            if isinstance(chore_count, int):
-                return _lf_return({"ok": True, "text": f"Total pending tasks: {chore_count}."})
-            return _lf_return({"ok": True, "text": "There was an error retrieving the total number of pending tasks. Please try again later."})
-
         # Deterministic analytics shortcut (manager pattern): breakdown by status.
         if _wants_status_breakdown(messages):
             if not household_id:
