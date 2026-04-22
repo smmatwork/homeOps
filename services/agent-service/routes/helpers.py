@@ -54,15 +54,16 @@ def build_helpers_router(
         # Lazy imports — channel adapters pull in optional deps that may
         # not be available in every runtime (e.g. during tests).
         from channel_dispatcher import ChannelDispatcher, OutreachIntent
-        from channel_adapters.whatsapp import WhatsAppAdapter
-        from channel_adapters.sms import SmsAdapter
-        from channel_adapters.web import WebAdapter
+        from channel_adapters import (
+            WhatsAppTapAdapter,
+            build_default_registry,
+        )
 
-        adapters = {
-            "whatsapp": WhatsAppAdapter(),
-            "sms": SmsAdapter(),
-            "web": WebAdapter(),
-        }
+        # Build from the canonical registry (voice / sms / web / whatsapp_*
+        # variants) plus a "whatsapp" alias so the default client-supplied
+        # channel_chain=["whatsapp", "sms", "web"] resolves without forcing
+        # callers to pick a specific WhatsApp variant.
+        adapters = build_default_registry(whatsapp=WhatsAppTapAdapter())
 
         async def persist_attempt(attempt: Any) -> None:
             """Best-effort persist to helper_outreach_attempts via edge."""
