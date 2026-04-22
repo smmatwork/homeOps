@@ -13,8 +13,12 @@ main.py.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+
+from agents.base import AgentContext, AgentResult
+from orchestrator.parsing import _deterministic_trim_chain_of_thought
 
 
 ChatFn = Callable[..., Awaitable[Any]]
@@ -146,7 +150,76 @@ class HelperAgent:
             return True
         return False
 
-    async def run(
+    async def run(self, ctx: AgentContext) -> AgentResult:
+        """Execute the Helper Agent turn. Returns an AgentResult the router
+        can surface verbatim — one of:
+
+          - kind="text" with the fenced-JSON tool_calls payload (when the LLM
+            emits a helpers db.insert / db.update / ...)
+          - kind="text" with a bulleted clarifications block (when the LLM
+            needs more info and returns a clarifications list)
+          - kind="text" with the user_summary string (fallback / ack turn)
+          - kind="text" with a generic prompt if the LLM output was
+            unparseable even after a repair attempt
+          - kind="defer" if the Sarvam call itself produced nothing usable
+            (today only happens on infrastructure errors)
+
+        Mirrors ChoreAgent's method shape so the router has a uniform
+        AgentContext → AgentResult contract across both agents.
+        """
+        payload = await self._invoke(
+            messages=ctx.messages,
+            model=ctx.model,
+            temperature=ctx.temperature,
+            max_tokens=ctx.max_tokens,
+        )
+        if payload is None:
+            return AgentResult(
+                kind="text",
+                text="I can help manage helpers. What exactly would you like to do?",
+            )
+
+        clarifications = payload.get("clarifications")
+        tool_calls = payload.get("tool_calls")
+        user_summary = str(payload.get("user_summary") or "").strip()
+
+        if isinstance(clarifications, list) and clarifications:
+            lines: list[str] = []
+            for c in clarifications:
+                if not isinstance(c, dict):
+                    continue
+                q = c.get("question")
+                if isinstance(q, str) and q.strip():
+                    lines.append(f"- {_deterministic_trim_chain_of_thought(q).strip()}")
+                opts = c.get("options")
+                if isinstance(opts, list) and opts:
+                    opts_clean = [str(o).strip() for o in opts if isinstance(o, str) and str(o).strip()]
+                    if opts_clean:
+                        lines.append("  Options: " + ", ".join(opts_clean))
+            formatted = _deterministic_trim_chain_of_thought("\n".join(lines).strip())
+            return AgentResult(
+                kind="text",
+                text=formatted or "What would you like to do?",
+                metadata={"user_summary": user_summary},
+            )
+
+        if isinstance(tool_calls, list) and tool_calls:
+            fenced = "```json\n" + json.dumps({"tool_calls": tool_calls}, ensure_ascii=False, indent=2) + "\n```"
+            return AgentResult(
+                kind="text",
+                text=fenced,
+                tool_calls=list(tool_calls),
+                metadata={"user_summary": user_summary},
+            )
+
+        safe_summary = _deterministic_trim_chain_of_thought(user_summary or "")
+        return AgentResult(
+            kind="text",
+            text=safe_summary or "What would you like to do?",
+            metadata={"user_summary": user_summary},
+        )
+
+    async def _invoke(
         self,
         *,
         messages: list[dict[str, Any]],
@@ -154,9 +227,11 @@ class HelperAgent:
         temperature: float | None,
         max_tokens: int | None,
     ) -> dict[str, Any] | None:
-        """Execute the Helper Agent turn. Returns parsed payload dict
-        (clarifications, tool_calls, user_summary) or None if the LLM output
-        could not be parsed even after a single repair attempt.
+        """LLM call + strict parse + single repair retry. Returns the raw
+        parsed payload dict (clarifications / tool_calls / user_summary) or
+        None if even the repair failed. Kept separate from `run` so tests
+        and adjacent callers can exercise the parse path without constructing
+        an AgentContext.
         """
         sarvam_messages: list[dict[str, str]] = []
         if (

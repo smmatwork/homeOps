@@ -33,7 +33,6 @@ from typing import Any, Awaitable, Callable
 from agents import AgentContext
 from orchestrator.confirmation import handle_pending_confirmation
 from orchestrator.llm_loop import run_llm_loop
-from orchestrator.parsing import _deterministic_trim_chain_of_thought
 from orchestrator.prompt_builder import build_system_prompt_augmentation
 from orchestrator.prompting import handle_apply_assignments, handle_schedule_and_space
 
@@ -174,46 +173,27 @@ async def route_chat_turn(
     # ── Phase 3: helper agent ──
     if helper_intent:
         lf_span("orchestrator.route.helper_agent", output={"routed": True})
-        helper = await get_helper_agent().run(
+        helper_ctx = AgentContext(
             messages=messages,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            req_id=req_id,
+            conv_id=conv_id,
+            sess_id=sess_id,
+            user_id=user_id,
+            household_id=household_id,
+            pending_key=pending_key,
+            last_user_text=last_user,
+            facts_section=facts_section,
+            is_onboarding=early_onboarding,
+            chat_fn=chat_fn,
+            edge_execute_tools=edge_execute_tools,
+            lf_span=lf_span,
         )
-        if helper is None:
-            return lf_return({"ok": True, "text": "I can help manage helpers. What exactly would you like to do?"})
-
-        clarifications = helper.get("clarifications")
-        tool_calls = helper.get("tool_calls")
-        user_summary = str(helper.get("user_summary") or "").strip()
-
-        if isinstance(clarifications, list) and clarifications:
-            lines: list[str] = []
-            for c in clarifications:
-                if not isinstance(c, dict):
-                    continue
-                q = c.get("question")
-                if isinstance(q, str) and q.strip():
-                    lines.append(f"- {_deterministic_trim_chain_of_thought(q).strip()}")
-                opts = c.get("options")
-                if isinstance(opts, list) and opts:
-                    opts_clean = [str(o).strip() for o in opts if isinstance(o, str) and str(o).strip()]
-                    if opts_clean:
-                        lines.append("  Options: " + ", ".join(opts_clean))
-            return lf_return({
-                "ok": True,
-                "text": _deterministic_trim_chain_of_thought("\n".join(lines).strip()) or "What would you like to do?",
-            })
-
-        if isinstance(tool_calls, list) and tool_calls:
-            payload = {"tool_calls": tool_calls}
-            return lf_return({
-                "ok": True,
-                "text": "```json\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```",
-            })
-
-        safe_summary = _deterministic_trim_chain_of_thought(user_summary or "")
-        return lf_return({"ok": True, "text": safe_summary or "What would you like to do?"})
+        helper_result = await get_helper_agent().run(helper_ctx)
+        if helper_result.kind != "defer":
+            return lf_return({"ok": True, "text": helper_result.text or ""})
 
     # ── Phase 4-6: apply_chore_assignments / deterministic action / schedule-space ──
     latest_user_text = ""

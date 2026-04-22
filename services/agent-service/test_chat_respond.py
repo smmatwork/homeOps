@@ -233,23 +233,29 @@ class ChatRespondHelperRouteTests(unittest.TestCase):
 
         captured_calls: list[dict[str, Any]] = []
 
-        async def fake_helper_run(*, messages, model, temperature, max_tokens):
-            captured_calls.append({"messages": messages, "model": model})
-            return {
-                "clarifications": [],
-                "tool_calls": [
-                    {
-                        "id": "tc_helper_1",
-                        "tool": "db.insert",
-                        "args": {"table": "helpers", "record": {"name": "Sunita", "type": "cleaner"}},
-                        "reason": "Create helper Sunita",
-                    }
-                ],
-                "user_summary": "I'll add Sunita as a cleaner.",
-            }
+        from agents.base import AgentResult
+
+        async def fake_helper_run(self, ctx):
+            captured_calls.append({"messages": ctx.messages, "model": ctx.model})
+            tool_calls = [
+                {
+                    "id": "tc_helper_1",
+                    "tool": "db.insert",
+                    "args": {"table": "helpers", "record": {"name": "Sunita", "type": "cleaner"}},
+                    "reason": "Create helper Sunita",
+                }
+            ]
+            import json
+            fenced = "```json\n" + json.dumps({"tool_calls": tool_calls}, ensure_ascii=False, indent=2) + "\n```"
+            return AgentResult(
+                kind="text",
+                text=fenced,
+                tool_calls=tool_calls,
+                metadata={"user_summary": "I'll add Sunita as a cleaner."},
+            )
 
         conv_id = "test-conv-helper-1"
-        with patch("agents.helper_agent.HelperAgent.run", side_effect=fake_helper_run), \
+        with patch("agents.helper_agent.HelperAgent.run", fake_helper_run), \
              patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
              patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text), \
              patch.object(agent_main, "_edge_execute_tools", side_effect=_fake_edge_noop):
