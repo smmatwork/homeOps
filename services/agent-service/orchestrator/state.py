@@ -275,9 +275,15 @@ class SupabasePendingStore:
         if row is None:
             return None
         try:
-            intent = _intent_from_jsonb(row.get("intent") or {})
-            match_ids = [(x[0], x[1]) for x in (row.get("match_ids") or []) if isinstance(x, list) and len(x) >= 2]
-            tool_calls = list(row.get("tool_calls") or [])
+            # The RPC's RETURNS TABLE uses out_-prefixed column names to
+            # avoid a plpgsql 42702 ambiguity between the DECLARE-level
+            # output names and the DELETE...RETURNING source columns.
+            intent = _intent_from_jsonb(row.get("out_intent") or {})
+            match_ids = [
+                (x[0], x[1]) for x in (row.get("out_match_ids") or [])
+                if isinstance(x, list) and len(x) >= 2
+            ]
+            tool_calls = list(row.get("out_tool_calls") or [])
             # The DB store doesn't hand back expires_at — the RPC already
             # filtered expired rows on the take, so set to "forever" here
             # from the in-process TTL clock's perspective.
@@ -286,9 +292,9 @@ class SupabasePendingStore:
                 match_ids=match_ids,
                 tool_calls=tool_calls,
                 expires_at=time.monotonic() + PENDING_CONFIRMATION_TTL_SECONDS,
-                sync_field=row.get("sync_field"),
-                sync_chore_ids=row.get("sync_chore_ids"),
-                sync_default_value=row.get("sync_default_value"),
+                sync_field=row.get("out_sync_field"),
+                sync_chore_ids=row.get("out_sync_chore_ids"),
+                sync_default_value=row.get("out_sync_default_value"),
             )
             return pending
         except Exception as e:
@@ -333,11 +339,11 @@ class SupabasePendingStore:
         if row is None:
             return None
         try:
-            intents = [_intent_from_jsonb(i) for i in (row.get("original_intents") or [])]
+            intents = [_intent_from_jsonb(i) for i in (row.get("out_original_intents") or [])]
             return PendingClarification(
                 original_intents=intents,
-                failed_match_text=str(row.get("failed_match_text") or ""),
-                question_type=str(row.get("question_type") or ""),
+                failed_match_text=str(row.get("out_failed_match_text") or ""),
+                question_type=str(row.get("out_question_type") or ""),
                 expires_at=time.monotonic() + PENDING_CLARIFICATION_TTL_SECONDS,
             )
         except Exception as e:

@@ -88,15 +88,19 @@ $$;
 
 -- Atomic pop: return the row + delete in one statement, returning NULL
 -- when missing or expired.
+--
+-- Output column names are prefixed with `out_` to dodge the plpgsql
+-- "ambiguous reference" error (Postgres 42702) that fires when a
+-- RETURNS TABLE name collides with a DELETE...RETURNING column name.
 CREATE OR REPLACE FUNCTION agent_take_confirmation(
     p_conversation_id TEXT
 ) RETURNS TABLE (
-    intent JSONB,
-    match_ids JSONB,
-    tool_calls JSONB,
-    sync_field TEXT,
-    sync_chore_ids JSONB,
-    sync_default_value TEXT
+    out_intent JSONB,
+    out_match_ids JSONB,
+    out_tool_calls JSONB,
+    out_sync_field TEXT,
+    out_sync_chore_ids JSONB,
+    out_sync_default_value TEXT
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -116,7 +120,14 @@ BEGIN
             sync_chore_ids,
             sync_default_value
     )
-    SELECT * FROM popped;
+    SELECT
+        popped.intent,
+        popped.match_ids,
+        popped.tool_calls,
+        popped.sync_field,
+        popped.sync_chore_ids,
+        popped.sync_default_value
+    FROM popped;
 
     -- Also sweep expired rows for this conv_id so they don't accumulate.
     DELETE FROM agent_pending_confirmations
@@ -175,9 +186,9 @@ $$;
 CREATE OR REPLACE FUNCTION agent_take_clarification(
     p_conversation_id TEXT
 ) RETURNS TABLE (
-    original_intents JSONB,
-    failed_match_text TEXT,
-    question_type TEXT
+    out_original_intents JSONB,
+    out_failed_match_text TEXT,
+    out_question_type TEXT
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -194,7 +205,11 @@ BEGIN
             failed_match_text,
             question_type
     )
-    SELECT * FROM popped;
+    SELECT
+        popped.original_intents,
+        popped.failed_match_text,
+        popped.question_type
+    FROM popped;
 
     -- Sweep expired rows for this conv_id.
     DELETE FROM agent_pending_clarifications

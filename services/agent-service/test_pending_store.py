@@ -151,17 +151,19 @@ class SupabasePendingStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(body["p_tool_calls"]), 1)
 
     async def test_take_confirmation_hydrates_row(self):
+        # Column names mirror the RPC's RETURNS TABLE shape (out_ prefix
+        # avoids a plpgsql 42702 ambiguity; see migration 20260422100000).
         row = {
-            "intent": {
+            "out_intent": {
                 "action": "update", "entity": "chore", "match_text": "k",
                 "match_field": None, "update_field": "description",
                 "update_value": "X", "bulk": False, "confidence": 0.9,
             },
-            "match_ids": [["id1", "Kitchen"]],
-            "tool_calls": [{"tool": "db.update"}],
-            "sync_field": None,
-            "sync_chore_ids": None,
-            "sync_default_value": None,
+            "out_match_ids": [["id1", "Kitchen"]],
+            "out_tool_calls": [{"tool": "db.update"}],
+            "out_sync_field": None,
+            "out_sync_chore_ids": None,
+            "out_sync_default_value": None,
         }
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -220,14 +222,15 @@ class SupabasePendingStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(body["p_original_intents"]), 1)
 
     async def test_take_clarification_hydrates_row(self):
+        # out_-prefixed columns match the RPC's RETURNS TABLE shape.
         row = {
-            "original_intents": [{
+            "out_original_intents": [{
                 "action": "update", "entity": "chore", "match_text": "bath",
                 "match_field": None, "update_field": None, "update_value": None,
                 "bulk": False, "confidence": 0.9,
             }],
-            "failed_match_text": "bath",
-            "question_type": "space_not_found",
+            "out_failed_match_text": "bath",
+            "out_question_type": "space_not_found",
         }
 
         def handler(request: httpx.Request) -> httpx.Response:
