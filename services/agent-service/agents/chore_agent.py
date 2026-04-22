@@ -882,6 +882,261 @@ def _extract_reassign_or_unassign_chore(latest_user_text: str) -> dict[str, str 
     return None
 
 
+# ── Phase 6c chore-domain formatters ────────────────────────────────────────
+# Pure string-building from structured inputs (ExtractedIntent + tool-call
+# results + FACTS). No edge calls, no state mutation. Used by chat_respond's
+# plan-confirm-execute phase, the no-match fallback, and the rich RPC
+# reassign response formatter.
+
+
+def _extract_spaces_from_facts(facts: str, keyword: str = "") -> list[str]:
+    """Pull room/space names from the FACTS section, optionally filtered by keyword."""
+    spaces: list[str] = []
+    kw = keyword.lower().strip()
+    for line in (facts or "").split("\n"):
+        # Format: "Spaces: Kitchen, Living Room, Master Bathroom-Attached Master Bedroom, ..."
+        if line.startswith("Spaces:") or line.startswith("Rooms:"):
+            raw = line.split(":", 1)[1].strip()
+            for name in raw.split(","):
+                name = name.strip()
+                if name and (not kw or kw in name.lower()):
+                    spaces.append(name)
+    return spaces
+
+
+def _format_no_match_with_suggestions(
+    match_text: str,
+    facts: str,
+) -> str:
+    """Format a helpful no-match message with similar space/room suggestions."""
+    # Try each word in match_text as a keyword to find similar spaces
+    words = match_text.lower().split() if match_text else []
+    similar: list[str] = []
+    for word in words:
+        if len(word) >= 3:  # skip short words like "the", "a"
+            similar = _extract_spaces_from_facts(facts, word)
+            if similar:
+                break
+
+    add_hint = (
+        f"\n\nIf \"{match_text}\" is a new room that's not in your home profile yet, "
+        f"you can add it from the **Home Profile** page, or say "
+        f"*\"add {match_text} to my home profile\"*."
+    )
+
+    if not similar:
+        # Broader search — get all spaces
+        all_spaces = _extract_spaces_from_facts(facts)
+        if all_spaces:
+            space_list = "\n".join(f"  - {s}" for s in all_spaces[:10])
+            more = f"\n  ...and {len(all_spaces) - 10} more" if len(all_spaces) > 10 else ""
+            return (
+                f"I couldn't find \"{match_text}\" in your home profile. "
+                f"Here are your current rooms:\n{space_list}{more}\n\n"
+                f"Did you mean one of these?"
+                f"{add_hint}"
+            )
+        return (
+            f"I couldn't find \"{match_text}\" in your home profile. "
+            f"Could you give me the exact room name?"
+            f"{add_hint}"
+        )
+
+    space_list = "\n".join(f"  - {s}" for s in similar[:8])
+    return (
+        f"I couldn't find an exact match for \"{match_text}\" in your home profile. "
+        f"Did you mean one of these?\n{space_list}\n\n"
+        f"Tell me which one and I'll proceed."
+        f"{add_hint}"
+    )
+
+
+def _format_rpc_reassign_result(
+    results: list[dict[str, Any]],
+    intent: ExtractedIntent,
+    facts: str = "",
+) -> str | None:
+    """Extract a human-readable message from reassign/bulk_reassign/add_space RPC results."""
+    for r in results:
+        if not isinstance(r, dict) or not r.get("ok"):
+            continue
+        result_data = r.get("result")
+        if not result_data:
+            continue
+
+        # Handle list-wrapped RPC results (Supabase returns [{...}])
+        rows = result_data if isinstance(result_data, list) else [result_data]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            action = row.get("action", "")
+
+            # Bulk reassign result
+            if action == "reassigned" and "reassigned_count" in row:
+                count = row.get("reassigned_count", 0)
+                helper = row.get("helper_name", intent.update_value or "the helper")
+                titles = row.get("chore_titles") or []
+                if count > 0:
+                    preview = ", ".join(str(t) for t in titles[:5])
+                    more = f" and {count - 5} more" if count > 5 else ""
+                    return f"Done! Reassigned {count} chore(s) to {helper}: {preview}{more}."
+                return f"No chores matching \"{intent.match_text}\" were found to reassign."
+
+            # Single reassign result
+            if action == "reassigned":
+                title = row.get("chore_title", intent.match_text)
+                helper = row.get("helper_name", intent.update_value or "the helper")
+                return f"Done! Reassigned \"{title}\" to {helper}."
+
+            if action == "unassigned":
+                title = row.get("chore_title", intent.match_text)
+                return f"Done! Unassigned \"{title}\"."
+
+            if action == "none_found":
+                return _format_no_match_with_suggestions(intent.match_text, facts)
+
+            if action == "clarify_chore":
+                candidates = row.get("chore_candidates") or []
+                if candidates:
+                    names = [str(c.get("title", "?")) for c in candidates[:5]]
+                    return (
+                        f"I found multiple chores matching \"{intent.match_text}\". "
+                        f"Which one?\n" + "\n".join(f"  - {n}" for n in names)
+                    )
+                return f"Multiple chores match \"{intent.match_text}\". Could you be more specific?"
+
+            if action == "clarify_helper":
+                candidates = row.get("helper_candidates") or []
+                if candidates:
+                    names = [str(c.get("name", "?")) for c in candidates[:5]]
+                    return (
+                        f"I'm not sure which helper you mean by \"{intent.update_value}\". "
+                        f"Did you mean one of these?\n" + "\n".join(f"  - {n}" for n in names)
+                    )
+                return f"I couldn't find a helper named \"{intent.update_value}\". Could you check the name?"
+
+            # Add space to profile result
+            if action == "added":
+                space_name = row.get("display_name", intent.match_text)
+                total = row.get("total_spaces", "?")
+                return (
+                    f"Done! Added **{space_name}** to your home profile. "
+                    f"You now have {total} rooms/spaces. "
+                    f"You can now assign chores to this room."
+                )
+            if action == "already_exists":
+                space_name = row.get("display_name", intent.match_text)
+                return f"**{space_name}** already exists in your home profile — no changes needed."
+
+    return None
+
+
+def _format_plan_preview(
+    intents: list[ExtractedIntent],
+    match_ids: list[tuple[str, str]],
+) -> str:
+    """Format a numbered plan from extracted intents for user confirmation."""
+    steps: list[str] = []
+    for i, intent in enumerate(intents, 1):
+        action = intent.action.replace("_", " ").capitalize()
+        target = intent.match_text or "chores"
+        if intent.action == "add_space":
+            steps.append(f"{i}. Add **{target}** to your home profile")
+        elif intent.action == "reassign" and intent.update_value:
+            steps.append(f"{i}. Assign **{target}** chores to **{intent.update_value}**")
+        elif intent.action == "change_cadence" and intent.update_value:
+            steps.append(f"{i}. Set **{target}** chores to **{intent.update_value}**")
+        elif intent.action in ("update", "rename") and intent.update_value:
+            steps.append(f"{i}. {action} **{target}** → \"{intent.update_value}\"")
+        elif intent.update_field and intent.update_value:
+            steps.append(f"{i}. Set {intent.update_field} of **{target}** to \"{intent.update_value}\"")
+        else:
+            steps.append(f"{i}. {action} **{target}**")
+
+    plan_body = "\n".join(steps)
+
+    # Add matched chore names if we have them (from db.update tool calls)
+    chore_list = ""
+    if match_ids:
+        names = [title for _, title in match_ids[:10]]
+        chore_list = "\n\nChores affected: " + ", ".join(names)
+        if len(match_ids) > 10:
+            chore_list += f" (+{len(match_ids) - 10} more)"
+
+    return (
+        f"Here's my plan:\n\n"
+        f"{plan_body}"
+        f"{chore_list}\n\n"
+        f"Reply **yes** to proceed, or **no** to cancel."
+    )
+
+
+def _format_execution_result(
+    results: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+    intent_list: list[ExtractedIntent],
+    primary_intent: ExtractedIntent,
+    facts: str = "",
+) -> str:
+    """Format the execution result for display after plan confirmation."""
+    update_count = sum(
+        1 for tc, r in zip(tool_calls, results)
+        if isinstance(tc, dict) and isinstance(r, dict)
+        and tc.get("tool") == "db.update" and r.get("ok")
+    )
+    all_ok = all(r.get("ok") for r in results)
+
+    if len(intent_list) > 1 and all_ok:
+        parts: list[str] = ["Done!"]
+        rpc_msg = _format_rpc_reassign_result(results, primary_intent, facts)
+        if rpc_msg:
+            parts.append(rpc_msg)
+        if update_count > 0:
+            parts.append(f"Updated {update_count} chore(s).")
+        for si in intent_list:
+            if si.action == "change_cadence" and si.update_value:
+                parts.append(f"Set {si.match_text} chores to {si.update_value}.")
+        return " ".join(parts)
+
+    rpc_final = _format_rpc_reassign_result(results, primary_intent, facts)
+    if rpc_final:
+        return rpc_final
+    if update_count > 0 and primary_intent.update_field and primary_intent.update_value is not None:
+        return f"Done! Updated the {primary_intent.update_field} of {update_count} chore(s) to \"{primary_intent.update_value}\"."
+    if update_count > 0 and primary_intent.update_field and primary_intent.update_value is None:
+        return f"Done! Cleared the {primary_intent.update_field} of {update_count} chore(s)."
+    if all_ok and update_count == 0:
+        return _format_no_match_with_suggestions(primary_intent.match_text, facts)
+    if all_ok:
+        return f"Done! {primary_intent.action.capitalize()}d \"{primary_intent.match_text}\" successfully."
+    errors = [str(r.get("error", "unknown error")) for r in results if not r.get("ok")]
+    return f"Error: {'; '.join(errors)}"
+
+
+def _format_confirmation_preview(
+    intent: ExtractedIntent,
+    match_ids: list[tuple[str, str]],
+) -> str:
+    lines = [f"{i+1}. {title}" for i, (_id, title) in enumerate(match_ids[:25])]
+    body = "\n".join(lines)
+    count = len(match_ids)
+    overflow = f"\n(…and {count - 25} more)" if count > 25 else ""
+    action_desc: str
+    if intent.update_field and intent.update_value is not None:
+        action_desc = (
+            f"set the {intent.update_field} to \"{intent.update_value}\""
+        )
+    elif intent.update_field:
+        action_desc = f"clear the {intent.update_field}"
+    else:
+        action_desc = f"{intent.action} them"
+    return (
+        f"I found {count} chore(s) matching \"{intent.match_text}\":\n"
+        f"{body}{overflow}\n\n"
+        f"Should I {action_desc} for all {count}? Reply **yes** to confirm or **no** to cancel."
+    )
+
+
 __all__ = [
     "ChoreAgent",
     "_wants_unassigned_count",
@@ -894,4 +1149,10 @@ __all__ = [
     "_extract_assign_or_create_chore",
     "_extract_complete_chore_by_query",
     "_extract_reassign_or_unassign_chore",
+    "_extract_spaces_from_facts",
+    "_format_no_match_with_suggestions",
+    "_format_rpc_reassign_result",
+    "_format_plan_preview",
+    "_format_execution_result",
+    "_format_confirmation_preview",
 ]
