@@ -648,7 +648,7 @@ class ResolveChoreMatchIdsViaRpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, [("id-1", "First")])
 
 
-class PendingConfirmationTests(unittest.TestCase):
+class PendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         agent_main._pending_confirmations.clear()
 
@@ -702,13 +702,13 @@ class PendingConfirmationTests(unittest.TestCase):
             confidence=1.0,
         )
 
-    def test_stash_and_take_roundtrip(self):
+    async def test_stash_and_take_roundtrip(self):
         intent = self._make_intent()
         match_ids = [("id-1", "Chore A"), ("id-2", "Chore B")]
         tool_calls = [{"tool": "db.update", "args": {"id": "id-1"}, "reason": "on 'Chore A'"}]
-        _stash_pending_confirmation("conv-1", intent, match_ids, tool_calls)
+        await _stash_pending_confirmation("conv-1", intent, match_ids, tool_calls)
 
-        taken = _take_pending_confirmation("conv-1")
+        taken = await _take_pending_confirmation("conv-1")
         self.assertIsNotNone(taken)
         assert taken is not None
         self.assertEqual(taken.match_ids, match_ids)
@@ -716,18 +716,18 @@ class PendingConfirmationTests(unittest.TestCase):
         self.assertEqual(taken.intent.match_text, "toy")
 
         # Second take returns None (the first take popped it).
-        self.assertIsNone(_take_pending_confirmation("conv-1"))
+        self.assertIsNone(await _take_pending_confirmation("conv-1"))
 
-    def test_take_returns_none_when_expired(self):
+    async def test_take_returns_none_when_expired(self):
         import time
         intent = self._make_intent()
-        _stash_pending_confirmation("conv-exp", intent, [("id", "T")], [])
+        await _stash_pending_confirmation("conv-exp", intent, [("id", "T")], [])
         # Force-expire the entry in place.
         agent_main._pending_confirmations["conv-exp"].expires_at = time.monotonic() - 1
-        self.assertIsNone(_take_pending_confirmation("conv-exp"))
+        self.assertIsNone(await _take_pending_confirmation("conv-exp"))
 
-    def test_take_returns_none_without_conv_id(self):
-        self.assertIsNone(_take_pending_confirmation(""))
+    async def test_take_returns_none_without_conv_id(self):
+        self.assertIsNone(await _take_pending_confirmation(""))
 
     def test_format_preview_includes_count_and_titles(self):
         intent = self._make_intent()

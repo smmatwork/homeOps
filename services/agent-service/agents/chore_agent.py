@@ -692,7 +692,7 @@ class ChoreAgent:
 
         # ── Pending clarification context ─────────────────────────────
         if pending_key and last_user_text:
-            clarification = _take_clarification(pending_key)
+            clarification = await _take_clarification(pending_key)
             if clarification is not None:
                 clarified_text = last_user_text.strip()
                 # Strip common prefixes like "I meant", "it's", "the one called"
@@ -728,7 +728,7 @@ class ChoreAgent:
                     pending_match_ids = _match_ids_from_tool_calls(
                         [tc for tc in all_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
                     )
-                    _stash_pending_confirmation(
+                    await _stash_pending_confirmation(
                         conversation_id=pending_key,
                         intent=extracted_intent,
                         match_ids=pending_match_ids,
@@ -788,7 +788,7 @@ class ChoreAgent:
                 keywords = args.get("keywords") or [extracted_intent.match_text]
                 match_term = keywords[0] if keywords else extracted_intent.match_text
                 if pending_key:
-                    _stash_clarification(
+                    await _stash_clarification(
                         conversation_id=pending_key,
                         original_intents=intent_list,
                         failed_match_text=match_term,
@@ -802,7 +802,7 @@ class ChoreAgent:
                 pending_match_ids = _match_ids_from_tool_calls(
                     [tc for tc in deterministic_tcs if isinstance(tc, dict) and tc.get("tool") == "db.update"]
                 )
-                _stash_pending_confirmation(
+                await _stash_pending_confirmation(
                     conversation_id=pending_key,
                     intent=extracted_intent,
                     match_ids=pending_match_ids,

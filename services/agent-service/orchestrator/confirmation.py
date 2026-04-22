@@ -133,12 +133,16 @@ async def _maybe_stash_sync_followup(
 
     sync_chore_ids = [row.get("id") or "" for row in mismatched if row.get("id")]
     sync_match_ids = [(row.get("id") or "", row.get("title") or "") for row in mismatched]
-    _stash_pending_confirmation(
+    await _stash_pending_confirmation(
         conversation_id=pending_key,
         intent=executed_intent,
         match_ids=sync_match_ids,
         tool_calls=mirror_tcs,
     )
+    # Patch sync-followup metadata onto the just-stashed row. For the
+    # in-process backend this mutates the dict entry; for the Supabase
+    # backend we re-stash with the extended shape (a second round trip
+    # is acceptable — this path only fires once per update).
     stashed = _pending_confirmations.get(pending_key)
     if stashed is not None:
         stashed.sync_field = other_field
@@ -190,7 +194,7 @@ async def handle_pending_confirmation(
     if not (pending_key and last_user):
         return None
 
-    pending = _take_pending_confirmation(pending_key)
+    pending = await _take_pending_confirmation(pending_key)
     if pending is None:
         return None
 

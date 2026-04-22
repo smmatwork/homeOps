@@ -88,7 +88,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
     async def test_empty_last_user_returns_none(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1", intent=_intent(), match_ids=[], tool_calls=[],
         )
         result = await handle_pending_confirmation(
@@ -104,7 +104,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
     async def test_accept_executes_and_formats_result(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1",
             intent=_intent(),
             match_ids=[("id1", "Kitchen")],
@@ -131,7 +131,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("c1", orch_state.pending_confirmations)
 
     async def test_cancel_returns_clarification_text_within_budget(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1",
             intent=_intent(match_text="bathroom chores"),
             match_ids=[],
@@ -154,7 +154,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         # Set clarification counter to one less than max so the next cancel
         # pushes it over.
         orch_state.clarification_counts["c1"] = orch_state.MAX_CLARIFICATION_TURNS - 1
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1", intent=_intent(), match_ids=[], tool_calls=[],
         )
         result = await handle_pending_confirmation(
@@ -173,7 +173,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("c1", orch_state.clarification_counts)
 
     async def test_freeform_reply_consumes_pending_returns_none(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1", intent=_intent(), match_ids=[], tool_calls=[],
         )
         result = await handle_pending_confirmation(
@@ -191,7 +191,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("c1", orch_state.pending_confirmations)
 
     async def test_sync_followup_cancel_returns_leave_message(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1", intent=_intent(), match_ids=[], tool_calls=[],
         )
         pending = orch_state.pending_confirmations["c1"]
@@ -214,7 +214,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("as-is", result.lower())
 
     async def test_sync_followup_accept_executes_mirror(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1",
             intent=_intent(update_field="description"),
             match_ids=[("id1", "Kitchen")],
@@ -242,7 +242,7 @@ class HandlePendingConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Done", result)
 
     async def test_sync_followup_freeform_treated_as_new_value(self):
-        orch_state.stash_pending_confirmation(
+        await orch_state.stash_pending_confirmation(
             conversation_id="c1",
             intent=_intent(update_field="description"),
             match_ids=[("id1", "Kitchen")],
