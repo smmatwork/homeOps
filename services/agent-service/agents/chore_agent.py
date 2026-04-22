@@ -31,6 +31,7 @@ alongside `HelperAgent` in the orchestrator router (Commit 5).
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -303,6 +304,131 @@ class ChoreAgent:
                 if name and isinstance(cnt, int):
                     lines.append(f"- {name}: {cnt}")
             return AgentResult(kind="text", text="Chores by assignee:\n" + "\n".join(lines))
+
+        # ── Shortcut: "Chores in <space>" ──────────────────────────────────
+        try:
+            space_q = _extract_space_list_query(messages)
+        except Exception:
+            space_q = ""
+        if space_q:
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {"name": "list_chores_enriched", "params": {"p_filters": {"space_query": space_q}, "p_limit": 25}},
+                "reason": "List chores for a space.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+            payload = out.get("result") if isinstance(out, dict) else None
+            match_type = payload.get("match_type") if isinstance(payload, dict) else None
+            if match_type == "ambiguous_space":
+                return AgentResult(kind="text", text="Which space did you mean?")
+            result = payload.get("result") if isinstance(payload, dict) else None
+            chores = result if isinstance(result, list) else []
+            if not chores:
+                return AgentResult(kind="text", text=f"No chores found for {space_q}.")
+            lines = []
+            for c0 in chores[:25]:
+                if not isinstance(c0, dict):
+                    continue
+                title = str(c0.get("title") or "").strip()
+                status = str(c0.get("status") or "").strip()
+                if title and status:
+                    lines.append(f"- {title} [{status}]")
+                elif title:
+                    lines.append(f"- {title}")
+            return AgentResult(kind="text", text=f"Chores in {space_q}:\n" + "\n".join(lines))
+
+        # ── Shortcut: "Chores assigned to <name>" (list, not count) ────────
+        try:
+            list_name = _extract_list_assigned_to_name(messages)
+        except Exception:
+            list_name = ""
+        if list_name:
+            if not ctx.household_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your household context to look up chores. Please reconnect your home and try again.",
+                )
+            if not ctx.user_id:
+                return AgentResult(
+                    kind="text",
+                    text="I need your user context to look up chores. Please reconnect your home and try again.",
+                )
+
+            tc = {
+                "id": f"tc_{uuid.uuid4().hex}",
+                "tool": "query.rpc",
+                "args": {
+                    "name": "list_chores_enriched",
+                    "params": {
+                        "p_filters": {"helper_query": list_name},
+                        "p_limit": 25,
+                    },
+                },
+                "reason": "List chores assigned to the specified helper.",
+            }
+            out = await ctx.edge_execute_tools(
+                {"household_id": ctx.household_id, "tool_call": tc},
+                user_id=ctx.user_id,
+            )
+
+            payload = out.get("result") if isinstance(out, dict) else None
+            match_type = payload.get("match_type") if isinstance(payload, dict) else None
+            result = payload.get("result") if isinstance(payload, dict) else None
+            helper_candidates = payload.get("helper_candidates") if isinstance(payload, dict) else None
+
+            if match_type == "ambiguous_helper" and helper_candidates:
+                return AgentResult(
+                    kind="text",
+                    text="Which helper did you mean? " + json.dumps(helper_candidates, ensure_ascii=False),
+                )
+            if match_type == "none_helper":
+                return AgentResult(kind="text", text=f"I couldn't find a helper matching '{list_name}'.")
+
+            chores = result if isinstance(result, list) else []
+            if not chores:
+                return AgentResult(kind="text", text=f"No chores are currently assigned to {list_name}.")
+
+            lines = []
+            for c0 in chores[:25]:
+                if not isinstance(c0, dict):
+                    continue
+                title = str(c0.get("title") or "").strip()
+                status = str(c0.get("status") or "").strip()
+                due_at = str(c0.get("due_at") or "").strip()
+                space = str(c0.get("space") or "").strip()
+                parts: list[str] = []
+                if title:
+                    parts.append(title)
+                if status:
+                    parts.append(f"[{status}]")
+                meta: list[str] = []
+                if due_at:
+                    meta.append(f"due {due_at}")
+                if space:
+                    meta.append(f"{space}")
+                suffix = f" — {', '.join(meta)}" if meta else ""
+                if parts:
+                    lines.append("- " + " ".join(parts) + suffix)
+
+            return AgentResult(
+                kind="text",
+                text="Here are the chores assigned to " + list_name + ":\n" + "\n".join(lines),
+            )
 
         # No shortcut matched — defer to the next handler.
         return AgentResult(kind="defer")

@@ -444,6 +444,104 @@ class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
         tc = edge_calls[0].get("tool_call") or {}
         self.assertEqual(tc.get("args", {}).get("name"), "group_chores_by_assignee")
 
+    def test_space_list_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {
+                "ok": True,
+                "result": {
+                    "result": [
+                        {"title": "Clean kitchen", "status": "pending"},
+                        {"title": "Mop kitchen floor", "status": "completed"},
+                    ]
+                },
+            }
+
+        conv_id = "test-conv-analytics-spacelist"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="What chores do I have in Kitchen?",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = body.get("text") or ""
+        self.assertIn("Chores in Kitchen", text)
+        self.assertIn("- Clean kitchen [pending]", text)
+        self.assertIn("- Mop kitchen floor [completed]", text)
+        self.assertEqual(len(edge_calls), 1)
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("args", {}).get("name"), "list_chores_enriched")
+        self.assertEqual(
+            tc.get("args", {}).get("params", {}).get("p_filters", {}).get("space_query"),
+            "Kitchen",
+        )
+
+    def test_list_assigned_to_name_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {
+                "ok": True,
+                "result": {
+                    "match_type": "unique",
+                    "result": [
+                        {"title": "Mop kitchen", "status": "pending", "space": "Kitchen"},
+                    ],
+                },
+            }
+
+        conv_id = "test-conv-analytics-listassigned"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="what chores are assigned to Sunita",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        text = body.get("text") or ""
+        self.assertIn("Here are the chores assigned to Sunita", text)
+        self.assertIn("- Mop kitchen [pending]", text)
+        self.assertEqual(len(edge_calls), 1)
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("args", {}).get("name"), "list_chores_enriched")
+        self.assertEqual(
+            tc.get("args", {}).get("params", {}).get("p_filters", {}).get("helper_query"),
+            "Sunita",
+        )
+
+    def test_list_assigned_to_name_none_helper_message(self):
+        """Branch: match_type == 'none_helper' — handler returns a
+        'couldn't find a helper matching' message verbatim."""
+
+        async def empty_edge(payload, *, user_id):
+            return {"ok": True, "result": {"match_type": "none_helper", "result": []}}
+
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=empty_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="what chores are assigned to NoSuchPerson",
+                conversation_id="test-conv-analytics-nohelper",
+            )
+
+        body = res.json()
+        self.assertIn("couldn't find a helper matching 'NoSuchPerson'", body.get("text") or "")
+
     def test_total_pending_count_routes_through_chore_agent(self):
         edge_calls: list[dict[str, Any]] = []
 
