@@ -1042,45 +1042,13 @@ async def _check_graduation_status(
 
 
 # ── #6: LLM-as-Judge guardrail ─────────────────────────────────────────────
+# JUDGE_SYSTEM_PROMPT and the judge logic now live in agents/chore_agent.py.
+# The shim below keeps the legacy module-level call sites (chat_respond's
+# post-LLM quality check) working, and — importantly — keeps the patch.object
+# on main._sarvam_chat effective: the shim reads _sarvam_chat out of main's
+# own namespace at call time, so a test patch propagates into the judge.
+from agents.chore_agent import JUDGE_SYSTEM_PROMPT, _judge_response as _chore_judge_response
 
-JUDGE_SYSTEM_PROMPT = (
-    "You are a quality judge for a home management assistant. "
-    "Given the USER REQUEST, the ASSISTANT RESPONSE, and the KNOWN FACTS (ground truth), "
-    "evaluate the response on these criteria:\n\n"
-    "1) **Intent alignment**: Does the response address what the user actually asked for? "
-    "(Not a different action, not an unrelated topic.) If the user asked to reassign, "
-    "change frequency, or set a pattern — did the response actually do that, or did it "
-    "just list chores without acting?\n"
-    "2) **Data fidelity**: Does the response ONLY mention helpers, chores, rooms, and people "
-    "that appear in the KNOWN FACTS? Any name, ID, or count not in the facts is hallucinated.\n"
-    "3) **Action safety**: If the response claims to have created, updated, or deleted "
-    "something, was there an actual tool_calls execution? Claiming success without tool "
-    "calls is a hallucination.\n"
-    "4) **Policy compliance**: Assignment must respect helper capacity, time-off, and "
-    "household assignment rules. Notifications must be justified.\n\n"
-    "Return ONLY a JSON object:\n"
-    "{\n"
-    "  \"pass\": true/false,\n"
-    "  \"reason\": \"<concise explanation>\",\n"
-    "  \"correction\": \"<what should be done instead, if failed — include a specific UI "
-    "page or feature the user can use>\",\n"
-    "  \"failure_type\": \"intent_mismatch\" | \"hallucination\" | \"unsafe_action\" | "
-    "\"policy_violation\" | null,\n"
-    "  \"severity\": \"fatal\" | \"correctable\" | null\n"
-    "}\n\n"
-    "severity='fatal' means the response completely missed the user's intent (e.g., "
-    "listed chores when user asked to reassign, or didn't act on a request). "
-    "severity='correctable' means the intent was right but details are wrong "
-    "(e.g., wrong helper name). If pass=true, set failure_type and severity to null.\n\n"
-    "When the correction involves a complex scheduling/assignment pattern the chat can't "
-    "handle, guide the user to the right UI page:\n"
-    "- Bulk reassignment or workload balancing → 'Go to Chores → Coverage → Utilization tab → Optimize workload'\n"
-    "- Changing frequency of many chores → 'Go to Chores → Coverage → Utilization tab → Optimize workload → Reduce Frequency step'\n"
-    "- Adding/managing helpers → 'Go to the Helpers page'\n"
-    "- Adding household members → 'Go to the Household page'\n"
-    "- Managing maintenance/vendors → 'Go to Services or Maintenance page'\n"
-    "- Simple single-chore changes → ask the user to rephrase as 'assign <chore> to <helper>' or 'change <chore> to <cadence>'\n"
-)
 
 async def _judge_response(
     user_request: str,
@@ -1088,39 +1056,13 @@ async def _judge_response(
     model: str,
     facts_summary: str = "",
 ) -> dict[str, Any]:
-    """Run LLM-as-Judge on the assistant's response. Returns {pass, reason, correction}."""
-    judge_input = f"USER REQUEST:\n{user_request}\n\nASSISTANT RESPONSE:\n{assistant_response}"
-    if facts_summary:
-        judge_input += f"\n\nKNOWN FACTS (ground truth):\n{facts_summary}"
-
-    try:
-        raw = await _sarvam_chat(
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": judge_input},
-            ],
-            model=model,
-            temperature=0.0,
-            max_tokens=300,
-        )
-        if isinstance(raw, str):
-            obj = _try_parse_json_obj(raw.strip())
-            if obj and "pass" in obj:
-                return obj
-            # Try extracting JSON from markdown fences.
-            cleaned = re.sub(r"```json?\s*|\s*```", "", raw).strip()
-            obj2 = _try_parse_json_obj(cleaned)
-            if obj2 and "pass" in obj2:
-                return obj2
-    except Exception as e:
-        _logger = logging.getLogger("homeops.agent_service")
-        _logger.warning("LLM-as-Judge failed with exception: %s", str(e)[:200])
-        # On error, return fail with the error so the caller can decide
-        return {"pass": False, "reason": f"Judge error: {str(e)[:100]}", "correction": "Retry or review manually"}
-
-    _logger = logging.getLogger("homeops.agent_service")
-    _logger.warning("LLM-as-Judge could not parse response")
-    return {"pass": False, "reason": "Judge could not parse response", "correction": "Review response manually"}
+    return await _chore_judge_response(
+        user_request,
+        assistant_response,
+        model,
+        _sarvam_chat,
+        facts_summary,
+    )
 
 
 # Sarvam LLM client + edge-function client live in kernel/. Re-imported here

@@ -32,6 +32,7 @@ alongside `HelperAgent` in the orchestrator router (Commit 5).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -39,6 +40,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from agents.base import AgentContext, AgentResult, ChatFn, EdgeExecuteFn
+from orchestrator.intent import ExtractedIntent
+from orchestrator.parsing import _try_parse_json_obj
 
 
 ExtractJsonCandidateFn = Callable[[str], "str | None"]
@@ -1358,6 +1361,95 @@ def _enforce_assignment_policy(
     return warnings
 
 
+# ── Phase 6e (cont.) LLM-as-Judge guardrail ─────────────────────────────────
+# Post-turn quality check on the assistant's final text. Uses the injected
+# chat_fn so tests that patch the LLM layer (patch.object(agent_main,
+# "_sarvam_chat", ...)) keep working — the main.py shim passes through
+# whatever _sarvam_chat resolves to at call time.
+
+
+JUDGE_SYSTEM_PROMPT = (
+    "You are a quality judge for a home management assistant. "
+    "Given the USER REQUEST, the ASSISTANT RESPONSE, and the KNOWN FACTS (ground truth), "
+    "evaluate the response on these criteria:\n\n"
+    "1) **Intent alignment**: Does the response address what the user actually asked for? "
+    "(Not a different action, not an unrelated topic.) If the user asked to reassign, "
+    "change frequency, or set a pattern — did the response actually do that, or did it "
+    "just list chores without acting?\n"
+    "2) **Data fidelity**: Does the response ONLY mention helpers, chores, rooms, and people "
+    "that appear in the KNOWN FACTS? Any name, ID, or count not in the facts is hallucinated.\n"
+    "3) **Action safety**: If the response claims to have created, updated, or deleted "
+    "something, was there an actual tool_calls execution? Claiming success without tool "
+    "calls is a hallucination.\n"
+    "4) **Policy compliance**: Assignment must respect helper capacity, time-off, and "
+    "household assignment rules. Notifications must be justified.\n\n"
+    "Return ONLY a JSON object:\n"
+    "{\n"
+    "  \"pass\": true/false,\n"
+    "  \"reason\": \"<concise explanation>\",\n"
+    "  \"correction\": \"<what should be done instead, if failed — include a specific UI "
+    "page or feature the user can use>\",\n"
+    "  \"failure_type\": \"intent_mismatch\" | \"hallucination\" | \"unsafe_action\" | "
+    "\"policy_violation\" | null,\n"
+    "  \"severity\": \"fatal\" | \"correctable\" | null\n"
+    "}\n\n"
+    "severity='fatal' means the response completely missed the user's intent (e.g., "
+    "listed chores when user asked to reassign, or didn't act on a request). "
+    "severity='correctable' means the intent was right but details are wrong "
+    "(e.g., wrong helper name). If pass=true, set failure_type and severity to null.\n\n"
+    "When the correction involves a complex scheduling/assignment pattern the chat can't "
+    "handle, guide the user to the right UI page:\n"
+    "- Bulk reassignment or workload balancing → 'Go to Chores → Coverage → Utilization tab → Optimize workload'\n"
+    "- Changing frequency of many chores → 'Go to Chores → Coverage → Utilization tab → Optimize workload → Reduce Frequency step'\n"
+    "- Adding/managing helpers → 'Go to the Helpers page'\n"
+    "- Adding household members → 'Go to the Household page'\n"
+    "- Managing maintenance/vendors → 'Go to Services or Maintenance page'\n"
+    "- Simple single-chore changes → ask the user to rephrase as 'assign <chore> to <helper>' or 'change <chore> to <cadence>'\n"
+)
+
+
+async def _judge_response(
+    user_request: str,
+    assistant_response: str,
+    model: str,
+    chat_fn: ChatFn,
+    facts_summary: str = "",
+) -> dict[str, Any]:
+    """Run LLM-as-Judge on the assistant's response. Returns {pass, reason, correction}."""
+    judge_input = f"USER REQUEST:\n{user_request}\n\nASSISTANT RESPONSE:\n{assistant_response}"
+    if facts_summary:
+        judge_input += f"\n\nKNOWN FACTS (ground truth):\n{facts_summary}"
+
+    try:
+        raw = await chat_fn(
+            messages=[
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": judge_input},
+            ],
+            model=model,
+            temperature=0.0,
+            max_tokens=300,
+        )
+        if isinstance(raw, str):
+            obj = _try_parse_json_obj(raw.strip())
+            if obj and "pass" in obj:
+                return obj
+            # Try extracting JSON from markdown fences.
+            cleaned = re.sub(r"```json?\s*|\s*```", "", raw).strip()
+            obj2 = _try_parse_json_obj(cleaned)
+            if obj2 and "pass" in obj2:
+                return obj2
+    except Exception as e:
+        _logger = logging.getLogger("homeops.agent_service")
+        _logger.warning("LLM-as-Judge failed with exception: %s", str(e)[:200])
+        # On error, return fail with the error so the caller can decide
+        return {"pass": False, "reason": f"Judge error: {str(e)[:100]}", "correction": "Retry or review manually"}
+
+    _logger = logging.getLogger("homeops.agent_service")
+    _logger.warning("LLM-as-Judge could not parse response")
+    return {"pass": False, "reason": "Judge could not parse response", "correction": "Review response manually"}
+
+
 __all__ = [
     "ChoreAgent",
     "_wants_unassigned_count",
@@ -1383,4 +1475,6 @@ __all__ = [
     "_resolve_chore_match_ids",
     "_validate_tool_calls",
     "_enforce_assignment_policy",
+    "JUDGE_SYSTEM_PROMPT",
+    "_judge_response",
 ]
