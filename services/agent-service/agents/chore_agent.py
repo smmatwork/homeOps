@@ -31,6 +31,7 @@ alongside `HelperAgent` in the orchestrator router (Commit 5).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -1170,6 +1171,9 @@ def _format_confirmation_preview(
 # Those migrate in follow-up commits once their infra dependencies are
 # plumbed through AgentContext properly.
 
+EmbedderFn = Callable[[], Any]
+
+
 SEMANTIC_MATCH_THRESHOLD = float(
     (os.environ.get("AGENT_SEMANTIC_MATCH_THRESHOLD") or "").strip() or "0.55"
 )
@@ -1225,6 +1229,71 @@ def _parse_chores_from_facts(facts_section: str) -> list[dict[str, str]]:
             "description": m.group("desc") or "",
         })
     return out
+
+
+async def _semantic_match_chores(
+    keywords: list[str],
+    chores: list[dict[str, str]],
+    get_embedder: EmbedderFn,
+) -> list[tuple[str, str, float]]:
+    """Find chores semantically similar to any of the given keywords.
+
+    Returns (id, title, best_similarity) triples, deduped by id, sorted by
+    similarity descending, capped at SEMANTIC_MATCH_TOP_K. Runs the embedder
+    in a thread so the event loop isn't blocked by the model load on first
+    call (~1-2s) or per-call inference (~10-50ms for ~30 short texts).
+
+    `get_embedder` is injected rather than imported because the fastembed
+    singleton lives in main.py (same accessor the /v1/embed endpoint uses)
+    and we don't want a back-edge into main from the agents layer.
+    """
+    if not keywords or not chores:
+        return []
+
+    def _compute() -> list[tuple[str, str, float]]:
+        try:
+            emb = get_embedder()
+        except Exception as e:
+            logging.warning(f"semantic chore match: embedder unavailable: {e}")
+            return []
+        if emb is None:
+            return []
+        chore_texts = [
+            ((c["title"] + ". " + c["description"]).strip(". ")) or c["title"]
+            for c in chores
+        ]
+        all_texts = keywords + chore_texts
+        try:
+            vecs = [list(map(float, v)) for v in emb.embed(all_texts)]
+        except Exception as e:
+            logging.warning(f"semantic chore match: embed failed: {e}")
+            return []
+        kw_vecs = vecs[: len(keywords)]
+        ch_vecs = vecs[len(keywords):]
+        # BGE-small vectors are L2-normalized → dot product == cosine.
+        best_per_chore: dict[str, tuple[str, float]] = {}
+        for ci, cv in enumerate(ch_vecs):
+            best = 0.0
+            for kv in kw_vecs:
+                s = 0.0
+                for a, b in zip(kv, cv):
+                    s += a * b
+                if s > best:
+                    best = s
+            if best >= SEMANTIC_MATCH_THRESHOLD:
+                best_per_chore[chores[ci]["id"]] = (chores[ci]["title"], best)
+        ranked = sorted(
+            ((cid, t, s) for cid, (t, s) in best_per_chore.items()),
+            key=lambda x: x[2],
+            reverse=True,
+        )
+        return ranked[:SEMANTIC_MATCH_TOP_K]
+
+    try:
+        return await asyncio.to_thread(_compute)
+    except Exception as e:
+        logging.warning(f"semantic chore match: thread failed: {e}")
+        return []
 
 
 async def _resolve_chore_match_ids(
@@ -1621,6 +1690,7 @@ __all__ = [
     "SEMANTIC_MATCH_TOP_K",
     "_split_match_keywords",
     "_parse_chores_from_facts",
+    "_semantic_match_chores",
     "_resolve_chore_match_ids",
     "_validate_tool_calls",
     "_enforce_assignment_policy",

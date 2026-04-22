@@ -574,64 +574,18 @@ from agents.chore_agent import (
 )
 
 
+# _semantic_match_chores has moved to agents/chore_agent.py. The function
+# there takes `get_embedder` as a callable so it doesn't back-edge into
+# main; this shim binds _get_embedder (the fastembed singleton, also used
+# by /v1/embed) and forwards.
+from agents.chore_agent import _semantic_match_chores as _chore_semantic_match_chores
+
+
 async def _semantic_match_chores(
     keywords: list[str],
     chores: list[dict[str, str]],
 ) -> list[tuple[str, str, float]]:
-    """Find chores semantically similar to any of the given keywords.
-
-    Returns (id, title, best_similarity) triples, deduped by id, sorted by
-    similarity descending, capped at SEMANTIC_MATCH_TOP_K. Runs the embedder
-    in a thread so the event loop isn't blocked by the model load on first
-    call (~1-2s) or per-call inference (~10-50ms for ~30 short texts).
-    """
-    if not keywords or not chores:
-        return []
-
-    def _compute() -> list[tuple[str, str, float]]:
-        try:
-            emb = _get_embedder()
-        except Exception as e:
-            logging.warning(f"semantic chore match: embedder unavailable: {e}")
-            return []
-        if emb is None:
-            return []
-        chore_texts = [
-            ((c["title"] + ". " + c["description"]).strip(". ")) or c["title"]
-            for c in chores
-        ]
-        all_texts = keywords + chore_texts
-        try:
-            vecs = [list(map(float, v)) for v in emb.embed(all_texts)]
-        except Exception as e:
-            logging.warning(f"semantic chore match: embed failed: {e}")
-            return []
-        kw_vecs = vecs[: len(keywords)]
-        ch_vecs = vecs[len(keywords):]
-        # BGE-small vectors are L2-normalized → dot product == cosine.
-        best_per_chore: dict[str, tuple[str, float]] = {}
-        for ci, cv in enumerate(ch_vecs):
-            best = 0.0
-            for kv in kw_vecs:
-                s = 0.0
-                for a, b in zip(kv, cv):
-                    s += a * b
-                if s > best:
-                    best = s
-            if best >= SEMANTIC_MATCH_THRESHOLD:
-                best_per_chore[chores[ci]["id"]] = (chores[ci]["title"], best)
-        ranked = sorted(
-            ((cid, t, s) for cid, (t, s) in best_per_chore.items()),
-            key=lambda x: x[2],
-            reverse=True,
-        )
-        return ranked[:SEMANTIC_MATCH_TOP_K]
-
-    try:
-        return await asyncio.to_thread(_compute)
-    except Exception as e:
-        logging.warning(f"semantic chore match: thread failed: {e}")
-        return []
+    return await _chore_semantic_match_chores(keywords, chores, _get_embedder)
 
 
 # _resolve_supabase_rest + _fetch_chores_by_ids have moved to
