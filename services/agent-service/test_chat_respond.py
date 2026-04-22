@@ -327,6 +327,56 @@ class ChatRespondPlanPreviewTests(unittest.TestCase):
         )
 
 
+class ChatRespondAnalyticsShortcutTests(unittest.TestCase):
+    """Commit 6a: the "How many unassigned chores?" deterministic shortcut
+    now dispatches through ChoreAgent.try_analytics_shortcut() before
+    falling through to the legacy chain. Verifies: the shortcut fires for
+    the right user text, the edge function is called with the
+    count_chores RPC shape, and the response text matches the preserved
+    legacy wording ("Total unassigned tasks: N.")."""
+
+    def setUp(self):
+        self.client = TestClient(agent_main.app)
+        orch_state.pending_confirmations.clear()
+        orch_state.pending_clarifications.clear()
+        orch_state.clarification_counts.clear()
+        # Reset the lazy ChoreAgent singleton so mocks take effect even if
+        # a previous test created it with an unpatched edge function.
+        agent_main._chore_agent_instance = None
+
+    def test_unassigned_count_routes_through_chore_agent(self):
+        edge_calls: list[dict[str, Any]] = []
+
+        async def capture_edge(payload, *, user_id):
+            edge_calls.append(payload)
+            return {"ok": True, "result": {"chore_count": 7}}
+
+        conv_id = "test-conv-analytics-unassigned"
+        with patch.object(agent_main, "_edge_execute_tools", side_effect=capture_edge), \
+             patch.object(agent_main, "_build_facts_section", side_effect=_fake_build_facts_empty), \
+             patch.object(agent_main, "_sarvam_chat", side_effect=_fake_sarvam_final_text):
+            res = _post_respond(
+                self.client,
+                user_text="How many unassigned chores are there?",
+                conversation_id=conv_id,
+            )
+
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIs(body.get("ok"), True)
+        # Wording preserved byte-for-byte from the pre-migration handler.
+        self.assertEqual(body.get("text"), "Total unassigned tasks: 7.")
+        # The count_chores RPC was called with the unassigned=True filter.
+        self.assertEqual(len(edge_calls), 1, "expected exactly one edge call for the shortcut")
+        tc = edge_calls[0].get("tool_call") or {}
+        self.assertEqual(tc.get("tool"), "query.rpc")
+        self.assertEqual(tc.get("args", {}).get("name"), "count_chores")
+        self.assertEqual(
+            tc.get("args", {}).get("params", {}).get("p_filters", {}).get("unassigned"),
+            True,
+        )
+
+
 class ChatRespondSummarizerPathTests(unittest.TestCase):
     """Gap 1: exercise summarize_history_if_needed under char-budget pressure.
 

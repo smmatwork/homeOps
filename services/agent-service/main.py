@@ -582,6 +582,26 @@ def _get_helper_agent():
     return _helper_agent_instance
 
 
+# ChoreAgent follows the same lazy-init pattern as HelperAgent so forward
+# references to _sarvam_chat / _edge_execute_tools (defined later via the
+# kernel imports) resolve at first call.
+_chore_agent_instance = None
+
+
+def _get_chore_agent():
+    global _chore_agent_instance
+    if _chore_agent_instance is None:
+        from agents.chore_agent import ChoreAgent
+        _chore_agent_instance = ChoreAgent(
+            chat_fn=_sarvam_chat,
+            edge_execute_tools=_edge_execute_tools,
+            extract_json_candidate=_extract_json_candidate,
+            safe_json_loads=_safe_json_loads,
+            validate_tool_calls_list=_validate_tool_calls_list,
+        )
+    return _chore_agent_instance
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Agent Hardening: Intent classifier, FACTS injection, output validation,
 # LLM-as-Judge guardrail.
@@ -602,7 +622,7 @@ from orchestrator.intent import (
     extract_structured_intent,
     intent_specific_instruction,
 )
-from agents import HelperAgent
+from agents import AgentContext, HelperAgent
 from agents.chore_agent import (
     _wants_unassigned_count,
     _extract_count_assigned_to_name,
@@ -2489,46 +2509,36 @@ async def chat_respond(
             
             return _lf_return({"ok": True, "text": f"Unexpected error while counting chores assigned to {helper_name}."})
 
-        # Deterministic analytics shortcut (manager pattern): total number of pending tasks/chores.
-        if _wants_unassigned_count(messages):
-            if not household_id:
-                return _lf_return({"ok": True, "text": "I need your household context to look up chores. Please reconnect your home and try again."})
-            if not user_id:
-                return _lf_return({"ok": True, "text": "I need your user context to look up chores. Please reconnect your home and try again."})
-
-            tc = {
-                "id": f"tc_{uuid.uuid4().hex}",
-                "tool": "query.rpc",
-                "args": {"name": "count_chores", "params": {"p_filters": {"unassigned": True}}},
-                "reason": "Count unassigned chores in the household.",
-            }
-            out = await _edge_execute_tools({"household_id": household_id, "tool_call": tc}, user_id=user_id)
-            if isinstance(out, dict) and out.get("ok") is False:
-                err = out.get("error")
-                msg = err.get("message") if isinstance(err, dict) else None
-                msg2 = str(msg).strip() if isinstance(msg, str) else ""
-                if msg2:
-                    return _lf_return({"ok": True, "text": f"Tool error while counting unassigned tasks: {msg2}"})
-                return _lf_return({"ok": True, "text": "Tool error while counting unassigned tasks."})
-
-            payload = out.get("result") if isinstance(out, dict) else None
-            chore_count: Any = None
-            if isinstance(payload, dict):
-                chore_count = payload.get("chore_count")
-                if chore_count is None and isinstance(payload.get("result"), dict):
-                    chore_count = (payload.get("result") or {}).get("chore_count")
-                if chore_count is None and isinstance(payload.get("result"), list) and payload.get("result"):
-                    first = payload.get("result")[0]
-                    if isinstance(first, dict):
-                        chore_count = first.get("chore_count")
-            elif isinstance(payload, list) and payload:
-                first = payload[0]
-                if isinstance(first, dict):
-                    chore_count = first.get("chore_count")
-
-            if isinstance(chore_count, int):
-                return _lf_return({"ok": True, "text": f"Total unassigned tasks: {chore_count}."})
-            return _lf_return({"ok": True, "text": "There was an error retrieving the number of unassigned tasks. Please try again later."})
+        # ChoreAgent analytics shortcut dispatch — this method currently
+        # absorbs only the _wants_unassigned_count handler; remaining 6
+        # shortcuts below still live in chat_respond and will migrate into
+        # ChoreAgent.try_analytics_shortcut() in follow-up commits. If the
+        # method returns kind="defer" we fall through to the legacy chain.
+        _chore_ctx = AgentContext(
+            messages=messages,
+            model=model,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            req_id=req_id,
+            conv_id=conv_id,
+            sess_id=sess_id,
+            user_id=user_id,
+            household_id=household_id,
+            pending_key=pending_key,
+            last_user_text=last_user,
+            facts_section=facts_section,
+            is_onboarding=_early_onboarding,
+            chat_fn=_sarvam_chat,
+            edge_execute_tools=_edge_execute_tools,
+            lf_span=_lf_span,
+        )
+        _chore_result = await _get_chore_agent().try_analytics_shortcut(_chore_ctx)
+        if _chore_result.kind != "defer":
+            _lf_span(
+                "orchestrator.deterministic.chore_agent_shortcut",
+                output={"agent_result_kind": _chore_result.kind},
+            )
+            return _lf_return({"ok": True, "text": _chore_result.text or ""})
 
         if _wants_total_pending_count(messages):
             if not household_id:
